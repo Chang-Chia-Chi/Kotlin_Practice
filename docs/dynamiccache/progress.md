@@ -5840,3 +5840,429 @@ same shape: the test's `when` is what forces the author of a new mutating varian
   conditional `SET`), so the `if (reply is Reply.Error || ...)` check there becomes the null. The
   replicate's `expiresAtMillis` field is the same decision as `encode`'s `now`: pass the
   coordinator's instant and the TTL travels absolute.
+
+---
+
+## T59 - Acceptance tests run on the injected clock
+
+Plan rule 1.5 at the acceptance tier. No test in the repository constructs `Clock.systemUTC()`
+or `Clock.systemDefaultZone()` any more, and the four acceptance tests no longer spin on wall
+time except where the thing being waited for is another thread that reads no clock at all.
+
+Test sources only; no production file changed. Six files, +110 / -41.
+
+### What changed, per test
+
+**`P1AcceptanceTest`** - the engine was built on `Clock.systemUTC()` and `aTtlThatFires` spun on
+`System.nanoTime()` for up to five seconds. It now holds one `MutableClock` at
+`2026-09-06T00:00:00Z` and hands the same instance to the engine *and* to the server, which is
+the shape T52 gave `DynaCacheServerTest.withServer`: the parser works out a `PX` deadline from
+the server's clock and the engine compares it against its own, so the two must be one clock.
+`aTtlThatFires` advances 201 ms past the `PX 200` and calls `engine.tick().join()` - the tick the
+server's scheduler would otherwise have run - then asserts as before. Every assertion and the
+test's name are unchanged.
+
+**`CpRoutingTest`** and **`CpSessionLifecycleTest`** - both built the AP engine on
+`Clock.systemUTC()`; the ticket names only the first, but the acceptance criterion is about every
+test, so both are on a `MutableClock` now, shared with the server as in P1. The clock never
+moves. This is safe across the CP boundary because a lease is measured on log time, which only a
+CP member's own (kit) clock moves, and `EXPIRE`'s absolute deadline is turned straight back into
+a span by `CommandDispatcher` using the same clock the parser built it from - so the AP clock and
+the CP clocks never need to agree on what the date is. Freezing it also removes a small real
+wobble: `TTL` on a 100 s reference lease used to lose the milliseconds spent between the parser
+and the dispatcher.
+
+**`P2AcceptanceTest`** - the three `ClusterNode`s take the shared `MutableClock`, so the TTL that
+crosses the quorum is measured against a "now" the test sets. The gossip wait stays (below).
+
+**`P4AcceptanceTest`** - every generation of nodes, including the single node the memory-pressure
+section builds, takes one `MutableClock` that survives the restarts as the data dirs do. Three
+changes follow from it:
+
+- `aMixedKeyspaceThroughJedis` no longer answers `System.nanoTime()`, and `everyKeyCameBack` no
+  longer subtracts the seconds spent restarting. No clock time passes across the restart, so the
+  restored TTL is asserted exactly: `assertEquals(60L, three.ttl("sess:1"))` where it used to be
+  `in 1L..(60L - spent)`.
+- the `blink` key's 300 ms deadline is reached by advancing 301 ms rather than by polling. The
+  restart now costs no clock time at all, which is what lets the test assert `blink` is *still
+  there* when the node comes back before advancing past its deadline.
+- `aTtlFiresOnAClusterNode` advances 201 ms instead of polling for up to ten seconds.
+
+The snapshot wait stays (below).
+
+**`P5AcceptanceTest`** - the three nodes take the shared `MutableClock`. P5 constructed no system
+clock, so this is not required by the acceptance criterion; it is here because
+`SET cp:counter:x 5 EX 10` was a live wall-clock dependency, and a run slow enough under CI load
+could have let that lease lapse between the `SET` and the `INCR` that reads it back. The election
+wait stays (below).
+
+### Bounded waits that remain (plan rule 1.7)
+
+Each waits for a thread that consults no clock, so there is nothing a test could advance to bring
+it forward. All three are bounded polls; none sleeps.
+
+1. `P2AcceptanceTest.gossipSeesTheDeadNode`, 30 s. Waits for **SWIM's own gossip coroutine** on
+   `Dispatchers.Default`, and the gRPC transport it probes over. `Swim` takes no `Clock` at all -
+   it counts its own gossip periods through `delay` - so a burial cannot be brought forward by
+   moving the injected clock.
+2. `P4AcceptanceTest.awaitUntil`, one remaining call ("the snapshot completed on every node"),
+   20 s. Waits for the **gRPC transport threads and each node's router coroutine** to carry the
+   Chandy-Lamport markers past the envelopes in flight. No clock is read anywhere on that path.
+3. `P5AcceptanceTest.awaitValue` in `cpLeader()`, 20 s. Waits for **MicroRaft's election timer
+   threads** on the three members. MicroRaft runs its own scheduler and takes no injected clock -
+   the same reason the CP kit's waits were recorded at T45 and T46.
+
+Already recorded elsewhere and cited rather than re-recorded: `CpTestKit.awaitApplied` and
+`ChaosDriver`'s submit deadline (T38, T43, T45, T46 deviations). Both stand unchanged.
+
+### The two flakes
+
+**`ReadRepairTest.read_repair_does_not_delay_reply`** - reproduced once here, on the first full
+reactor run of this ticket, as `IllegalStateException: no READ reached node-3` at
+`ReadRepairTest.kt:150`. It is **not** a real-time wait and not a clock read, so it is left alone
+per the ticket. `arrived()` does `repeat(10) { network.drain(); yield(); tryReceive() }` inside
+`runTest`, on a `TestDispatcher`. The READ envelope it is looking for is sent only after
+`Replication.submit(Command.Get)`'s local `engine.view` future completes, and that future
+completes on an **`ApEngine` partition executor thread**, outside the test dispatcher. `yield()`
+only reschedules within the dispatcher; it does not wait for the partition thread, so all ten
+iterations can run before the view completes. Converting it means awaiting the engine's future
+(or a real bounded wait) - a logic change, not a clock injection - so it is out of this ticket.
+
+**`CpEngineTest.C23_every_member_agrees_on_expiry_at_same_index`** - already on the injected
+clock: it drives the expiry with `kit.clock(leader).advance(Duration.ofSeconds(2))` and an
+explicit `leader.tick()`. Its only real-time wait is `CpTestKit.awaitApplied`, which polls a
+member's MicroRaft `report` until the commit index arrives, waiting on **MicroRaft's replication
+and heartbeat threads**. That is the already-recorded T45/T46 deviation and no clock advance
+reaches it. Nothing changed; it passed on every run here.
+
+### Wall time
+
+Four acceptance classes, run on their own (`-Dtest=P1,P2,P4,P5AcceptanceTest`), seconds. Two other
+Maven builds were running on the machine throughout, so run-to-run noise is roughly +/- 0.7 s on
+an 11 s total. The first baseline sample was taken under lighter load than everything after it;
+samples 2 and 3 were taken by reverting the six files in place, so they share the load of the
+"after" runs.
+
+| Run | P1 | P2 | P4 | P5 | total |
+| --- | --- | --- | --- | --- | --- |
+| before, sample 1 (light load) | 1.144 | 4.485 | 1.513 | 3.304 | 10.446 |
+| before, sample 2 | 1.627 | 4.699 | 1.939 | 3.357 | 11.622 |
+| before, sample 3 | 1.509 | 4.750 | 1.671 | 3.279 | 11.209 |
+| after, sample 1 (fresh compile) | 1.830 | 4.795 | 1.909 | 3.401 | 11.935 |
+| after, sample 2 | 1.524 | 4.724 | 1.667 | 3.372 | 11.287 |
+
+Flat within the noise: 11.21 before against 11.29 after, comparing the two samples taken under
+the same load. Inside the full reactor run, where P1 is no longer the first class to pay the JVM
+and Netty warm-up, P1 falls from about 1.5 s to 0.38 s.
+
+Suite totals unchanged, as no test was added or removed: engine 151, cluster 86, cp 92, server
+92, **421 total**, green.
+
+### Deviations
+
+1. Three bounded real-time waits remain, named above with the thread each waits for (rule 1.7).
+2. `P4AcceptanceTest` gained one assertion, `assertEquals("gone", three.get("blink"))`, against
+   the brief's "keep every assertion" (it says keep, not freeze). It is here because the frozen
+   clock is what makes "the key is still alive when the node comes back" checkable at all, and
+   without it the `assertNull` that follows would go green on a key the RDB had dropped entirely.
+3. `P4AcceptanceTest`'s restored TTL assertion was tightened from `in 1L..(60L - spent)` to
+   `assertEquals(60L, ...)`, for the same reason: the elapsed-time slack it allowed no longer
+   exists.
+4. Two tests beyond the four the ticket names were changed: `CpSessionLifecycleTest` also built
+   its AP engine on `Clock.systemUTC()`, and the acceptance criterion covers every test, so it was
+   fixed alongside `CpRoutingTest`.
+5. `P5AcceptanceTest`'s nodes were put on the injected clock although P5 constructed no system
+   clock, to remove the `EX 10` lease's dependency on how slow the machine is.
+
+---
+
+## T62 - Reply shapes and the spec ledger
+
+**Built:** four small gaps between the code and the specs closed, and the three that stay
+recorded below. Nothing new was designed; every change is a reply the spec already fixed, or a
+row the spec never asked for.
+
+`-NOTLEADER` **carries the member id alone.** `CpEngine.notLeader` wrote
+`leader is ${leader.id}`, so a client taking the first token of CP spec 6.8's `-NOTLEADER
+<hint>` read the word `leader`. It now writes `runtime.node.term.leaderEndpoint?.id`, and a
+member that knows of no leader writes no hint at all rather than a sentence a client would
+parse as an id. Nothing consumed the old wording: `ForwardingCpEngine` recognises a
+`-NOTLEADER` by its kind and rediscovers the leader through `GetInfo`, so the hint is for a
+real client, not for us.
+
+`LOCK_UNLOCK` **answers `:1` for every accepted unlock.** CP spec 3.1 makes the op an `ok:
+Bool` that "decrements reentrance; releases at 0", and 6.8 gives the rejection its own error,
+`-REENTRANCE`. The state machine already answered `-REENTRANCE` for a non-holder and `:1` for a
+release, but `:0` for a reentrant decrement -- a third answer the spec's boolean has no room
+for. A reentrant decrement is an accepted unlock, so it answers `:1` now, and `:0` is no longer
+produced by this verb at all. See deviation 3.
+
+`Command.Cp.LongDecrBy` **deleted, wire tag 6 retired.** Nothing produced the variant but the
+wire decoder: the dispatcher folds Redis's `DECRBY` into `Command.IncrBy` with a negative delta
+and then into `Command.Cp.LongIncrBy`, and the parser has no `cp.long.decrby` row, because CP
+spec 6.2 maps `INCRBY` to `ADD` and gives `DECRBY` no verb. The variant, its encoder row and
+its state-machine row are gone. The tag constant stays as `CMD_DECR_BY_RETIRED = 6` with a
+decode branch that names it, so the number is never reused and a peer replaying an old entry
+is told what it sent rather than reading "unknown tag".
+
+`EXAT`, `PXAT` **and** `PSETEX` **deleted.** No spec line asks for them: spec 2.1 gives `SET`
+the flags `NX`, `XX`, `EX` and `PX`, and the Redis-compat-for-CP set (CP spec 6.2, and 2.1's
+routing table) names `SETEX` without its millisecond twin. Nothing forwards them and the test
+kit does not reach for them -- checked by grep across all four modules before deleting -- so the
+`psetex` row, the two `SET` flags, the `TTL_FLAGS` entries and the now-dead `until(...)` helper
+T52 left behind all go. **Kept, with the reason:** `SETEX` (the CP compat set names it) and
+`PEXPIREAT` (`CommandTokens` writes every `Command.Expire` as one, since a forwarded deadline
+is an absolute instant however the client spelled it -- T16, T24; T13 deviation 3 first noted
+the row had no spec line of its own, and this is the reason it earned one).
+
+**The six missing constraint and invariant names.** Each asserts its constraint by delegating
+to the spec-named test that already covers the behaviour, so the constraint breaks the named
+test as well as the original:
+
+- `C17_fencing_tokens_never_repeat` (`FencedLockTest`) -- a successful `LOCK_TRY`'s token is
+  strictly greater than every token the key ever returned; delegates to
+  `lock_fencing_token_monotonic` (100 acquire/release cycles). The across-a-failover half of
+  C17 is `I18_lock_held_across_leader_failover` and `C17_lease_expires_after_skewed_failover`,
+  which already carried the prefix.
+- `I13_at_most_one_session_holds_a_lock` (`FencedLockTest`) -- delegates to
+  `lock_mutual_exclusion`: two sessions race, exactly one is granted and one denied.
+- `I14_a_later_acquire_gets_a_greater_token` (`FencedLockTest`) -- delegates to
+  `lock_fencing_token_monotonic`.
+- `C20_committed_cp_operations_are_linearizable` (`ChaosInvariantTest`) -- delegates to
+  `invariant_linearizable_ops(seed = 1)`: the Wing-Gong checker accepts a counter history
+  recorded across leader kills and restarts.
+- `C22_no_cross_engine_state_leakage` (`CommandDispatcherTest`) -- delegates to
+  `I22_namespaces_never_cross`: one key name written on both sides of the `cp:` boundary, each
+  engine seeing only its own.
+- `I10_the_same_script_answers_the_same_on_every_node` (`LuaTest`) -- delegates to
+  `lua_deterministic`: one script on two replicas with the same seed state, replies equal.
+
+**Concepts named:** nothing new. The only idea the ticket adds is that a **retired wire tag** is
+a constant that decodes to an error, not a hole in a `when`: the number carries meaning for as
+long as an old log entry can exist, so deleting the variant is not deleting the tag.
+
+**Acceptance:**
+- `notleader_hint_is_the_leader_id` (`CpEngineTest`): a follower's reply, and `NodeId(message)`
+  equals the leader's own id -- the whole message, not a token of it. Red first
+  (`expected: <cp1> but was: <leader is cp1>`).
+- `lock_unlock_reply_shape` (`FencedLockTest`): a lock held twice; a non-holder's unlock is
+  `-REENTRANCE`, the reentrant decrement is `:1` and `LOCK_STATE` still shows the holder with
+  one hold, the release is `:1`, and the lock is then unowned. Red first
+  (`expected: <Integer(value=1)> but was: <Integer(value=0)>`).
+- `lock_reentrant_same_session` keeps its name and now expects `:1` for the decrement.
+- `the_retired_decrby_tag_is_refused` (`CpWireTest`): an `ADD` encoding with its first byte set
+  to 6 throws, and the message names both the tag and `DECRBY`. Red first (nothing was thrown).
+- `EXAT PXAT and PSETEX are not commands here` (`CommandParserTest`): the two flags are a syntax
+  error, `psetex` is Redis's unknown-command reply word for word, and `PEXPIREAT` still parses.
+  Red first (the parse succeeded).
+- `C17_`, `C20_`, `C22_`, `I10_`, `I13_`, `I14_` as listed above, all green.
+- `mvn -o test -pl dynacache-server -am`: engine 151, cluster 86, cp 92 -> 99, server 92 -> 95.
+  Every earlier test green. (The brief's baseline of `cp 92, server 97` was right for cp and
+  stale for the server module, whose true baseline is 92, the number T58 recorded.)
+- This entry.
+
+**Deviations:** Six. The first three are the ledger entries the ticket asks for.
+
+1. **`-CAPACITY` is not built.** CP spec 6.8 lists `-CAPACITY` ("state machine at max-entries
+   cap") among the new RESP error prefixes, and no state machine has a cap: `AtomicLong`,
+   `FencedLock`, `Semaphore`, `CountDownLatch`, `AtomicReference` and `SessionRegistry` all grow
+   with the keys the log gives them, bounded only by the snapshot size and the heap. The error
+   string appears nowhere in the source. Building the cap is not this ticket's (it needs a
+   per-state-machine limit, a place to configure it, and a decision about what happens to an
+   entry already committed when the cap is hit -- a Raft-level question, since refusing at apply
+   time must be deterministic on every member). Recorded here so the next reader finds it named
+   rather than missing.
+
+2. **A fanned command inside a batch is refused even when its keys share the partition.** In
+   `ApEngine`'s `Batch` context, `Command.Keyed` runs when the batch declared its key and
+   everything else falls to `Reply.Error("ERR", "this command spans partitions and cannot run
+   inside a batch")`. `Command.Fanned` -- `MGET`, `MSET`, multi-key `DEL` and `EXISTS` -- is in
+   that "everything else", by definition rather than by measurement: the refusal does not look
+   at the keys. So `MULTI; MGET {t}.a {t}.b; EXEC` on two hash-tagged keys, which land on the
+   one declared partition and which spec 2.2's "atomicity across keys requires a batch with hash
+   tags" invites, is refused here and answered by Redis. T14 describes the rule; it was never
+   recorded as a divergence from Redis, and it is one. The repair is one branch -- a `Fanned`
+   whose every key is in `declared` runs key by key on this partition -- and it is a batch
+   semantics change, which this ticket's seams exclude.
+
+3. **The reentrancy reply shape, where CP spec 6.1 is ambiguous.** 6.1's table gives
+   `CP.LOCK.UNLOCK` the replies `:1` / `:0`, while 3.1 makes the op an `ok: Bool` that "rejects
+   if session/token mismatch" and 6.8 gives that rejection `-REENTRANCE`. Read together, `:0`
+   is the rejection 6.8 turned into an error, and the spec never says what a reentrant decrement
+   answers. Decided, per the ticket: every accepted unlock answers `:1`, released or not, and
+   `:0` is unreachable from this verb. A client that must know whether it still holds the lock
+   reads `CP.LOCK.STATE`'s reentrance count, which 6.1 already gives it. Redis has no
+   `LOCK.UNLOCK`, so there is no Redis behaviour to diverge from.
+
+4. **`-NOTLEADER` with no hint has a trailing space on the wire.** `RespEncoder` writes
+   `"-" + kind + " " + message`, so a member that knows of no leader sends `-NOTLEADER ` rather
+   than `-NOTLEADER`. It decodes back to the same `Reply.Error` either way and Redis clients
+   split on the first space, so this is cosmetic; fixing it means touching the encoder for every
+   error, which is outside this ticket.
+
+5. **`ChaosDriver` reads the lock owner back after an accepted unlock.** Changing the reply
+   broke `invariant_mutual_exclusion_under_chaos` and
+   `invariant_fencing_token_monotonic_under_chaos`, and the failure was not the reply: the
+   driver retries a `LockTry` after a lost reply (at-least-once, as `ForwardingCpEngine`'s own
+   note says), so a retry can take a second reentrant hold the driver never saw. The old `:0`
+   hid that -- the driver kept believing the lock held -- and `:1` exposed it as "denied to 4 but
+   belief says null". The driver now reads the new owner from `LOCK_STATE` after an accepted
+   unlock instead of guessing it from the reply, which is exact whatever the retries did.
+   Confirmed against a clean checkout of the base commit that the two tests were green before
+   the reply change, so this is a driver model that was always approximate, not a new bug.
+
+6. **Size:** 159 lines added against 64 deleted across sixteen files, inside the 200-to-600
+   budget. Two other things the ticket names were deliberately not touched: the AP engine, and
+   the dispatcher's routing.
+
+**For the next ticket:** the deviation-2 branch is the smallest real gap left in the batch path,
+and it is testable without a cluster: `ApEngine.atomically` with two hash-tagged keys and an
+`MGET` over both. Whoever takes it should note that `Batch.execute`'s `else` is currently doing
+two jobs -- refusing what spans partitions and refusing what this partition cannot interpret --
+and only the first is about keys.
+
+---
+
+## T69 - CP primitives tested at the state machine, without Raft
+
+The five primitive suites (lock, session, semaphore, latch, reference) no longer start a Raft
+member. Each drives the composite `CpStateMachine` directly through one small test fixture,
+`Primitives`, and the tests that genuinely need a log moved to three clearly named kit-backed
+classes. No production file changed: the seam was already there, in `CpStateMachine.runOperation`
+taking a stamped `CpOp`, so the ticket's "small test-facing constructor or entry point on
+`CpStateMachine`" allowance was not needed.
+
+### The fixture's interface
+
+`DynaCache/dynacache-cp/src/test/kotlin/dynacache/cp/Primitives.kt`, 53 lines, no production
+dependency beyond the state machine and the engine test kit's `MutableClock`:
+
+- `apply(command: Command.Cp): Reply` - stamps the command the way `RaftRuntime.stamp` does
+  (`max(clock now, last applied ts + 1, last stamped + 1)`, CP spec 5) and applies it, answering
+  the composite's reply.
+- `advance(by: Duration)` - moves the fixture's clock; no entry carries the new time until the
+  next `apply` or `tick`.
+- `tick(after: Duration = ZERO)` - advances, then appends what a leader appends when the group is
+  idle: one `TtlTick`, then one `SessionClosed` per session `lapsedSessions()` reports. This is
+  the same order `RaftRuntime.tick` uses, so a lease or a session expires here exactly as it does
+  on a real leader.
+
+The stamp rule is what lets the moved assertions stay verbatim: with the clock standing still a
+stamp climbs by one millisecond per entry, in the fixture as in a group, so `remaining =
+LEASE.toMillis() - 2` still means "two entries after the TRY". The fixture starts on the kit's
+epoch (2026-09-06T00:00:00Z) for the same reason - a stamp printed by a failing assertion means
+the same in both worlds.
+
+### Moved to the state machine (25 tests, 5 suites, no Raft member)
+
+- `FencedLockTest` (9): `lock_try_acquire_release_roundtrip`, `lock_fencing_token_monotonic`,
+  `lock_reentrant_same_session`, `lock_unlock_wrong_session_rejected`,
+  `lock_unlock_wrong_token_rejected`, `lock_ttl_expires` (CP spec 10.1), `lock_ttl_renew`,
+  `lock_renew_by_non_holder_rejected`, `lock_force_unlock_overrides`.
+- `SessionTest` (5): `session_create_heartbeat_close`, `session_op_without_session_rejected`
+  (10.6), `session_timeout_closes` (10.6), `session_heartbeat_keeps_alive`, and one new test,
+  below.
+- `SemaphoreTest` (6): `sem_init_acquire_release`, `sem_over_acquire_fails`,
+  `sem_over_release_rejected`, `sem_session_death_releases`, `sem_drain`,
+  `sem_drain_of_unknown_key_leaves_it_initialisable`.
+- `CountDownLatchTest` (3): `latch_set_down_get`, `latch_down_at_zero_stays_zero`,
+  `latch_reset_only_at_zero`.
+- `AtomicReferenceTest` (3): `ref_set_get_roundtrip`, `ref_cas_byte_equality`, `ref_ttl_expires`.
+
+Every spec-named test kept its name verbatim.
+
+### New (1 test)
+
+`SessionTest.C18_close_releases_every_lock_and_permit_in_one_entry` - the direct session-close
+cascade the ticket asks for (C18, I15): one session holds two locks and two semaphore permits,
+and the single applied `SESSION_CLOSE` entry gives back all three. The kit could only ever show
+this as a commit-index count; at the state machine the "one entry" claim is the assertion itself,
+and it is the only test covering the semaphore leg of the CLOSE path (the lapse leg was already
+covered by `sem_session_death_releases`).
+
+### Kept on the kit (12 tests, 3 new classes)
+
+- `FencedLockFailoverTest` (4), from `FencedLockTest`: `cp_leader_failover_preserves_state`
+  (10.7), `I18_lock_held_across_leader_failover`,
+  `I19_lease_expires_late_never_early_across_failover`,
+  `C17_lease_expires_after_skewed_failover` (the T50 skew case). A lock across a leader change is
+  a fact about the log, not about the primitive.
+- `SessionLogTest` (3), from `SessionTest`: `I15_no_lock_owned_after_session_closed_index`
+  (asserts the index the close landed on and that two members applied it),
+  `C18_release_is_one_log_entry` (asserts the commit index moved by exactly one),
+  `C18_session_lapses_after_skewed_failover` (the T50 skew case, a lapse on a successor's own
+  idle ticks).
+- `CpConcurrencyTest` (5), one from each of four suites: `lock_mutual_exclusion` (I13),
+  `sem_concurrent_acquire_exactly_permits_succeed`, `latch_concurrent_down_correct_count`,
+  `ref_concurrent_cas_exactly_one_wins`, `I21_concurrent_cas_exactly_one_wins`. What these test
+  is that the log puts simultaneous clients in an order; applied one at a time to a state machine
+  they would assert nothing. The four private `race` helpers they used to carry are now one.
+
+`CpEngineTest`, `CpSnapshotTest`, `ChaosInvariantTest`, `CpWireTest` and `GrpcCpTest` are
+untouched.
+
+### Wall time (surefire `time`, same machine, three other Maven builds running alongside)
+
+The five primitive suites:
+
+| suite | before | after |
+| --- | --- | --- |
+| FencedLockTest | 6.043 s | 0.012 s |
+| SessionTest | 1.257 s | 0.016 s |
+| AtomicReferenceTest | 0.160 s | 0.094 s |
+| SemaphoreTest | 0.032 s | 0.011 s |
+| CountDownLatchTest | 0.029 s | 0.015 s |
+| **total** | **7.521 s** | **0.148 s** |
+
+Under the one-second acceptance bar by a factor of about fifty. The three new kit-backed classes
+carry the elections that used to sit inside the primitive suites: `FencedLockFailoverTest`
+5.332 s, `SessionLogTest` 1.481 s, `CpConcurrencyTest` 0.154 s. The point of the ticket was never
+the total, which is roughly unchanged; it is that a primitive-semantics test now costs
+milliseconds and a reader can see at a glance which twelve tests need a log.
+
+`mvn test -pl dynacache-cp -am` is green: engine 151, cluster 86, cp 96. The brief's expected
+base of engine 148 and cluster 84 is stale for those two modules, which this ticket does not
+touch; cp is the 95 the brief named, plus the one new cascade test.
+
+### Red before green
+
+The moved tests were checked against two deliberate mutations of production code, then reverted:
+
+- `FencedLockStateMachine.Lock.at(now)` made to never expire a lease - `lock_ttl_expires` failed.
+- `CpStateMachine.closeSession` made to skip `semaphores.releaseAllOf(session)` -
+  `sem_session_death_releases` and `C18_close_releases_every_lock_and_permit_in_one_entry`
+  failed.
+
+Three failures out of the 26 tests then in the five direct suites, each the test that should
+notice. `session_timeout_closes` correctly did not fail on the lease mutation: the lock it checks
+is released by the session cascade, not by lease expiry.
+
+### Deviations
+
+- **No production entry point added.** The ticket allowed a small test-facing constructor or
+  entry point on `CpStateMachine`; none was needed, since `runOperation(commitIndex, CpOp)` is
+  already public and already the seam. Zero production lines changed.
+- **A third kit-backed class.** The ticket named the failover cases; the concurrency races needed
+  a home too, since they test the log rather than a primitive. `CpConcurrencyTest` is that home.
+- **`lock_mutual_exclusion` now races through one shared helper** rather than two hand-written
+  `submit` calls. Same assertions, same property, one fewer bespoke fixture.
+- **Net diff +141 lines** (95 added and 397 removed across the five suites, 443 added in the four
+  new files), against a 200-600 budget. A move of five suites is mostly deletion; the raw diff is
+  935 lines touched. Test count in `dynacache-cp` rises by one, from 95 to 96, for the new C18
+  cascade test.
+- **Merge with T62 expected.** T62 edits `FencedLockStateMachine` (the UNLOCK reply) and
+  `FencedLockTest` in parallel. The unlock assertions were carried over verbatim into the new
+  `FencedLockTest` and `FencedLockFailoverTest`, so the conflict is a move, not a rewrite: T62's
+  changed expectations land on whichever of the two files now holds each test.
+
+### For the next ticket (T70, each CP primitive owns its snapshot bytes)
+
+- `Primitives` gives T70 a snapshot round trip with no group: build state through `apply`, take
+  `CpStateMachine.state`, restore into a second machine, compare. Only
+  `cp_snapshot_install_preserves_tokens_and_sessions` and the install-through-Raft cases need
+  `CpSnapshotTest` and the kit.
+- `CpStateMachine.takeSnapshot`/`installSnapshot` and the `Snapshot` data class are unchanged by
+  this ticket, so T70 starts from the shape recorded in the spec (10.7).
+- The fixture deliberately exposes no accessor for the state machine itself. T70 will want one
+  (to read `state` and to install a snapshot); adding a single `val stateMachine` to `Primitives`
+  is the smallest change, and was left out here under YAGNI rather than guessed at.

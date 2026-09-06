@@ -7,6 +7,8 @@ import io.microraft.model.message.InstallSnapshotRequest
 import io.microraft.model.message.InstallSnapshotResponse
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
 
@@ -110,6 +112,23 @@ class CpWireTest {
         ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
     }
 
+    /**
+     * Tag 6 was `DECRBY`, a command variant nothing but this decoder ever produced -- the
+     * dispatcher folds Redis's `DECRBY` into an `ADD` with a negative delta (CP spec 6.2, which
+     * gives `INCRBY` a verb and `DECRBY` none). T62 deleted it and retired the number rather
+     * than reusing it, so a peer still holding an old log entry is told what it sent.
+     */
+    @Test
+    fun the_retired_decrby_tag_is_refused() {
+        val encoded = CpWire.encode(Command.Cp.LongIncrBy(Key("cp:counter:c"), 4))
+        encoded[0] = RETIRED_DECR_BY_TAG
+
+        val refused = assertThrows(IllegalStateException::class.java) { CpWire.decodeCommand(encoded) }
+
+        assertTrue(refused.message.orEmpty().contains("$RETIRED_DECR_BY_TAG"), "names the tag: ${refused.message}")
+        assertTrue(refused.message.orEmpty().contains("DECRBY"), "names the command: ${refused.message}")
+    }
+
     @Test
     fun semaphore_commands_round_trip() {
         val key = Key("cp:sem:s")
@@ -171,5 +190,10 @@ class CpWireTest {
     @Test
     fun new_term_round_trips() {
         assertEquals(NewTerm(3), roundTrip(NewTerm(3)))
+    }
+
+    private companion object {
+        /** The first byte of an encoded command is its tag; 6 is the one T62 retired. */
+        const val RETIRED_DECR_BY_TAG: Byte = 6
     }
 }

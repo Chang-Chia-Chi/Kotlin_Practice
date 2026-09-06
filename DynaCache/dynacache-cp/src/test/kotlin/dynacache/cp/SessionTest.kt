@@ -1,37 +1,30 @@
 package dynacache.cp
 
-import dynacache.cluster.NodeId
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
-import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Test
 import java.time.Duration
-import java.util.concurrent.TimeUnit.SECONDS
 
 /**
- * Sessions (CP spec 4, 9.3) through the CP engine's seam: the registry, the heartbeat that keeps
- * one alive on log time, and the one entry that ends it and releases what it held (C18, I15).
+ * Sessions (CP spec 4, 9.3) at the state machine: the registry, the heartbeat that keeps one alive
+ * on log time, and the one entry that ends it and releases what it held (C18, I15). What the log
+ * itself has to show — which index the close landed on, and a lapse on a successor's own ticks —
+ * is [SessionLogTest].
  */
 class SessionTest {
 
-    private val kit = CpTestKit()
+    private val cp = Primitives()
     private val lock = Key("cp:lock:l")
     private val other = Key("cp:lock:m")
+    private val sem = Key("cp:sem:s")
 
-    @AfterEach
-    fun tearDown() = kit.close()
+    private fun create(timeout: Duration = TIMEOUT) = (cp.apply(Command.Cp.SessionCreate(timeout)) as Reply.Integer).value
 
-    private fun submit(command: Command): Reply =
-        kit.leaderEngine().submit(command).get(REPLY_TIMEOUT_SECS, SECONDS)
+    private fun tryLock(session: Long, key: Key = lock) = cp.apply(Command.Cp.LockTry(key, session, LEASE))
 
-    private fun create(timeout: Duration = TIMEOUT) = (submit(Command.Cp.SessionCreate(timeout)) as Reply.Integer).value
-
-    private fun tryLock(session: Long, key: Key = lock) = submit(Command.Cp.LockTry(key, session, LEASE))
-
-    private fun state(key: Key = lock) = submit(Command.Cp.LockState(key))
+    private fun state(key: Key = lock) = cp.apply(Command.Cp.LockState(key))
 
     private fun unowned(token: Long) = Reply.Array(listOf(Reply.Bulk(null), Reply.Integer(token), Reply.Integer(0), Reply.Integer(0)))
 
@@ -41,11 +34,11 @@ class SessionTest {
 
     @Test
     fun session_create_heartbeat_close() {
-        assertEquals(Reply.Integer(1), submit(Command.Cp.SessionCreate(TIMEOUT)))
-        assertEquals(Reply.Integer(2), submit(Command.Cp.SessionCreate(TIMEOUT)), "ids climb")
-        assertEquals(Reply.Simple("OK"), submit(Command.Cp.SessionHeartbeat(1)))
-        assertEquals(Reply.Simple("OK"), submit(Command.Cp.SessionClose(1)))
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.SessionHeartbeat(1))), "closed is gone")
+        assertEquals(Reply.Integer(1), cp.apply(Command.Cp.SessionCreate(TIMEOUT)))
+        assertEquals(Reply.Integer(2), cp.apply(Command.Cp.SessionCreate(TIMEOUT)), "ids climb")
+        assertEquals(Reply.Simple("OK"), cp.apply(Command.Cp.SessionHeartbeat(1)))
+        assertEquals(Reply.Simple("OK"), cp.apply(Command.Cp.SessionClose(1)))
+        assertEquals("NOSESSION", kindOf(cp.apply(Command.Cp.SessionHeartbeat(1))), "closed is gone")
     }
 
     /** CP spec 10.6, 6.8: a lock verb on behalf of a session that expired or never existed. */
@@ -55,121 +48,59 @@ class SessionTest {
         assertEquals(unowned(token = 0), state(), "nothing was granted")
 
         val session = create()
-        assertEquals(Reply.Simple("OK"), submit(Command.Cp.SessionClose(session)))
+        assertEquals(Reply.Simple("OK"), cp.apply(Command.Cp.SessionClose(session)))
 
         assertEquals("NOSESSION", kindOf(tryLock(session)), "closed")
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockUnlock(lock, session, token = 1))))
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockRenew(lock, session, token = 1, lease = LEASE))))
+        assertEquals("NOSESSION", kindOf(cp.apply(Command.Cp.LockUnlock(lock, session, token = 1))))
+        assertEquals("NOSESSION", kindOf(cp.apply(Command.Cp.LockRenew(lock, session, token = 1, lease = LEASE))))
     }
 
-    /** CP spec 10.6: "wait > timeout" is the leader's clock moving and a tick carrying it into the log. */
+    /** CP spec 10.6: "wait > timeout" is the clock moving and a tick carrying it into the log. */
     @Test
     fun session_timeout_closes() {
-        val leader = kit.leader()
         val session = create(timeout = Duration.ofSeconds(1))
         assertEquals(granted(1), tryLock(session))
 
-        kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
-        leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+        cp.tick(after = Duration.ofSeconds(2))
 
         assertEquals(unowned(token = 1), state(), "released with the session")
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.SessionHeartbeat(session))), "the session is gone")
+        assertEquals("NOSESSION", kindOf(cp.apply(Command.Cp.SessionHeartbeat(session))), "the session is gone")
     }
 
     /** A heartbeat restarts the timeout from its own entry's log time, so a chatty session outlives it. */
     @Test
     fun session_heartbeat_keeps_alive() {
-        val leader = kit.leader()
         val session = create(timeout = Duration.ofSeconds(1))
         assertEquals(granted(1), tryLock(session))
 
-        kit.clock(leader.config.nodeId).advance(Duration.ofMillis(600))
-        assertEquals(Reply.Simple("OK"), submit(Command.Cp.SessionHeartbeat(session)))
-        kit.clock(leader.config.nodeId).advance(Duration.ofMillis(600))
-        leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+        cp.advance(Duration.ofMillis(600))
+        assertEquals(Reply.Simple("OK"), cp.apply(Command.Cp.SessionHeartbeat(session)))
+        cp.tick(after = Duration.ofMillis(600))
 
         assertEquals(session, ((state() as Reply.Array).items[0] as Reply.Integer).value, "still held")
     }
 
     /**
-     * I15: the tick's completion names the index of the `SESSION_CLOSED` entry, the one right after
-     * the tick; once two members have applied it, STATE on each shows no lock owned by the session.
+     * C18, I15: everything one session holds — two locks and its permits — is released by applying
+     * its CLOSE, in that single entry, so no member ever sees the session half torn down.
      */
     @Test
-    fun I15_no_lock_owned_after_session_closed_index() {
-        val leader = kit.leader()
-        val session = create(timeout = Duration.ofSeconds(1))
-        assertEquals(granted(1), tryLock(session, lock))
-        assertEquals(granted(1), tryLock(session, other))
-        val before = commitIndex()
-
-        kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
-        val closedIndex = leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
-
-        assertEquals(before + 2, closedIndex, "the tick, then one SESSION_CLOSED")
-        val members = listOf(leader.config.nodeId, kit.live().first { it != leader.config.nodeId })
-        members.forEach { member ->
-            kit.awaitApplied(member, closedIndex)
-            assertEquals(unowned(token = 1), stateOn(member, lock), "$member")
-            assertEquals(unowned(token = 1), stateOn(member, other), "$member")
-        }
-    }
-
-    /** C18: two locks held by one session are released by its CLOSE, one committed entry, no partial state. */
-    @Test
-    fun C18_release_is_one_log_entry() {
+    fun C18_close_releases_every_lock_and_permit_in_one_entry() {
         val session = create()
         assertEquals(granted(1), tryLock(session, lock))
         assertEquals(granted(1), tryLock(session, other))
-        assertEquals(session, ((state(other) as Reply.Array).items[0] as Reply.Integer).value)
-        val before = commitIndex()
+        assertEquals(Reply.Simple("OK"), cp.apply(Command.Cp.SemInit(sem, permits = 5)))
+        assertEquals(Reply.Integer(1), cp.apply(Command.Cp.SemAcquire(sem, session, permits = 2)))
 
-        assertEquals(Reply.Simple("OK"), submit(Command.Cp.SessionClose(session)))
+        assertEquals(Reply.Simple("OK"), cp.apply(Command.Cp.SessionClose(session)))
 
-        assertEquals(before + 1, commitIndex(), "the CLOSE is the only entry")
         assertEquals(unowned(token = 1), state(lock))
         assertEquals(unowned(token = 1), state(other))
+        assertEquals(Reply.Integer(5), cp.apply(Command.Cp.SemAvailable(sem)), "its permits came back too")
     }
-
-    /**
-     * C18, I19: the old leader's clock ran 30 s ahead of its successor's. A session with a
-     * one-second timeout whose heartbeat stops lapses on the successor's idle ticks alone, one
-     * second of the successor's own clock later, and the lock it held is released with it.
-     */
-    @Test
-    fun C18_session_lapses_after_skewed_failover() {
-        val old = kit.leader()
-        kit.clock(old.config.nodeId).advance(SKEW)
-        val session = create(timeout = Duration.ofSeconds(1))
-        assertEquals(granted(1), tryLock(session))
-
-        kit.killMember(old.config.nodeId)
-        val successor = kit.leader()
-        val interval = successor.config.tickInterval
-        fun idleTick(): Long {
-            kit.clock(successor.config.nodeId).advance(interval)
-            return successor.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
-        }
-        val ticksInTimeout = (Duration.ofSeconds(1).toMillis() / interval.toMillis()).toInt()
-
-        repeat(ticksInTimeout - 1) { assertNotEquals(0L, idleTick(), "every idle interval appends a tick") }
-        assertEquals(session, ((stateOn(successor.config.nodeId, lock) as Reply.Array).items[0] as Reply.Integer).value, "held one interval short of the timeout")
-        assertNotEquals(0L, idleTick(), "the tick whose SESSION_CLOSED ends the session")
-        assertEquals(unowned(token = 1), stateOn(successor.config.nodeId, lock), "released by the tick's SESSION_CLOSED, no user command in between")
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.SessionHeartbeat(session))), "the session is gone")
-    }
-
-    private fun commitIndex(): Long =
-        kit.leader().node.getReport().get(REPLY_TIMEOUT_SECS, SECONDS).result.log.commitIndex
-
-    /** STATE as [member] sees it at its own applied index; a follower cannot answer through its engine. */
-    private fun stateOn(member: NodeId, key: Key): Reply =
-        kit.runtime(member).stateMachine.let { it.locks.apply(Command.Cp.LockState(key), it.lastAppliedTs) }
 
     private companion object {
-        const val REPLY_TIMEOUT_SECS = 10L
         val TIMEOUT: Duration = Duration.ofSeconds(15)
         val LEASE: Duration = Duration.ofSeconds(30)
-        val SKEW: Duration = Duration.ofSeconds(30)
     }
 }

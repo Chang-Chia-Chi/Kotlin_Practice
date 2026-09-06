@@ -5,6 +5,7 @@ import dynacache.cluster.NodeId
 import dynacache.cluster.ReplicationConfig
 import dynacache.engine.EvictionPolicy
 import dynacache.engine.persist.FsyncPolicy
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -16,6 +17,7 @@ import redis.clients.jedis.params.SetParams
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -29,7 +31,10 @@ import kotlin.time.Duration.Companion.milliseconds
  * [ClusterNode] (see [ClusterNode.snapshot]) rather than an admin verb -- an operator's control,
  * not a client's.
  *
- * Real time, so every wait is a poll to a deadline and there is no sleep anywhere.
+ * Every generation of nodes reads one clock the test owns (plan rule 1.5), so a TTL falls due
+ * because this test moved time and not because the machine took a while: a restart costs no clock
+ * time at all, which is what makes the restored deadline a real assertion. The one wait left is
+ * for the snapshot set's own threads, which no clock advance can bring forward.
  */
 class P4AcceptanceTest {
 
@@ -37,6 +42,9 @@ class P4AcceptanceTest {
     lateinit var tmp: Path
 
     private val ids = List(3) { NodeId("node-${it + 1}") }
+
+    /** The one clock every generation of nodes reads, surviving the restarts as the data dirs do. */
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
 
     /** One map every generation of nodes reads at send time; a restart overwrites its own row. */
     private val addresses = ConcurrentHashMap<NodeId, HostPort>()
@@ -55,11 +63,11 @@ class P4AcceptanceTest {
     @Test
     fun P4_acceptance_success_signal() {
         startCluster(dataDirs)
-        val writtenAt = aMixedKeyspaceThroughJedis()
+        aMixedKeyspaceThroughJedis()
         stopCluster()
 
         startCluster(dataDirs)
-        everyKeyCameBack(writtenAt)
+        everyKeyCameBack()
         aTtlFiresOnAClusterNode()
 
         aSnapshotWhileJedisKeepsWriting()
@@ -77,10 +85,10 @@ class P4AcceptanceTest {
 
     /**
      * Spec 9's keyspace, one type per key, written through node-1 and read back through node-3 so
-     * the quorum carries every type and not just the strings P2 wrote. Answers the instant the
-     * TTL'd key was written, so the assertion after the restart can say what is left of it.
+     * the quorum carries every type and not just the strings P2 wrote. The clock does not move
+     * while this runs, so the assertion after the restart knows exactly what is left of the TTL.
      */
-    private fun aMixedKeyspaceThroughJedis(): Long {
+    private fun aMixedKeyspaceThroughJedis() {
         Jedis("127.0.0.1", nodes[0].respPort).use { one ->
             assertEquals("OK", one.set("sess:1", "bar", SetParams.setParams().ex(60)))
             assertEquals(2L, one.hset("user:1", mapOf("name" to "alice", "city" to "berlin")))
@@ -89,24 +97,27 @@ class P4AcceptanceTest {
             assertEquals(1L, one.zadd("leaderboard", 200.0, "bob"))
             // Its deadline has to survive the restart, or it never falls due again (spec 5.4).
             assertEquals("OK", one.set("blink", "gone", SetParams.setParams().px(300)))
-            return System.nanoTime()
         }
     }
 
     /** The whole keyspace, through a node that is not the one it was written through. */
-    private fun everyKeyCameBack(writtenAt: Long) {
+    private fun everyKeyCameBack() {
         Jedis("127.0.0.1", nodes[2].respPort).use { three ->
             assertEquals("bar", three.get("sess:1"))
-            val spent = Duration.ofNanos(System.nanoTime() - writtenAt).seconds
-            assertTrue(three.ttl("sess:1") in 1L..(60L - spent), "the TTL did not survive the restart")
+            // No clock time has passed since the write, so the whole minute is still there: a TTL
+            // the restart rounded, shortened or dropped could not report exactly what was set.
+            assertEquals(60L, three.ttl("sess:1"), "the TTL did not survive the restart")
             assertEquals(mapOf("name" to "alice", "city" to "berlin"), three.hgetAll("user:1"))
             assertEquals(listOf("a", "b", "c"), three.lrange("queue:1", 0, -1))
             val ranked = three.zrangeWithScores("leaderboard", 0, -1)
             assertEquals(listOf("alice", "bob"), ranked.map { it.element })
             assertEquals(listOf(100.0, 200.0), ranked.map { it.score })
-            // The restart is often quicker than 300 ms, so this is the deadline arriving rather
-            // than the key being gone already: a TTL dropped by the RDB would never fall due.
-            awaitUntil("the restarted node let a restored TTL fall due") { three.get("blink") == null }
+            // The restart cost no clock time at all, so `blink` is certainly still alive when the
+            // node comes back, and what follows is the deadline arriving rather than the key having
+            // gone already: a TTL the RDB dropped would leave the key here for ever.
+            assertEquals("gone", three.get("blink"), "the restarted node lost a key inside its TTL")
+            clock.advance(Duration.ofMillis(301))
+            assertNull(three.get("blink"), "the restarted node did not let a restored TTL fall due")
         }
         assertTrue(Files.exists(dataDirs[0].resolve("dump.rdb")), "node-1 wrote no snapshot at shutdown")
     }
@@ -148,22 +159,24 @@ class P4AcceptanceTest {
         }
     }
 
-    // ---- (c) a TTL fired by the server's own scheduler -----------------------------------------
+    // ---- (c) a TTL that falls due on a cluster node ---------------------------------------------
 
     /**
-     * Spec 9's "TTLs fire on time via the timer wheel", on a cluster node: the server's scheduler
-     * is the one thread that advances the wheel, and here it is the real one on a real clock. The
-     * socket cannot tell the wheel's deletion from the lazy check a read makes on the way past --
-     * both are the client seeing nil -- so what this asserts is the client-visible half; the wheel
-     * itself is T09's business at the engine tier.
+     * Spec 9's "TTLs fire on time via the timer wheel", on a cluster node, written through one and
+     * read back through another so the deadline crosses the quorum. The socket cannot tell the
+     * wheel's deletion from the lazy check a read makes on the way past -- both are the client
+     * seeing nil -- so what this asserts is the client-visible half; the wheel itself is T09's
+     * business at the engine tier. The deadline arrives when this test moves the clock the nodes
+     * read, so nothing here waits for the scheduler to come round.
      */
     private fun aTtlFiresOnAClusterNode() {
         Jedis("127.0.0.1", nodes[0].respPort).use { one ->
             assertEquals("OK", one.set("tick:fires", "v", SetParams.setParams().px(200)))
             assertEquals("v", one.get("tick:fires"))
         }
+        clock.advance(Duration.ofMillis(201))
         Jedis("127.0.0.1", nodes[2].respPort).use { three ->
-            awaitUntil("the TTL fired", Duration.ofSeconds(10)) { three.get("tick:fires") == null }
+            assertNull(three.get("tick:fires"), "the TTL did not fire")
             assertEquals(-2L, three.ttl("tick:fires"))
         }
     }
@@ -186,6 +199,7 @@ class P4AcceptanceTest {
             grpcPort = 0,
             config = ReplicationConfig(n = 1, w = 1, r = 1),
             partitionCount = 4,
+            clock = clock,
             maxMemoryBytes = LIMIT,
             policy = EvictionPolicy.W_TINYLFU,
         )
@@ -234,6 +248,7 @@ class P4AcceptanceTest {
                 grpcPort = 0,
                 config = ReplicationConfig(n = 3, w = 2, r = 2),
                 partitionCount = 4,
+                clock = clock,
                 gossipPeriod = 100.milliseconds,
                 dataDir = dirs?.get(index),
                 fsync = FsyncPolicy.ALWAYS,
@@ -249,7 +264,13 @@ class P4AcceptanceTest {
         nodes = emptyList()
     }
 
-    /** Real time, so every wait is a poll to a deadline and there is no sleep anywhere. */
+    /**
+     * The one wait this tier keeps (plan rule 1.7). A snapshot set completes when every node's
+     * markers have overtaken the envelopes in flight on the gRPC transport, which is that
+     * transport's threads and the nodes' router coroutines doing the work; no clock is consulted
+     * anywhere on that path, so there is nothing a test could advance to bring it forward. Bounded,
+     * and a poll rather than a sleep.
+     */
     private fun awaitUntil(what: String, within: Duration = Duration.ofSeconds(20), done: () -> Boolean) {
         val giveUpAt = System.nanoTime() + within.toNanos()
         while (!done()) assertTrue(System.nanoTime() < giveUpAt, "$what: not within $within")

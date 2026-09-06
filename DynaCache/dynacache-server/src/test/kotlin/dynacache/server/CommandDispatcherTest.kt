@@ -116,6 +116,14 @@ class CommandDispatcherTest {
         assertTrue(ap.batches.isEmpty(), "the AP engine was given ${ap.batches}")
     }
 
+    /**
+     * C22 under its own name: neither engine reads the other's state, so one key name in both
+     * namespaces is two independent keys. [I22_namespaces_never_cross] is that assertion -- the
+     * same name written on both sides, each engine seeing only its own -- so this delegates.
+     */
+    @Test
+    fun C22_no_cross_engine_state_leakage() = I22_namespaces_never_cross()
+
     @Test
     fun I22_namespaces_never_cross() {
         answer(Command.Set(Key("cp:counter:foo"), bytes("1")))

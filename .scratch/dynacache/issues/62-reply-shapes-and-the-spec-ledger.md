@@ -19,16 +19,16 @@ the constraint, delegating to the spec-named tests that already cover the behavi
 
 **Nature:** command semantics and the deviation ledger (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 490b5feb, merged into misc/ai_gen)
 
-- [ ] `notleader_hint_is_the_leader_id`: the token after the kind parses as a member id
-- [ ] `lock_unlock_reply_shape`: accepted unlock and accepted reentrant decrement both answer
+- [x] `notleader_hint_is_the_leader_id`: the token after the kind parses as a member id
+- [x] `lock_unlock_reply_shape`: accepted unlock and accepted reentrant decrement both answer
       `:1`; a non-holder's unlock answers the spec's error
-- [ ] `LongDecrBy` no longer exists; the wire decoder rejects its old tag with a clear error
-- [ ] `EXAT`, `PXAT`, `PSETEX` are gone or their keeping is recorded with the reason
-- [ ] `C17_`, `C20_`, `C22_`, `I10_`, `I13_`, `I14_` tests exist and pass
-- [ ] The progress entry records `-CAPACITY` and the fanned-in-batch refusal as deviations
-- [ ] Progress entry appended
+- [x] `LongDecrBy` no longer exists; the wire decoder rejects its old tag with a clear error
+- [x] `EXAT`, `PXAT`, `PSETEX` are gone or their keeping is recorded with the reason
+- [x] `C17_`, `C20_`, `C22_`, `I10_`, `I13_`, `I14_` tests exist and pass
+- [x] The progress entry records `-CAPACITY` and the fanned-in-batch refusal as deviations
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
