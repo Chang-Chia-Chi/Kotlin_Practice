@@ -13,14 +13,14 @@ are; the progress entry lists any name that could not change and why.
 
 **Nature:** vocabulary, no behaviour change (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 7dabeb41 plus merge fix 41d94892, merged into misc/ai_gen)
 
-- [ ] A search of DynaCache main and test sources for "transaction", "barrier" (outside the
+- [x] A search of DynaCache main and test sources for "transaction", "barrier" (outside the
       engine's parked-partition sense), "expiresAt" on the lock, "ttl" on the lock verbs, and
       "Response" on CP message types finds nothing
-- [ ] Every test passes unchanged in count and name except the renamed batch test
-- [ ] The progress entry lists each rename and any wire-visible name deliberately kept
-- [ ] Progress entry appended
+- [x] Every test passes unchanged in count and name except the renamed batch test
+- [x] The progress entry lists each rename and any wire-visible name deliberately kept
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

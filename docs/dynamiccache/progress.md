@@ -5291,3 +5291,106 @@ whatever the wall clock says (T50)."
   much; `SKEW` in the two test classes is the constant to reuse.
 - The production tick loop (`ClusterNode`, `DynaCacheServer`) is unchanged: it calls `tick()`
   every interval on the system clock, and with a zero skew the gate reads as it always did.
+
+---
+
+## T57 - Glossary renames
+
+A mechanical rename pass so the code and tests speak CONTEXT.md's words and none of its "Avoid"
+words. No behaviour change: no logic edit, no reordering, no assertion changed beyond a renamed
+identifier. 13 files, 47 insertions and 47 deletions.
+
+### Batch (was "transaction")
+
+| Old | New | Where |
+| --- | --- | --- |
+| `TRANSACTION` (the MULTI/EXEC/DISCARD verb set) | `BATCH` | `DynaCacheServer.kt` (declaration and its one use) |
+| comment "refuses the whole transaction later" | "refuses the whole batch later" | `DynaCacheServer.kt`, above the `Parsed.Failed` branch |
+| `a parse error while queued makes EXEC abort the whole transaction` | `...abort the whole batch` | `DynaCacheServerTest.kt` |
+
+### Lease (was "ttl" / "expiresAt" on the lock)
+
+| Old | New | Where |
+| --- | --- | --- |
+| `Command.Cp.LockTry.ttl` | `.lease` | `Command.kt`, `CpWire.kt`, `FencedLockStateMachine.kt`, `FencedLockTest.kt`, `CpWireTest.kt`, `CommandParserTest.kt` |
+| `Command.Cp.LockRenew.ttl` | `.lease` | same, plus `SessionTest.kt` |
+| `FencedLockStateMachine.Lock.expiresAt` | `.leaseUntil` | `FencedLockStateMachine.kt`, `CpWire.kt` snapshot encoding, `CpWireTest.kt` |
+| KDoc `CP.LOCK.TRY K ttl_ms` | `CP.LOCK.TRY K lease_ms` | `Command.kt` |
+| KDoc `CP.LOCK.RENEW K token ttl_ms` / `[ttl]` | `... lease_ms` / `[lease]` | `Command.kt` |
+| KDoc `[owner or nil, token, ttl_remaining_ms, reentrance]` | `..., lease_remaining_ms, ...` | `Command.kt` (`LockState`) |
+| `tryLock(session, ttl = ...)` helper parameter | `lease` | `FencedLockTest.kt` |
+
+`ttl` elsewhere is left alone deliberately: it is the right word for counters (`LongSet`,
+`LongExpire`, `LongTtl`, `LongPersist`), for references (`RefSet`), for the AP engine's `Command.Set`
+and `Command.Ttl`, and for `TtlTick`, which is the log-time tick's own name in CP spec 5 and a
+CONTEXT.md glossary entry in its own right.
+
+### Latch (was "barrier")
+
+| Old | New | Where |
+| --- | --- | --- |
+| "A latch is a one-time barrier, so it is armed only from zero" | "A latch runs down once and stops at zero, so it is armed only from zero" | `CountDownLatchStateMachine.kt` class KDoc |
+| "The barrier has already fallen; ..." | "The latch has already run out; ..." | `CountDownLatchTest.kt`, `latch_down_at_zero_stays_zero` |
+| "would move the barrier under them" | "would move the count under them" | `CountDownLatchTest.kt`, `latch_reset_only_at_zero` |
+
+The engine's `CyclicBarrier` in `CommandEngine.kt` and `Partition.kt` stays: that is the parked-
+partition sense CONTEXT.md reserves the word for, and it is also the JDK type's own name.
+
+### Reply (was "Response" on the CP gRPC message types)
+
+| Old | New | Where |
+| --- | --- | --- |
+| proto `message CpResponse` | `message CpReply` | `cp.proto`, `CpGrpcServer.kt` (import, `apply` return type, builder) |
+| proto `message HeartbeatResponse` | `message HeartbeatReply` | `cp.proto`, `CpGrpcServer.kt` (import, `heartbeat` return type, builder) |
+| `rpc Apply(CpRequest) returns (CpResponse)` | `... returns (CpReply)` | `cp.proto` |
+| `rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse)` | `... returns (HeartbeatReply)` | `cp.proto` |
+
+Both message types are referenced only from `CpGrpcServer.kt`; `ForwardingCpEngine.kt` and
+`GrpcCpKit.kt` read the `reply` field, whose name did not change. The field numbers and the RPC
+method names are untouched, so the protobuf wire format is unchanged; the generated Kotlin class
+names and the service descriptor's type names change, and both sides of that wire are in this
+repository. Nothing persisted carries these types: the Raft store persists log entries and
+snapshots through `CpWire`'s own hand encoding, never a `CpResponse`.
+
+### Names deliberately kept
+
+| Name | Why |
+| --- | --- |
+| `Reply.Error("EXECABORT", "Transaction discarded because of previous errors.")` | Redis's own error text, byte for byte on the wire. Changing it would break every Redis client. Appears in `DynaCacheServer.kt`, `DynaCacheServerTest.kt` and `RespCodecTest.kt`. |
+| Test names `lock_ttl_expires`, `lock_ttl_renew` | Spec-named tests (design-spec-cp.md lines 391-392). The ground rule keeps spec test names, and this ticket's own criterion allows only the batch test to be renamed. |
+| proto `InstallSnapshotResponse`, and MicroRaft's `PreVoteResponse` / `VoteResponse` / `AppendEntriesSuccessResponse` / `AppendEntriesFailureResponse` | Raft's own message names, mirroring the `io.microraft.model.message.*` classes they encode. CONTEXT.md keeps Raft's vocabulary where it is Raft's (as with "majority"). These are not the CP message types the ticket names. |
+| `CyclicBarrier` and "barrier" in `CommandEngine.kt` / `Partition.kt` | The engine's parked-partition sense, which CONTEXT.md explicitly reserves the word for. |
+| `expiresAt` on `AtomicLongStateMachine.Counter` and `AtomicReferenceStateMachine.Reference`; `expiresAt` throughout the AP engine and cluster | TTL and expiry are the counter's and the reference's words. Only the lock says lease. |
+| RESP verb spellings `CP.LOCK.TRY` / `CP.LOCK.RENEW` / `CP.LOCK.STATE`, error kinds `REENTRANCE`, `NOSESSION`, `EXECABORT` | Client-facing wire names. |
+
+`docs/dynamiccache/design-spec-cp.md` still writes the lock argument as `ttl_ms` (lines 119, 121,
+214, 216, 217). The KDoc synopses now say `lease_ms` because CONTEXT.md is the glossary authority
+and this ticket asks for it; the spec itself was not edited, since this ticket modifies only
+`DynaCache/`. The spec already agrees in prose at line 356: "For FencedLock, TTL is the lease".
+
+### Grep proof
+
+Over `dynacache-{engine,cluster,cp,server}/src` for `*.kt` and `*.proto`, case-insensitive:
+
+- `transaction`: 4 hits, all the `EXECABORT` error text above.
+- `barrier`: 6 hits, all `CyclicBarrier` and the parked-partition comment in the engine.
+- `expiresAt`: no hit on a lock; all remaining hits are counters, references, the AP engine's
+  entries, and the cluster's replication messages.
+- `CpResponse`, `HeartbeatResponse`: no hits anywhere.
+- `Command.Cp.LockTry(...).ttl`, `Command.Cp.LockRenew(...).ttl`: no hits; both carry `lease`.
+
+### Tests
+
+Full reactor, all four modules green at unchanged counts:
+
+| Module | Tests |
+| --- | --- |
+| dynacache-engine | 147 |
+| dynacache-cluster | 85 |
+| dynacache-cp | 89 |
+| dynacache-server | 91 |
+
+One intermediate run saw `ReadRepairTest.read_repair_does_not_delay_reply` error with "no READ
+reached node-3". That test is in the cluster module, which this ticket does not touch, and it
+passed on both the run before it and the run after; it is a timing flake under three parallel
+Maven builds on the machine. The final run is clean.
