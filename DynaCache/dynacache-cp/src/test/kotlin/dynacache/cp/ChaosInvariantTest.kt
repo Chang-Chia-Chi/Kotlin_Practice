@@ -66,6 +66,15 @@ class ChaosInvariantTest {
         }
     }
 
+    /**
+     * C20 under its own name: every committed CP operation appears to take effect at one point
+     * between its call and its return. That is exactly what [invariant_linearizable_ops] checks,
+     * on one of its seeds; [checker_rejects_a_stale_read] is what keeps the check from being
+     * vacuous.
+     */
+    @Test
+    fun C20_committed_cp_operations_are_linearizable() = invariant_linearizable_ops(seed = 1)
+
     /** A stale read the sequential model would never produce is rejected, so the checker is not vacuous. */
     @Test
     fun checker_rejects_a_stale_read() {

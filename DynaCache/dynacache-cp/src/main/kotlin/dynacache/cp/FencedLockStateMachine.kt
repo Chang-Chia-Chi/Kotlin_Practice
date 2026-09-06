@@ -27,9 +27,11 @@ class FencedLockStateMachine {
                 command.session -> grant(command.key, lock.copy(holds = lock.holds + 1))
                 else -> Reply.Array(listOf(Reply.Integer(0), Reply.Integer(0)))
             }
+            // CP spec 3.1 and 6.1: an accepted unlock answers :1, a rejected one the error of 6.8.
+            // A reentrant decrement is accepted, so it answers :1 too; :0 has no meaning here.
             is Command.Cp.LockUnlock -> when {
                 lock.owner != command.session || lock.token != command.token -> reentrance(lock)
-                lock.holds > 1 -> { locks[command.key] = lock.copy(holds = lock.holds - 1); Reply.Integer(0) }
+                lock.holds > 1 -> { locks[command.key] = lock.copy(holds = lock.holds - 1); Reply.Integer(1) }
                 else -> { locks[command.key] = lock.released(); Reply.Integer(1) }
             }
             is Command.Cp.LockRenew ->

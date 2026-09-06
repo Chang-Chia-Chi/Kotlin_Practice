@@ -1,5 +1,6 @@
 package dynacache.cp
 
+import dynacache.cluster.NodeId
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
@@ -47,7 +48,8 @@ class CpEngineTest {
         assertEquals(Reply.Integer(2), submit(Command.Cp.LongIncr(counter)))
         assertEquals(Reply.Integer(1), submit(Command.Cp.LongDecr(counter)))
         assertEquals(Reply.Integer(11), submit(Command.Cp.LongIncrBy(counter, 10)))
-        assertEquals(Reply.Integer(7), submit(Command.Cp.LongDecrBy(counter, 4)))
+        // CP spec 6.2 has no DECRBY verb: a decrement by 4 is an ADD of -4.
+        assertEquals(Reply.Integer(7), submit(Command.Cp.LongIncrBy(counter, -4)))
         assertEquals(Reply.Integer(7), submit(Command.Cp.LongGet(counter)))
     }
 
@@ -165,6 +167,21 @@ class CpEngineTest {
         val reply = kit.engine(follower).submit(Command.Cp.LongIncr(counter)).get(REPLY_TIMEOUT_SECS, SECONDS)
 
         assertEquals("NOTLEADER", (reply as Reply.Error).kind)
+    }
+
+    /**
+     * CP spec 6.8: the hint after `-NOTLEADER` is the leader's member id and nothing else, so a
+     * client that takes the first token of the message has somewhere to retry.
+     */
+    @Test
+    fun notleader_hint_is_the_leader_id() {
+        val leader = kit.leader().config.nodeId
+        val follower = kit.live().first { it != leader }
+
+        val reply = kit.engine(follower).submit(Command.Cp.LongIncr(counter)).get(REPLY_TIMEOUT_SECS, SECONDS)
+
+        assertEquals("NOTLEADER", (reply as Reply.Error).kind)
+        assertEquals(leader, NodeId(reply.message), "the whole hint is the member id")
     }
 
     /** A cp: key is the CP engine's only business, and everything else is not its business. */

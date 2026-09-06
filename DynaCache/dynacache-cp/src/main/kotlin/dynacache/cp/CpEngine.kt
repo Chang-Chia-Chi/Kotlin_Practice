@@ -57,10 +57,13 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
             }
         }
 
-    private fun notLeader(): Reply {
-        val leader = runtime.node.term.leaderEndpoint
-        return Reply.Error("NOTLEADER", if (leader == null) "no known leader" else "leader is ${leader.id}")
-    }
+    /**
+     * CP spec 6.8's `-NOTLEADER <hint>`: the hint is the leader's member id alone, since a client
+     * retries at the first token of the message. A member that knows of no leader has no hint to
+     * give and says only `-NOTLEADER`; the client asks the group again.
+     */
+    private fun notLeader(): Reply =
+        Reply.Error("NOTLEADER", runtime.node.term.leaderEndpoint?.id?.toString() ?: "")
 
     private fun answer(reply: Reply) = CompletableFuture.completedFuture(reply)
 
