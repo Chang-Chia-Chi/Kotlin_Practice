@@ -5,6 +5,7 @@ import dynacache.engine.ds.Entry as Scored
 import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
 import dynacache.engine.ds.TimerWheel
+import dynacache.engine.persist.RdbEntry
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -96,6 +97,36 @@ internal class Partition(
         CompletableFuture.supplyAsync({ commands.map(::execute) }, executor)
 
     fun close() = executor.shutdown()
+
+    /**
+     * A point-in-time view of this partition's live keys at [now], taken as one task on the
+     * executor so it sits between two commands or batches and never inside one (C9). The
+     * entries are copied, not referenced: a Hash, List or Sorted Set is mutated in place by the
+     * next command, and the writer serializes off this thread. A String's bytes are shared,
+     * since no command mutates that array. The DVV is empty until replication stamps one (T22).
+     */
+    fun snapshotView(now: Instant): CompletableFuture<List<RdbEntry>> =
+        CompletableFuture.supplyAsync({
+            store.entries().filterNot { it.value.expired(now) }
+                .map { RdbEntry(it.key, frozen(it.value.value), it.value.expiresAt, EMPTY) }
+                .toList()
+        }, executor)
+
+    /** Writes restored [entries] in, through the same funnel a command uses, skipping the already expired. */
+    fun restore(entries: List<RdbEntry>): CompletableFuture<Void> =
+        CompletableFuture.runAsync({
+            val now = clock.instant()
+            for (entry in entries) if (!entry.expired(now)) write(entry.key, now, Entry(entry.value, entry.expiresAt))
+        }, executor)
+
+    private fun frozen(value: Value): Value = when (value) {
+        is Value.Str -> value
+        is Value.Hash -> Value.Hash().also { copy -> value.fields.entries().forEach { copy.fields.put(it.key, it.value) } }
+        is Value.List -> Value.List(ArrayDeque(value.items))
+        is Value.ZSet -> Value.ZSet(SkipList(random.nextLong())).also { copy ->
+            value.order.forward().forEach { copy.writeScore(it.score, it.member) }
+        }
+    }
 
     /**
      * This partition's share of a `SCAN`: the keys its walk found from [command]'s cursor, and
