@@ -4912,3 +4912,87 @@ taken once per inbound non-marker envelope and is uncontended except during an i
 save. `Lone` and `Gate` in `DistributedSnapshotTest` are the shape for any test that needs the
 initiator interleaved with its own demux; T58's `MutableClock` does not replace `Gate`, which
 parks a thread rather than moving time.
+
+---
+
+## T52 - An invalid expiry answers -ERR, never drops the connection
+
+**Built:** `CommandParser` gained the one place it does time arithmetic, and every expiry-taking
+row now goes through it. `deadline(name) { ... }` runs the arithmetic an argument asks for and
+turns the two things `java.time` throws -- `ArithmeticException` from an overflowing sum,
+`DateTimeException` from an instant that does not exist -- into `Rejected`, so the client reads
+`-ERR invalid expire time in '<command>' command` and keeps its socket. `span(name, ttl)` adds
+the `SET` family's own rule on top: a zero or negative relative TTL is refused outright, and the
+sum the engine will later compute as `now + ttl` is checked here while it can still be a reply.
+`until(name) { ... }` is the old `EXAT`/`PXAT` helper with the same guard plus Redis's
+at-or-before-the-epoch refusal. Nothing else moved: `Command`, the engine, the dispatcher's
+routing and the RESP codec are untouched, and the connection handler needed no change because
+the parser is now total.
+
+**The rule, and which values are invalid.** The bound is the deadline as epoch milliseconds in a
+signed 64-bit. That is not `Instant`'s own range -- `Instant` reaches year ±1,000,000,000 -- but
+it is the bound Redis itself checks (`when > LLONG_MAX - basetime` in `expireGenericCommand`)
+and the one the engine's own WAL writes a deadline in (`WalCodec` calls
+`command.deadline.toEpochMilli()`, which throws past roughly year 292,278,994). Using the wider
+`Instant` range would have moved the crash from the parser into the WAL rather than removing it.
+
+Redis splits its expiry commands in two, and so does this:
+
+- `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` take **any** value they can hold. Zero and
+  negative are deadlines already past, which delete the key; Redis's own source says so in as
+  many words ("EXPIRE allows negative numbers"). Only an unrepresentable deadline is an error --
+  `EXPIRE k Long.MAX_VALUE`, `EXPIRE k Long.MIN_VALUE`, `PEXPIRE k Long.MAX_VALUE`,
+  `EXPIREAT k 99999999999999999`. `PEXPIREAT` cannot overflow at all: every `Long` is a
+  representable epoch-milli deadline, `Long.MAX_VALUE` exactly so, and a larger argument is
+  refused one step earlier as the integer it is too big to be.
+- `SET EX`/`PX`, `SETEX`, `PSETEX` refuse a **non-positive** span as well: zero, negative and
+  `Long.MIN_VALUE` are all `invalid expire time`, under the name the client typed (`'set'`,
+  `'setex'`, `'psetex'`).
+- `SET EXAT`/`PXAT` name an absolute time, so they refuse only at or before the epoch. A
+  deadline merely in the past is a deadline: the key is set and expires at once, as in Redis.
+
+**Acceptance:**
+- `C8_invalid_expire_answers_err_not_disconnect` (`DynaCacheServerTest`): thirteen bad expiry
+  arguments over one socket -- the four `EXPIRE` spellings out of range, and `SET EX`, `SET PX`
+  and `SETEX` at zero, negative and `Long.MAX_VALUE` -- each answer the exact Redis error, and
+  afterwards the same connection still answers `PING` and still holds the key untouched. It then
+  sends `EXPIRE k -1` and sees `:1` and a key that is gone, which is what the error must not
+  swallow.
+- `an unrepresentable expiry is Redis's error, not an exception` and `a non-positive TTL on the
+  SET family is Redis's error` (`CommandParserTest`): the two halves of the rule, message for
+  message.
+- `the EXPIRE family accepts zero and negative, as Redis does`: the boundary the ticket and
+  Redis disagree about, pinned to Redis.
+- `no expiry argument escapes the parser as an exception`: 2,000 random arguments -- uniform
+  `Long`, deep negatives, the four corners, small values -- across all ten expiry-taking shapes,
+  20,000 parses, none of which may throw.
+- `resp_fuzz_no_crash` extended: the fuzzer now emits well-formed expiry commands, and every
+  frame it decodes as a command is handed to a real `CommandParser`, so the decoder's fuzz is
+  the parser's fuzz too.
+- `mvn -o test -pl dynacache-server -am`: engine 147, cluster 83, cp 89, server 88 (was 83).
+  Every earlier test green.
+- This entry.
+
+**Deviations:** Four.
+1. **The ticket's first criterion is wrong about `EXPIRE`, and the spec wins.** It asks for the
+   error on zero and negative for all seven commands. Redis answers `:1` and deletes the key for
+   `EXPIRE k 0` and `EXPIRE k -1`; C8 is "byte-identical to what Redis returns", and the
+   ticket's own note already says a past absolute time is not invalid. Refusing them would also
+   have thrown away behaviour the engine has today and the ticket asks to keep. Implemented
+   Redis's split instead, and pinned it with a named test so the disagreement is visible rather
+   than silent.
+2. **`PEXPIREAT` has no error case**, for the same reason: its argument is already the unit the
+   bound is measured in. The socket test asserts the reply it does give, the not-an-integer
+   error, rather than pretending there is an expire-time error there.
+3. **One test-helper fix outside the parser.** `DynaCacheServerTest.withServer` built its engine
+   on a fixed clock but let `DynaCacheServer` default to `Clock.systemUTC()`, so the parser's
+   "now" and the engine's "now" were fifty-six years apart. No test had noticed, because none
+   had asserted anything about a deadline over the socket. It now passes the one clock, which is
+   what `main` does in production. No main-source change; every server test still green.
+4. **Size:** 270 lines added across four files, within the 200-to-600 budget.
+
+**For the next ticket:** two things this deliberately left alone. `cp.lock.try` and
+`cp.lock.renew` still take their lease through the bare `millis()` helper, so a zero or negative
+lease is accepted; that is CP lease semantics, not key expiry, and belongs with the CP verbs.
+And ticket 62 may delete `EXAT`/`PXAT` -- they are validated here on the same code path as the
+rest, so removing them removes two `until` call sites and nothing else.

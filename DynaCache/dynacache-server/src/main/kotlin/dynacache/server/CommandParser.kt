@@ -4,6 +4,7 @@ import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
 import java.time.Clock
+import java.time.DateTimeException
 import java.time.Duration
 import java.time.Instant
 
@@ -54,8 +55,8 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "get" -> Command.Get(key(name, args, 1))
         "set" -> set(args)
         "setnx" -> exactly(name, args, 2).let { Command.Set(Key(it[0]), it[1], Command.Set.Condition.NX) }
-        "setex" -> exactly(name, args, 3).let { Command.Set(Key(it[0]), it[2], ttl = seconds(it[1])) }
-        "psetex" -> exactly(name, args, 3).let { Command.Set(Key(it[0]), it[2], ttl = millis(it[1])) }
+        "setex" -> exactly(name, args, 3).let { Command.Set(Key(it[0]), it[2], ttl = span(name, seconds(it[1]))) }
+        "psetex" -> exactly(name, args, 3).let { Command.Set(Key(it[0]), it[2], ttl = span(name, millis(it[1]))) }
         "incr" -> Command.IncrBy(key(name, args, 1), 1)
         "decr" -> Command.IncrBy(key(name, args, 1), -1)
         "incrby" -> exactly(name, args, 2).let { Command.IncrBy(Key(it[0]), integer(it[1])) }
@@ -91,11 +92,20 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "lset" -> exactly(name, args, 3).let { Command.LSet(Key(it[0]), integer(it[1]), it[2]) }
         "lrem" -> exactly(name, args, 3).let { Command.LRem(Key(it[0]), integer(it[1]), it[2]) }
 
-        // Key expiry: three spellings of one deadline (spec 5.4)
-        "expire" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), now().plusSeconds(integer(it[1]))) }
-        "pexpire" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), now().plusMillis(integer(it[1]))) }
-        "expireat" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), Instant.ofEpochSecond(integer(it[1]))) }
-        "pexpireat" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), Instant.ofEpochMilli(integer(it[1]))) }
+        // Key expiry: three spellings of one deadline (spec 5.4). Redis takes any value it can
+        // hold here -- a deadline already past deletes the key -- so only [deadline] guards them.
+        "expire" -> exactly(name, args, 2).let {
+            Command.Expire(Key(it[0]), deadline(name) { now().plusSeconds(integer(it[1])) })
+        }
+        "pexpire" -> exactly(name, args, 2).let {
+            Command.Expire(Key(it[0]), deadline(name) { now().plusMillis(integer(it[1])) })
+        }
+        "expireat" -> exactly(name, args, 2).let {
+            Command.Expire(Key(it[0]), deadline(name) { Instant.ofEpochSecond(integer(it[1])) })
+        }
+        "pexpireat" -> exactly(name, args, 2).let {
+            Command.Expire(Key(it[0]), deadline(name) { Instant.ofEpochMilli(integer(it[1])) })
+        }
         "ttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.SECONDS)
         "pttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.MILLIS)
         "persist" -> Command.Persist(key(name, args, 1))
@@ -181,10 +191,10 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
                 takesArgument -> {
                     if (ttl != null) syntaxError()
                     ttl = when (flag) {
-                        "ex" -> seconds(args[at + 1])
-                        "px" -> millis(args[at + 1])
-                        "exat" -> until(Instant.ofEpochSecond(integer(args[at + 1])))
-                        else -> until(Instant.ofEpochMilli(integer(args[at + 1])))
+                        "ex" -> span("set", seconds(args[at + 1]))
+                        "px" -> span("set", millis(args[at + 1]))
+                        "exat" -> until("set") { Instant.ofEpochSecond(integer(args[at + 1])) }
+                        else -> until("set") { Instant.ofEpochMilli(integer(args[at + 1])) }
                     }
                 }
                 else -> syntaxError()
@@ -276,8 +286,46 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
 
     private fun millis(token: ByteArray) = Duration.ofMillis(integer(token))
 
-    /** The span from now to [deadline]; how `EXAT` and `PXAT` reach [Command.Set]'s duration. */
-    private fun until(deadline: Instant): Duration = Duration.between(clock.instant(), deadline)
+    // ---- expiry, the one place in this parser that does arithmetic ---------------------------
+
+    /**
+     * The deadline [compute] names, when a clock can hold it; Redis's `invalid expire time`
+     * otherwise. Every expiry-taking row goes through here, and that is what makes the parser
+     * total: an argument big enough to overflow the instant arithmetic, or to name a moment past
+     * what epoch milliseconds can count -- which is the bound Redis itself checks, and the one
+     * the engine's WAL writes a deadline in -- becomes a reply the client reads, not a throwable
+     * the pipeline treats as fatal and closes the connection over (C8).
+     */
+    private fun deadline(name: String, compute: () -> Instant): Instant =
+        try {
+            compute().also { it.toEpochMilli() }
+        } catch (overflowed: ArithmeticException) {
+            rejectExpireTime(name)
+        } catch (unrepresentable: DateTimeException) {
+            rejectExpireTime(name)
+        }
+
+    /**
+     * A relative TTL the `SET` family will take: strictly positive, and near enough that the
+     * engine's own `now + ttl` is a moment that exists. Redis refuses a zero or negative span
+     * outright here, unlike `EXPIRE`, where the same number is a deadline already past.
+     */
+    private fun span(name: String, ttl: Duration): Duration {
+        if (ttl.isZero || ttl.isNegative) rejectExpireTime(name)
+        deadline(name) { now().plus(ttl) } // the engine's own sum, refused here while it is a reply
+        return ttl
+    }
+
+    /**
+     * The span from now to the deadline [compute] names; how `EXAT` and `PXAT` reach
+     * [Command.Set]'s duration. Redis refuses an absolute time at or before the epoch, and only
+     * there: a deadline merely in the past sets the key and expires it at once.
+     */
+    private fun until(name: String, compute: () -> Instant): Duration {
+        val at = deadline(name, compute)
+        if (at.toEpochMilli() <= 0) rejectExpireTime(name)
+        return Duration.between(now(), at)
+    }
 
     // ---- errors, in Redis's own wording ------------------------------------------------------
 
@@ -296,6 +344,9 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         reject("wrong number of arguments for '$name' command")
 
     private fun syntaxError(): Nothing = reject("syntax error")
+
+    /** Redis names the command in its own lower-case spelling here, as it does for arity. */
+    private fun rejectExpireTime(name: String): Nothing = reject("invalid expire time in '$name' command")
 
     /** A permit or latch count: an integer that fits in one and is not negative. */
     private fun counted(token: ByteArray): Int =
