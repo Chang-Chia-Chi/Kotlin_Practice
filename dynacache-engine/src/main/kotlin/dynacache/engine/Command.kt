@@ -57,35 +57,59 @@ sealed class Command {
     sealed class Cp : Command() {
         abstract val key: Key
 
+        /** The AtomicLong verbs (CP spec 3.2, 6.2), each over a `cp:counter:*` key. */
+        sealed class AtomicLong : Cp()
+
+        /**
+         * The FencedLock verbs (CP spec 3.1, 6.1), each over a `cp:lock:*` key. A session is a
+         * number the caller supplies until T41 gives it a registry.
+         */
+        sealed class FencedLock : Cp()
+
         /** `CP.LONG.SET K n`, or `SET cp:counter:K n [EX|PX]`: a [ttl] runs on log time (CP spec 9.4). */
-        data class LongSet(override val key: Key, val value: Long, val ttl: Duration? = null) : Cp()
+        data class LongSet(override val key: Key, val value: Long, val ttl: Duration? = null) : AtomicLong()
 
         /** `CP.LONG.GET K`: the value, or nil when the counter was never written. */
-        data class LongGet(override val key: Key) : Cp()
+        data class LongGet(override val key: Key) : AtomicLong()
 
         /** `CP.LONG.INCR K`: the new value; a missing counter counts as 0. */
-        data class LongIncr(override val key: Key) : Cp()
+        data class LongIncr(override val key: Key) : AtomicLong()
 
         /** `CP.LONG.DECR K`: the new value; a missing counter counts as 0. */
-        data class LongDecr(override val key: Key) : Cp()
+        data class LongDecr(override val key: Key) : AtomicLong()
 
         /** `CP.LONG.ADD K d`, the `INCRBY` form: the new value. */
-        data class LongIncrBy(override val key: Key, val delta: Long) : Cp()
+        data class LongIncrBy(override val key: Key, val delta: Long) : AtomicLong()
 
         /** `CP.LONG.ADD K -d`, the `DECRBY` form: the new value. */
-        data class LongDecrBy(override val key: Key, val delta: Long) : Cp()
+        data class LongDecrBy(override val key: Key, val delta: Long) : AtomicLong()
 
         /** `CP.LONG.CAS K expected new`: 1 when the swap happened, 0 when it did not. */
-        data class LongCas(override val key: Key, val expected: Long, val new: Long) : Cp()
+        data class LongCas(override val key: Key, val expected: Long, val new: Long) : AtomicLong()
 
         /** `EXPIRE` or `PEXPIRE cp:counter:K`: 1 when the counter exists and now has [ttl], else 0. */
-        data class LongExpire(override val key: Key, val ttl: Duration) : Cp()
+        data class LongExpire(override val key: Key, val ttl: Duration) : AtomicLong()
 
         /** `TTL cp:counter:K`: seconds left rounded as Redis rounds, -1 without a TTL, -2 when missing. */
-        data class LongTtl(override val key: Key) : Cp()
+        data class LongTtl(override val key: Key) : AtomicLong()
 
         /** `PERSIST cp:counter:K`: 1 when a TTL was removed, 0 when there was none to remove. */
-        data class LongPersist(override val key: Key) : Cp()
+        data class LongPersist(override val key: Key) : AtomicLong()
+
+        /** `CP.LOCK.TRY K ttl_ms`: `[ok, token]`; a holder trying again holds once more with the same token. */
+        data class LockTry(override val key: Key, val session: Long, val ttl: Duration) : FencedLock()
+
+        /** `CP.LOCK.UNLOCK K token`: 1 when released, 0 when still held reentrantly, `-REENTRANCE` for a non-holder. */
+        data class LockUnlock(override val key: Key, val session: Long, val token: Long) : FencedLock()
+
+        /** `CP.LOCK.RENEW K token ttl_ms`: 1 when the holder's lease now runs [ttl] from here, `-REENTRANCE` otherwise. */
+        data class LockRenew(override val key: Key, val session: Long, val token: Long, val ttl: Duration) : FencedLock()
+
+        /** `CP.LOCK.FORCE_UNLOCK K`: the admin override, `+OK` whether or not anyone held it. */
+        data class LockForceUnlock(override val key: Key) : FencedLock()
+
+        /** `CP.LOCK.STATE K`: `[owner or nil, token, ttl_remaining_ms, reentrance]`. */
+        data class LockState(override val key: Key) : FencedLock()
     }
 
     /**

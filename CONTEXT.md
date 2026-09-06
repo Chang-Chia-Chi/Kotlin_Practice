@@ -95,6 +95,24 @@ The entry a leader appends when nothing else has been appended for a tick interv
 time keeps moving while the group is idle.
 _Avoid_: heartbeat (that is Raft's own, and carries no time)
 
+**Fencing token**:
+The number a FencedLock hands its holder, strictly greater than every token the same key ever
+handed out, across releases, leader changes and snapshots (C17). A downstream system that
+remembers the highest token it has seen can refuse a stale holder. It is state-machine state,
+never a counter in a node's memory.
+_Avoid_: lock id, version, epoch
+
+**Lease**:
+How long a FencedLock holder keeps the lock without renewing, measured in log time. It is the
+lock's only TTL; `RENEW` by the holder extends it, `EXPIRE` on a lock key is rejected.
+_Avoid_: timeout, expiry (the counter's word), TTL (say lease for a lock)
+
+**Session**:
+The identity a lock or permit is held by; a session's death releases everything it holds
+(C18). Until T41 a session is a number the caller supplies with the command and nobody
+validates; the registry, heartbeats and `-NOSESSION` arrive with T41.
+_Avoid_: client, connection (a session may outlive one)
+
 ## Example dialogue
 
 **Dev:** The Netty handler got a `SET`; do I need a lock before calling the engine?
