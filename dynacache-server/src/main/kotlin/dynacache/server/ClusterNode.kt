@@ -18,6 +18,8 @@ import dynacache.engine.CommandEngine
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
+import dynacache.engine.install
+import dynacache.engine.view
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +88,8 @@ class ClusterNode(
         clock = clock,
         tokens = ::commandToTokens,
         parse = ::parse,
+        view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
+        install = engine::install,
         scope = scope,
     )
 
