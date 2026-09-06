@@ -9,12 +9,12 @@ follower answers `-NOTLEADER <hint>`; the data behind `CP.INFO`.
 
 **Nature:** technology adapter and forwarding (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache dfeca3a, merged into misc/ai_gen)
 
-- [ ] `cp_non_leader_forwards`, `cp_notleader_hint_on_follower`
-- [ ] `raft_group_forms_over_grpc_on_localhost`
-- [ ] `cp_forwarding_rediscovers_leader_after_failover`
-- [ ] Progress entry appended
+- [x] `cp_non_leader_forwards`, `cp_notleader_hint_on_follower`
+- [x] `raft_group_forms_over_grpc_on_localhost`
+- [x] `cp_forwarding_rediscovers_leader_after_failover`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

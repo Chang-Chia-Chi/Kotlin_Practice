@@ -1352,3 +1352,108 @@ scheduler (T13) must call `ApEngine.tick()` at least once per `tickMillis`; a sc
 for an hour makes the next tick walk 3,600 slots. C7 at the command level holds only under that.
 `atomically` is still `TODO("T14: batches")`, and a batch running TTL commands will reach `write` and
 `drop` on the partition thread just as `submit` does, so nothing there needs a second wheel path.
+
+## T43: gRPC CpService, RaftService, leader forwarding
+
+**Built:** `dynacache-cp/src/main/proto/cp.proto` and the cluster module's protobuf plugin block
+copied verbatim into the cp pom (same protoc, grpc-java and grpc-kotlin versions; the grpc-kotlin
+generator again runs inside the `protobuf-java` execution through `protocPlugins`). No dependency
+was added: cp reaches grpc-kotlin-stub, grpc-netty-shaded, grpc-protobuf, protobuf and coroutines
+transitively through `dynacache-cluster`.
+
+`RaftService` carries MicroRaft's inter-member traffic as one `RaftEnvelope` with `group_id`,
+`sender`, `term` and a oneof over `Candidacy` (pre-vote, vote and the leadership-transfer
+trigger all name the tip of the candidate's log), `Granted`, `AppendEntriesRequest`,
+`AppendEntriesSuccess` and `AppendEntriesFailure`. This is a **per-message protobuf mapping**,
+not a `bytes` blob with a type tag: MicroRaft's default model classes are not `Serializable`, so
+the bytes route would have needed the same field-by-field encoding with none of the readability.
+The one `bytes` inside it is a log entry's operation, which is the engine's value, not Raft's.
+
+`CpService` is `Apply(CpRequest) -> CpResponse`, `GetInfo(InfoRequest) -> CpInfo` and
+`Heartbeat(HeartbeatRequest) -> HeartbeatResponse`. `Command.Cp` and `Reply` travel as a
+**compact hand encoding inside `bytes`** (`CpWire`): a tag byte, a length-prefixed key, then the
+variant's longs; replies are tagged over the five RESP shapes and nest for arrays. Protobuf
+messages per variant would have to be re-cut every time a ticket adds a verb, and the encoding is
+one `when` in one file instead. `Heartbeat` throws `NotImplementedError` naming T41.
+
+In `dynacache.cp`:
+
+- `CpWire` - the codec above, plus `infoReply(CpInfo)` turning `GetInfo` into the `CP.INFO`
+  `Reply.Array` of CP spec 6.7 (leader, members, log size, applied index, snapshot index).
+- `GrpcRaftTransport(self, addresses)` - the gRPC adapter of MicroRaft's `Transport` seam. The
+  address book maps a `CpEndpoint` to a `HostPort` (the cluster's own type, reused) and is read
+  at send time, not at construction, so members on ephemeral ports fill each other in after
+  binding, exactly as T23's `GrpcTransport` does. Sends go through grpc-java's async stub with a
+  `StreamObserver` that drops the answer: MicroRaft calls `send` on the node's own thread and a
+  lost message is a normal event the next heartbeat or election round repairs. No coroutine is
+  launched per message, so there is no unbounded fan-out under the transport.
+- `CpGrpcServer(runtime, engine, port = 0)` - one member's gRPC presence, hosting both services on
+  one port. `Apply` submits to that member's own `CpEngine`, so a follower answers
+  `-NOTLEADER <hint>` and never forwards (CP spec 9.1 step 3). `boundPort` reads an ephemeral port.
+- `ForwardingCpEngine(cpMembers, addresses, deadline)` - an AP-only node's `CommandEngine`. It
+  holds no Raft node; it discovers the leader through `GetInfo`, remembers it, and forwards over
+  `Apply`. A `-NOTLEADER` reply or silence forgets the believed leader and asks the group again,
+  which is how a client rides out a failover. It carries the same C16 edge as `CpEngine`
+  (`-NOTCP` for a non-CP command or a non-`cp:` key) and the same `atomically` refusal.
+
+Nothing in `CpEngine`, `RaftRuntime`, `AtomicLongStateMachine` or `CpConfig` changed, so the T39
+merge stays inside the state machine and the log entry type.
+
+**Concepts named:** The **address book** is the map from a CP member to its host and port; it is
+the only thing the gRPC transport knows about topology, and it is a live view rather than a
+snapshot. The **believed leader** is the AP-only node's cached answer to "who replicates?", held
+until the wire says otherwise. `CpWire` is the **codec** the cluster module deliberately does not
+have: the cluster's protobuf types *are* its messages, but Raft's messages are MicroRaft's own
+interfaces, so a translation exists here and only here. The MicroRaft `Transport` seam named in
+T38 now has its second adapter, and `RaftRuntime` did not have to learn anything to get it.
+
+**Acceptance:** `dynacache.cp.GrpcCpTest`, 5 tests, all green, every member a real gRPC server on
+an ephemeral localhost port.
+
+- `raft_group_forms_over_grpc_on_localhost` - three members elect a leader over sockets and the
+  leader's `Apply` returns the applied value.
+- `cp_notleader_hint_on_follower` - a follower asked directly answers `NOTLEADER` and the message
+  names the member that actually holds leadership.
+- `cp_non_leader_forwards` - the AP-only node's `submit` succeeds, and the leader read back
+  afterwards shows the increment landed once.
+- `cp_forwarding_rediscovers_leader_after_failover` - the AP-only node increments, its leader is
+  killed, and its next `submit` still answers `2` with the new leader.
+- `cp_info_reports_leader_and_members` - the `CP.INFO` array names the leader and the three members.
+
+All 11 T38 tests still pass on the in-memory kit. Full `clean package` green: engine 66,
+cluster 39, cp 16, server 16.
+
+**Deviations:**
+
+- **Size.** 583 lines of code (779 with doc comments and blanks) across four main files and two
+  test files, against a 200-600 budget. The overrun is `CpWire`: MicroRaft's ten message types
+  each need their fields named twice, once to encode and once to rebuild through the model
+  factory, and neither escape hatch the ticket offered removes that. It is mechanical, not
+  intricate.
+- **InstallSnapshot has no wire form.** `CpWire.encode` throws `NotImplementedError` for
+  `InstallSnapshotRequest` and `InstallSnapshotResponse`. They only flow once a member has fallen
+  behind a snapshot, and snapshots are T45; a group without them never reaches that branch.
+- **A membership-change op is refused, not encoded.** `UpdateRaftGroupMembersOp` would be lost
+  silently under the no-payload internal tag, so it throws instead. CP membership is fixed at
+  startup (CP spec 2.2) and nothing calls `changeMembership`.
+- **Forwarding is at-least-once.** A retry after silence can apply a command twice if it committed
+  just as the connection dropped. CP spec 9.1 step 7 leaves the retry to the client; deduplicating
+  it needs a per-session request id, so it waits for the session registry in T41. Marked in the
+  source.
+- **`awaitLeaderKnown` in the test kit polls.** A follower learns the leader on a heartbeat and
+  MicroRaft's report listener only fires for this member's own role, so the kit polls
+  `node.term.leaderEndpoint` under a `withTimeout` deadline with `delay`, never `Thread.sleep`.
+
+**For the next ticket:**
+
+- T44 wires `CP.INFO` and `CP.MEMBERS`: `ForwardingCpEngine.info()` and `CpGrpcServer.info()`
+  already return the data, the first as a `Reply`, and a `Command.Cp` variant is all that is
+  missing. The `-NOTLEADER` hint reaches RESP as `Reply.Error("NOTLEADER", "leader is <id>")`,
+  so the encoder writes `-NOTLEADER leader is cp2` unless T44 reshapes the message.
+- T39 changes the log entry's operation type. `CpWire.encodeOperation` and `decodeOperation` are
+  the only two functions that see it; every other encoding sits below the log entry.
+- T41 fills `CpService.Heartbeat`, which currently throws.
+- T45 needs `InstallSnapshotRequest` and `InstallSnapshotResponse` in `cp.proto` and `CpWire`,
+  including the `SnapshotChunk` and `RaftGroupMembersView` inside them.
+- A production node builds the transport first, then the runtime, then the engine, then the
+  server, and only then publishes its own address; `GrpcCpKit` shows that order.
