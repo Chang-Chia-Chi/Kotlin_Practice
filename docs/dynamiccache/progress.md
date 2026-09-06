@@ -1751,3 +1751,119 @@ The pipeline's known ceiling is marked with a `ponytail:` comment: the pending q
 unbounded, so a client that pipelines without ever reading grows it until the heap objects.
 Redis caps its own client output buffer; the repair here is a limit that closes the connection
 past N pending replies. Nothing in P1 pushes on it.
+
+## T40: FencedLock
+
+**Built:** The composite state machine T39 asked for, and the FencedLock beside the AtomicLong.
+
+`CpStateMachine` is now the one MicroRaft `StateMachine` a `RaftRuntime` builds. It owns
+`lastAppliedTs`, applies `NewTerm` (the `onTermApplied` callback and `currentTerm` lambda moved
+here from `AtomicLongStateMachine`), applies `TtlTick` by sweeping every primitive, and hands a
+`CpOp`'s command to the primitive that answers it by the command's sealed sub-hierarchy. Its
+snapshot is one chunk holding log time plus each primitive's map; `installSnapshot` restores
+both. `valueOf(key)` stays on it for the T38 and T39 tests.
+
+`AtomicLongStateMachine` is no longer a MicroRaft `StateMachine`: it is a plain primitive with
+`apply(command, now)`, `sweep(now)`, `valueOf(key, now)`, `snapshot()` and `restore()`, where
+`now` is log time passed in by the composite. Its behaviour is unchanged; every T39 test passes
+untouched.
+
+`FencedLockStateMachine` (CP spec 3.1) has the same shape. Per `cp:lock:*` key it holds
+`Lock(owner, token, expiresAt, holds)`. `LockTry` on a free (or lease-expired) lock grants
+`token + 1` with one hold and a lease of `now + ttl`; by the holder it adds a hold and returns the
+same token; by anyone else it is denied. `LockUnlock` by the holder with the current token drops a
+hold (`:0`) or releases at the last one (`:1`); anyone else, any other token, or a free lock
+answers `-REENTRANCE`. `LockRenew` by the holder with the current token restarts the lease from
+`now` (`:1`), otherwise `-REENTRANCE`. `LockForceUnlock` releases whoever holds it (`+OK`).
+`LockState` answers `[owner or nil, token, ttl_remaining_ms, reentrance]`. A released lock keeps
+its token, so the counter is state-machine state and the next holder on any leader gets the next
+number (C17, I14). Expiry is evaluated on every access through `Lock.at(now)` and swept on every
+tick; nothing reads a clock.
+
+In the engine module, `Command.Cp` gained two sealed sub-hierarchies, `Cp.AtomicLong` and
+`Cp.FencedLock`; the existing `Long*` variants moved under the first, and `LockTry(key, session,
+ttl)`, `LockUnlock(key, session, token)`, `LockRenew(key, session, token, ttl)`,
+`LockForceUnlock(key)` and `LockState(key)` are the second. `CpWire` tags all five (11 to 15) and
+`CpWireTest` round-trips them. `CONTEXT.md` names **fencing token**, **lease** and **session**.
+
+**Concepts named:** The **composite state machine** is the only thing that knows log time; a
+**primitive** (AtomicLong, FencedLock, and T42's three) is a plain class that is told the time
+with every call and can be tested without Raft. Dispatch is by the command's sealed
+sub-hierarchy, so adding a primitive is one sealed class in `Command.Cp`, one branch in the
+composite's `when` and one field in its snapshot. The **fencing token** is the lock's answer to
+"who is current?", the **lease** is its only TTL, and a **session** is, until T41, a number the
+caller supplies. The seam did not move: every test drives `CpEngine.submit`.
+
+**Acceptance:** `dynacache.cp.FencedLockTest`, 13 tests, all green; `CpWireTest` 4 (one new).
+Full `clean package` green: engine 82, cluster 39, cp 38, server 16.
+
+- CP spec 10.1, all ten: `lock_try_acquire_release_roundtrip`, `lock_mutual_exclusion` (two
+  TRYs in flight at once, exactly one granted), `lock_fencing_token_monotonic` (100 cycles
+  across three sessions, tokens strictly climbing and never repeated), `lock_reentrant_same_session`
+  (same token, hold count 2, two UNLOCKs answering `:0` then `:1`),
+  `lock_unlock_wrong_session_rejected`, `lock_unlock_wrong_token_rejected` (both `-REENTRANCE`,
+  STATE unchanged), `lock_ttl_expires` (clock +2 s, one tick, STATE unowned and the next TRY gets
+  token 2), `lock_ttl_renew` (RENEW to 5 s, clock +2 s, tick, still held with 3 s left),
+  `lock_renew_by_non_holder_rejected` (`-REENTRANCE`, lease unchanged),
+  `lock_force_unlock_overrides`.
+- `cp_leader_failover_preserves_state`: a lock and a counter both read the same on the successor.
+- `I18_lock_held_across_leader_failover`: the successor denies another session, shows the same
+  owner and token, accepts the old token's UNLOCK, and issues token 2 next.
+- `I19_lease_expires_late_never_early_across_failover`: lease 30 s, old leader's clock +10 s,
+  killed; the successor (clock at the epoch) shows the lock held with 19 999 ms left right after
+  its term; at 29 999 ms on the successor's clock it is held with 1 ms left; at 30 000 ms it is
+  gone. The "election overhead" is zero in log time because the clocks are injected, so the
+  assertion is exact.
+- Every T38, T39 and T43 test still green, unchanged except that `CpEngineTest` keeps calling
+  `stateMachine.valueOf(key)` and `stateMachine.lastAppliedTs`, now on the composite.
+
+**Deviations:**
+
+1. **`RENEW` never answers `:0`.** CP spec 6.1 gives it `:1 / :0` and 10.1 says a non-holder gets
+   "error". Both a non-holder and a stale token get `-REENTRANCE`, the same as UNLOCK (spec 6.8
+   defines the kind as "wrong token / not current holder"), so `:0` has no case left. T44 maps it as is.
+2. **A denied `TRY` answers `[0, 0]`.** Spec 6.1 shapes the reply as `*2 $ok :token`; here both
+   items are integers (`[1, token]` / `[0, 0]`), since 0 is never an issued token. The RESP encoder
+   writes whatever the `Reply` is; if T44 wants a bulk `ok` it is one line in the state machine.
+3. **`RENEW` takes the token.** The ticket wrote `LockRenew(key, sessionId, ttl)`; spec 3.1 and
+   6.1 carry the token, and the spec wins.
+4. **A reentrant `TRY` does not touch the lease.** Spec 3.1 says it "increments reentrance,
+   returns existing token" and nothing about the lease; `RENEW` is the verb for that.
+5. **Session ids are `Long`.** The ticket allowed string or long. `owner` in `STATE` is therefore
+   an integer reply, nil when free. T41 may keep or change it; every place that reads it is in
+   `FencedLockStateMachine`, `CpWire` and the test.
+6. **A lock key is never forgotten.** Its token counter must outlive every release, so a released
+   lock stays in the map with `owner = null`. Marked `ponytail:` in the source; the ceiling is a
+   huge number of distinct lock keys, the repair a token-only tombstone.
+7. **The lock's map is a `ConcurrentHashMap`** like the counter's, though only the Raft thread
+   touches it today; a plain map would do until something reads it from another thread.
+8. **TDD granularity.** As in T38: the first slice was red (no `LockTry`), and the exhaustive
+   `when` forced TRY, UNLOCK and STATE in one go; the next five spec tests were written against
+   that code. RENEW and FORCE_UNLOCK were each red-then-green (no variant, then the variant and
+   the branch). The three failover tests were green first time. Two literals in my tests were
+   wrong on the first run (STATE sees one millisecond less per intervening entry, C19); the code
+   was right and the literals were corrected.
+9. **Real-time waits.** No `Thread.sleep`. The three failover tests each wait about 5 s for the
+   kit's leader heartbeat timeout (T38's timing, kept as instructed); `FencedLockTest` runs in
+   about 16 s, `CpEngineTest` unchanged at about 7 s.
+
+**For the next ticket:**
+
+- **T41 (sessions)** replaces the caller-supplied `session: Long` with a registry-checked one:
+  `-NOSESSION` is a check at the top of `FencedLockStateMachine.apply` (or in the composite,
+  before dispatch, once the session registry is a third primitive there). "Applying
+  `SESSION_CLOSED` releases every lock the session holds in the same entry" is one method on
+  `FencedLockStateMachine` (`releaseAllOf(session)`) that walks the map; the composite calls it
+  when applying the closed entry. Session timeouts "on every `TTL_TICK`" are one more `sweep`
+  in the composite's `TtlTick` branch, followed by the leader appending `SESSION_CLOSED` from
+  `RaftRuntime.tick`'s completion.
+- **T42** adds three primitives: each is a sealed sub-hierarchy in `Command.Cp`, a branch in
+  `CpStateMachine.runOperation`, a field in its `Snapshot`, and its tags in `CpWire`.
+- **T44** parses `CP.LOCK.*` into the five variants and decides deviations 1 and 2. The session
+  id on a `LockTry` comes from the connection, not the arguments (spec 6.1), so the parser needs
+  the connection's session, which T41 provides.
+- **T45** snapshots: `CpStateMachine.Snapshot` is one chunk with both maps; chunking and the
+  wire form for `InstallSnapshot` are its business, and `installSnapshot` already restores
+  everything the chunk holds.
+- `CpTestKit.leader()` after `killMember` returned a stamping successor in all three failover
+  tests without change; the T39 reset works.

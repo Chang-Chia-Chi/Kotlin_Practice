@@ -9,12 +9,12 @@ time; the token counter is state-machine state so it survives leader change.
 
 **Nature:** mutual exclusion and monotonic tokens, C17, I13, I14, I18, I19 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 30b0742, merged into misc/ai_gen)
 
-- [ ] CP spec 10.1 all ten tests, `lock_try_acquire_release_roundtrip` to `lock_force_unlock_overrides`
-- [ ] `cp_leader_failover_preserves_state`, `I18_lock_held_across_leader_failover`
-- [ ] `I19_lease_expires_late_never_early_across_failover`
-- [ ] Progress entry appended
+- [x] CP spec 10.1 all ten tests, `lock_try_acquire_release_roundtrip` to `lock_force_unlock_overrides`
+- [x] `cp_leader_failover_preserves_state`, `I18_lock_held_across_leader_failover`
+- [x] `I19_lease_expires_late_never_early_across_failover`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
