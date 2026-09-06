@@ -344,12 +344,21 @@ sealed class Command {
     class LRem(override val key: Key, val count: Long, val value: ByteArray) : Keyed(Value.Kind.LIST)
 
     /**
-     * `ZADD key score member [score member ...]`. Scores travel as the client's own bytes because
-     * Redis parses them inside the command: every score is read before any is written, so one
-     * unparseable score leaves the sorted set untouched. Replies with how many members were new.
+     * `ZADD key [NX|XX] [CH] score member [score member ...]`. Scores travel as the client's own
+     * bytes because Redis parses them inside the command: every score is read before any is
+     * written, so one unparseable score leaves the sorted set untouched.
+     *
+     * [condition] is `SET`'s, and means here what it means there: `NX` writes only a member that
+     * is not in the sorted set, `XX` only one that is. [changed] switches the reply from Redis's
+     * default count of new members to its count of members new **or** moved, which is what `CH`
+     * asks for.
      */
-    class ZAdd(override val key: Key, val entries: List<Pair<ByteArray, ByteArray>>) :
-        Keyed(Value.Kind.ZSET)
+    class ZAdd(
+        override val key: Key,
+        val entries: List<Pair<ByteArray, ByteArray>>,
+        val condition: Set.Condition? = null,
+        val changed: Boolean = false,
+    ) : Keyed(Value.Kind.ZSET)
 
     /** `ZSCORE key member`: the score as Redis writes it, nil when the member is not there. */
     class ZScore(override val key: Key, val member: ByteArray) : Keyed(Value.Kind.ZSET)

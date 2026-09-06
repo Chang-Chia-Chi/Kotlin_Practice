@@ -95,12 +95,26 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "expire" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), now().plusSeconds(integer(it[1]))) }
         "pexpire" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), now().plusMillis(integer(it[1]))) }
         "expireat" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), Instant.ofEpochSecond(integer(it[1]))) }
+        "pexpireat" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), Instant.ofEpochMilli(integer(it[1]))) }
         "ttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.SECONDS)
         "pttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.MILLIS)
         "persist" -> Command.Persist(key(name, args, 1))
 
-        // The Sorted Set rows (ZADD, ZREM, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZRANK, ZREVRANK,
-        // ZSCORE, ZCARD, ZINCRBY, ZSCAN) belong here, and arrive with their variants in T07.
+        // Sorted Set. ZRANGE/ZREVRANGE and ZRANK/ZREVRANK are each one command read from the
+        // other end, which is why eleven names make nine rows here.
+        "zadd" -> zadd(args)
+        "zrem" -> Command.ZRem(Key(atLeast(name, args, 2)[0]), args.drop(1))
+        "zrange" -> zrange(name, args, reverse = false)
+        "zrevrange" -> zrange(name, args, reverse = true)
+        "zrangebyscore" -> zrangeByScore(args)
+        "zrank" -> exactly(name, args, 2).let { Command.ZRank(Key(it[0]), it[1]) }
+        "zrevrank" -> exactly(name, args, 2).let { Command.ZRank(Key(it[0]), it[1], reverse = true) }
+        "zscore" -> exactly(name, args, 2).let { Command.ZScore(Key(it[0]), it[1]) }
+        "zcard" -> Command.ZCard(key(name, args, 1))
+        "zincrby" -> exactly(name, args, 3).let { Command.ZIncrBy(Key(it[0]), it[1], it[2]) }
+        "zscan" -> atLeast(name, args, 2).let {
+            options(it.drop(2)).run { Command.ZScan(Key(it[0]), cursor(it[1]), pattern, count) }
+        }
 
         else -> unknown(name, args)
     }
@@ -135,6 +149,62 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
             at += if (takesArgument) 2 else 1
         }
         return Command.Set(Key(args[0]), args[1], condition, ttl)
+    }
+
+    /**
+     * `ZADD key [NX|XX] [CH] score member [score member ...]`. The flags stop at the first token
+     * that is not one, which is the score: a member may be spelled `nx` and still be a member.
+     */
+    private fun zadd(args: List<ByteArray>): Command.ZAdd {
+        if (args.isEmpty()) wrongArity("zadd")
+        var condition: Command.Set.Condition? = null
+        var changed = false
+        var at = 1
+        while (at < args.size) {
+            val flag = args[at].text().lowercase()
+            when (flag) {
+                "nx", "xx" -> {
+                    if (condition != null) syntaxError()
+                    condition = if (flag == "nx") Command.Set.Condition.NX else Command.Set.Condition.XX
+                }
+                "ch" -> changed = true
+                else -> break
+            }
+            at++
+        }
+        return Command.ZAdd(Key(args[0]), pairs("zadd", args, from = at), condition, changed)
+    }
+
+    /** `ZRANGE`/`ZREVRANGE key start stop [WITHSCORES]`: one window read from either end. */
+    private fun zrange(name: String, args: List<ByteArray>, reverse: Boolean): Command.ZRange {
+        within(name, args, 3, 4)
+        if (args.size == 4 && args[3].text().lowercase() != "withscores") syntaxError()
+        return Command.ZRange(Key(args[0]), integer(args[1]), integer(args[2]), args.size == 4, reverse)
+    }
+
+    /** `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`; the bounds stay bytes. */
+    private fun zrangeByScore(args: List<ByteArray>): Command.ZRangeByScore {
+        if (args.size < 3) wrongArity("zrangebyscore")
+        var withScores = false
+        var offset = 0L
+        var count = -1L
+        var at = 3
+        while (at < args.size) {
+            when (args[at].text().lowercase()) {
+                "withscores" -> {
+                    withScores = true
+                    at += 1
+                }
+                "limit" -> {
+                    if (at + 2 >= args.size) syntaxError()
+                    offset = integer(args[at + 1])
+                    count = integer(args[at + 2])
+                    at += 3
+                }
+                else -> syntaxError()
+            }
+        }
+        return Command.ZRangeByScore(Key(args[0]), args[1], args[2], withScores, offset, count)
     }
 
     /** `[MATCH pattern] [COUNT n]`, the tail both `SCAN` and `HSCAN` end with. */

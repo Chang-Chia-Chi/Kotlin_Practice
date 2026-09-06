@@ -10,6 +10,11 @@
     <artifactId>dynacache-server</artifactId>
     <name>DynaCache Server (Netty RESP + gRPC)</name>
 
+    <properties>
+        <!-- The acceptance client of T16: an unmodified Redis client, test scope only (C8). -->
+        <jedis.version>5.2.0</jedis.version>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>dynacache</groupId>
@@ -37,6 +42,12 @@
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>${jedis.version}</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>
