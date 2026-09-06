@@ -1,6 +1,9 @@
 package dynacache.engine
 
+// The skip list's entry, aliased because [Partition.Entry] is the store's own.
+import dynacache.engine.ds.Entry as Scored
 import dynacache.engine.ds.HashTable
+import dynacache.engine.ds.SkipList
 import java.time.Clock
 import java.time.Instant
 import java.util.Random
@@ -176,6 +179,82 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
                 Reply.Integer(removed.toLong())
             }
 
+            is Command.ZAdd -> {
+                // Redis reads every score before it writes any, so one bad score leaves the
+                // sorted set exactly as it was.
+                val scored = command.entries.map { (score, member) ->
+                    (parseScore(score) ?: return NOT_A_FLOAT) to member
+                }
+                if (scored.isEmpty()) return ZERO
+                val zset = zset(command.key, now) ?: newZSet(command.key)
+                Reply.Integer(scored.count { (score, member) -> writeScore(zset, score, member) }.toLong())
+            }
+            is Command.ZScore ->
+                Reply.Bulk(scoreOf(command.key, now, command.member)?.let { scoreText(it).toByteArray() })
+            is Command.ZCard -> Reply.Integer((zset(command.key, now)?.scores?.size ?: 0).toLong())
+            is Command.ZRange -> {
+                val order = zset(command.key, now)?.order
+                val size = order?.size ?: 0
+                // The window is Redis's LRANGE window, so `span` is the one place negative
+                // indices are read. Reversed, position p counts back from the last entry.
+                val window = span(command.start, command.stop, size)
+                val found = when {
+                    order == null || window.isEmpty() -> emptyList()
+                    command.reverse ->
+                        order.rangeByRank(size - 1 - window.last, size - 1 - window.first).asReversed()
+                    else -> order.rangeByRank(window.first, window.last)
+                }
+                Reply.Array(members(found, command.withScores))
+            }
+            is Command.ZIncrBy -> {
+                val delta = parseScore(command.delta) ?: return NOT_A_FLOAT
+                val zset = zset(command.key, now)
+                val moved = (zset?.scores?.get(fieldName(command.member)) ?: 0.0) + delta
+                // inf + -inf: the one sum of two legal scores that is no score at all. Checked
+                // before the key is created, so a refused increment leaves no empty sorted set.
+                if (moved.isNaN()) return NAN_SCORE
+                writeScore(zset ?: newZSet(command.key), moved, command.member)
+                Reply.Bulk(scoreText(moved).toByteArray())
+            }
+            is Command.ZRangeByScore -> {
+                val min = parseBound(command.min) ?: return NOT_A_RANGE
+                val max = parseBound(command.max) ?: return NOT_A_RANGE
+                val found = zset(command.key, now)?.order
+                    ?.rangeByScore(min.score, max.score, min.inclusive, max.inclusive)
+                    .orEmpty()
+                Reply.Array(members(limit(found, command.offset, command.count), command.withScores))
+            }
+            is Command.ZRem -> {
+                val zset = zset(command.key, now)
+                // The score map says whether the member was there; the list is then told the same
+                // thing. Counting off the map keeps one index from silently disagreeing with the
+                // other about what was removed.
+                val removed = zset?.let {
+                    command.members.count { member ->
+                        val score = it.scores.remove(fieldName(member)) ?: return@count false
+                        it.order.remove(score, member)
+                        true
+                    }
+                } ?: 0
+                if (zset != null && zset.scores.size == 0) store.remove(command.key)
+                Reply.Integer(removed.toLong())
+            }
+            is Command.ZScan -> {
+                val scores = zset(command.key, now)?.scores ?: return scanReply(0, emptyList())
+                val found = ArrayList<Reply>()
+                val next = walk(scores, command.cursor, command.count, { member, _ -> matches(command.pattern, fieldBytes(member)) }) { member, score ->
+                    found += Reply.Bulk(fieldBytes(member))
+                    found += Reply.Bulk(scoreText(score).toByteArray())
+                }
+                scanReply(next, found)
+            }
+            is Command.ZRank -> {
+                val zset = zset(command.key, now)
+                val score = zset?.scores?.get(fieldName(command.member)) ?: return NIL
+                val rank = zset.order.rank(score, command.member)
+                Reply.Integer((if (command.reverse) zset.order.size - 1 - rank else rank).toLong())
+            }
+
             is Command.DbSize, is Command.Info -> {
                 purgeExpired(now)
                 Reply.Integer(store.size.toLong())
@@ -254,6 +333,54 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
     private fun items(key: Key, now: Instant): ArrayDeque<ByteArray>? =
         (live(key, now)?.value as Value.List?)?.items
 
+    /** The sorted set under [key], or null when the key is absent. */
+    private fun zset(key: Key, now: Instant): Value.ZSet? = live(key, now)?.value as Value.ZSet?
+
+    /**
+     * An empty sorted set under [key]. The skip list draws its levels from this partition's own
+     * stream, so one seed on the engine still makes every list in it reproducible.
+     */
+    private fun newZSet(key: Key): Value.ZSet =
+        Value.ZSet(SkipList(random.nextLong())).also { store.put(key, Entry(it, null)) }
+
+    /** The reply shape every range command shares: the members, each followed by its score under `WITHSCORES`. */
+    private fun members(found: List<Scored>, withScores: Boolean): List<Reply> =
+        found.flatMap {
+            if (withScores) listOf(Reply.Bulk(it.member), Reply.Bulk(scoreText(it.score).toByteArray()))
+            else listOf(Reply.Bulk(it.member))
+        }
+
+    /**
+     * Redis's `LIMIT offset count`: [count] below zero takes everything from [offset] on, and an
+     * offset past the end takes nothing rather than erroring.
+     */
+    private fun limit(found: List<Scored>, offset: Long, count: Long): List<Scored> {
+        if (offset < 0) return emptyList()
+        if (offset == 0L && count < 0) return found
+        val from = minOf(offset, found.size.toLong()).toInt()
+        val to = if (count < 0) found.size else minOf(from + count, found.size.toLong()).toInt()
+        return found.subList(from, to)
+    }
+
+    /** What [member] scores in [key]'s sorted set, or null when either is absent. */
+    private fun scoreOf(key: Key, now: Instant, member: ByteArray): Double? =
+        zset(key, now)?.scores?.get(fieldName(member))
+
+    /**
+     * Writes one (member, score) into both indexes at once, answering whether the member was new.
+     * The score map holds the member's one score, so an existing member is a move in the list
+     * rather than a second entry; that pairing is what makes the dual index a single value.
+     */
+    private fun writeScore(zset: Value.ZSet, score: Double, member: ByteArray): Boolean {
+        val previous = zset.scores.put(fieldName(member), score)
+        if (previous == null) {
+            zset.order.insert(score, member)
+            return true
+        }
+        if (previous != score) zset.order.updateScore(previous, member, score)
+        return false
+    }
+
     /**
      * A Redis list index as a position: a negative one counts back from the tail. An index the
      * list does not reach clamps to just outside it, which every caller treats as "not there";
@@ -317,6 +444,7 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
         val NO_SUCH_KEY = Reply.Error("ERR", "no such key")
         val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")
         val NOT_AN_INTEGER = Reply.Error("ERR", "value is not an integer or out of range")
+        val NAN_SCORE = Reply.Error("ERR", "resulting score is not a number (NaN)")
         val WRONG_TYPE = Reply.Error("WRONGTYPE", "Operation against a key holding the wrong kind of value")
         val NIL = Reply.Bulk(null)
         val ZERO = Reply.Integer(0)
