@@ -9,12 +9,12 @@ read every replica of every key, assert equal value and DVV); a seeded chaos dri
 
 **Nature:** invariant checkers under chaos, I1 and I2 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 02a0a53 + merge 6a48f3a, merged into misc/ai_gen)
 
-- [ ] `convergence_after_partition`
-- [ ] `I1_all_replicas_equal_after_heal_drain_sync` over five seeds
-- [ ] `I2_minority_crash_loses_no_acked_write`: kill fewer than N-W+1 nodes, every acked key readable at quorum R
-- [ ] Progress entry appended
+- [x] `convergence_after_partition`
+- [x] `I1_all_replicas_equal_after_heal_drain_sync` over five seeds
+- [x] `I2_minority_crash_loses_no_acked_write`: kill fewer than N-W+1 nodes, every acked key readable at quorum R
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

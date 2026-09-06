@@ -4391,3 +4391,113 @@ more thing the tick does.
   a timeout, not a misconfiguration.
 - **`restoreSnapshot` is `runBlocking`**, so it must not be called from a coroutine on the node's
   own dispatcher. From a test thread or a `main`, it is fine.
+
+## T30: Convergence and minority-crash safety
+
+**Built:** The I1 checker in the test kit: `InProcessCluster.assertConverged()` heals every
+network partition, restarts every node on the transport, marks every non-alive member alive
+under a fresh incarnation, drains messages and hints, runs one full anti-entropy cycle on every
+node (`antiEntropyStep` until that node's `rangesCompared` has advanced by its range count,
+bounded at twice that many steps), drains again, and then for every key that ever went through
+the kit (`written`, fed by `submitVia`, `submitOn` and `seed`) reads every preference-list
+replica's engine copy and version and asserts the triple `(content, deadline, version)` equal
+across replicas, failing on the first divergent key with both sides named. The content view is
+`canon(value)`, lifted from `MergeTest` to a top-level function in the kit. `submitVia(node,
+command)` is `settle(router(node).submit(command))` and now backs `writeVia`/`readVia`;
+`submitOn(node, command)` goes through `replication(node)` directly, what spec 5.1 step 7's
+coordinator failover would do and the router does not yet (T22 deviation 7), which is how a
+test writes on both sides of a network partition. `TokenCodec` learned `LPUSH`/`RPUSH`,
+`LRANGE`, `ZADD` and `ZRANGE [WITHSCORES]`.
+
+`ChaosDriver` (own file, test kit): a seeded loop over an `InProcessCluster`. A key's first
+letter is its type (`s h l z c`), so every write fits its key: `SET`, `HSET`, `LPUSH`, `ZADD`,
+`INCRBY`, plus a `DEL` one time in eight, through a random live node; a type-appropriate read
+(`GET`, `HGETALL`, `LRANGE 0 -1`, `ZRANGE 0 -1 WITHSCORES`) through any node; a network
+partition into two random non-empty sides or its heal; a kill (`network.kill` plus
+`membership.set(DEAD)`) or the restart of the one node down (`network.restart` plus
+`set(ALIVE, incarnation + 1)`, so the hints held for it replay on the alive event). At most one
+node down and one split open at a time; `run(steps)` heals and restarts whatever is outstanding
+before returning. `acked` is the last acknowledged version per key: the coordinator's version
+right after a reply that was not an error. `ChaosDriver.keys(perType)` and `readOf(key)` are
+public for the tests. Five files, 297 insertions, 13 deletions, all in the cluster module's
+tests; no production change.
+
+**Concepts named:** No new vocabulary. **Acknowledged** is used as CONTEXT.md's quorum entry
+implies: a reply that is not an error; a quorum error, a forward timeout and an engine error
+alike promise nothing. The checker's **content view** (`canon`) is what a client would read
+back, so two `Value`s compare by content rather than by reference.
+
+**Acceptance:**
+- `convergence_after_partition`: three nodes, N = 3, W = 1, R = 3; a string, a hash, a list and
+  a sorted set written and drained; split `{node-1} | {node-2, node-3}`; both sides write all
+  four keys concurrently through `submitOn`, every write acknowledged; `assertConverged`; then
+  the merged state of spec 2.5 on the healed cluster: the last writer's string, the hash with
+  both sides' fields, `[x, a, b]` (shared prefix, then both tails), `m1` at the higher score.
+  Red first: the kit had none of `submitVia`, `submitOn`, `assertConverged`.
+- `I1_all_replicas_equal_after_heal_drain_sync`: seeds 1 to 5, four nodes, N = 3, W = 2, R = 2
+  (so sloppy quorum and hints are in play), sixty steps each, then `assertConverged`. Red
+  first: no driver existed; then seed 4 failed on the tombstone gap (deviation 1).
+- `I2_minority_crash_loses_no_acked_write`: three nodes, N = 3, W = 2, R = 2, seed 30, sixty
+  steps over keys coordinated by node-1 and node-2; then node-3 is killed and marked dead;
+  every acknowledged key is read at quorum through a survivor and answers without error, and
+  after the drain each survivor's version dominates or equals the acknowledged one. "At least as
+  new" is decided on versions, read side dominating: `read == acked || read.dominates(acked)`,
+  never the other direction. The read's version is taken from the survivors' side tables after
+  the read and a drain, because read repair leaves the winning version on the survivor that was
+  behind, so both hold what the read answered.
+- Mutation-checked in one run: with the anti-entropy cycle removed from the checker,
+  `convergence_after_partition` fails on the string with both siblings named and I1 fails on
+  seed 1 with a key held on one replica and absent on another; with node-2 killed as well
+  (a majority), I2 fails on the first read with the forward timeout.
+- `mvn -B -o -q clean package` offline green after merging `misc/ai_gen` (tickets 45, 37 and the
+  `ClusterNode` compile fix): engine 144, cluster 83, cp 89, server 82. Commit `02a0a53a`, merge
+  `6a48f3a5` on `t30`.
+  `ConvergenceTest` runs in about 5 seconds.
+- This entry.
+
+**Deviations:**
+1. **An absent key compares as absent alone; its version is not compared.** The driver found
+   this on seed 4 of its first run: key `c4` absent on every replica, the coordinator holding the
+   version a `DEL` left behind (`node-4:1`) and node-1 holding no version at all, because the
+   `Replicate` never reached it and anti-entropy carries no tombstones (T28 deviation 3: a key
+   with no value builds no leaf). No client can observe that version, the value side converges,
+   and a later write on the key merges past it (a concurrent sibling on the replica that held
+   the tombstone resolves on the next exchange). Fixing it means tombstone leaves in
+   `AntiEntropy.held` (versions with no value, enumerated from `Replication`'s side table),
+   a `Held` with no value, a delete-versus-concurrent-write rule spec 5.3 does not make, and a
+   `DEL` on install: well over a few lines and a semantics decision, so recorded as the
+   finding rather than fixed. The resurrection half of the same gap (a `DEL` one replica missed
+   is handed back by anti-entropy, regressing the other replicas' versions) does converge, to
+   the resurrected value, and I1 as stated holds; it is client-visible debt all the same.
+2. **`convergence_after_partition` writes the far side through `submitOn`** (the node's
+   replication layer), not through the router: the router forwards to the preference list's
+   first node whether or not it is reachable (T22 deviation 7), so through it the minority side
+   cannot write at all and "concurrent writes on both sides" would not exist. W = 1 so both
+   sides acknowledge; R = 3 keeps C4.
+3. **I2 crashes a replica, not a coordinator.** A key whose coordinator is down is unreachable
+   through the router (the forward times out) until spec 5.1 step 7's failover exists; that is
+   unavailability, which T24 deviation 1 already records, not loss, and I2 is about loss. The
+   driver's keys are therefore the ones node-1 and node-2 coordinate and node-3 is the crash.
+   Three nodes and N = 3 also means no substitute exists, so no acknowledged write rests on a
+   hint holder.
+4. **"Acknowledged" excludes every error reply**, not only the quorum error the briefing named:
+   an engine error (none arises, since keys are typed) writes nothing, and T22 deviation 3's
+   "reported as failed but stored" write is exactly what I2 must not rely on.
+5. **The driver is sequential**: one step settles before the next, so "concurrent" writes exist
+   only across a network partition, where the far side cannot write through the router. Within
+   the driver, versions of a key chain through its one coordinator; siblings arise only from
+   `submitOn` and from the resurrection regression of deviation 1.
+6. **The driver never runs anti-entropy** (the briefing's step list has none); the checker does.
+   With the tombstone gap, an anti-entropy round inside the run could regress an acknowledged
+   `DEL` on both survivors and fail I2 legitimately; that is deviation 1's debt, not I2's.
+7. The kit's `keys` member had to be `written`: `DistributedSnapshotTest` has a `keys` of its
+   own inside an extension on the cluster, and the extension receiver shadows it.
+
+**For the next ticket:** `assertConverged` is the P3 exit criterion's checker and runs in about
+a second per four-node cycle at two partitions per node; `ChaosDriver(cluster, seed, keys)`
+takes any key list whose names start with a type letter, and `acked` is the map to check
+against. `submitOn` stands in for coordinator failover; when spec 5.1 step 7 lands in `Router`,
+`convergence_after_partition` can go through `submitVia` on both sides and I2 can crash any
+node. The tombstone gap (deviation 1) is the one convergence finding: `AntiEntropy.held` is the
+place, and a checker that compares versions of absent keys too is one `?.let` away in
+`assertConverged`. `AntiEntropy.run()` is still not launched by any node assembly.
