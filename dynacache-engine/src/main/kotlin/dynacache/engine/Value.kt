@@ -1,5 +1,7 @@
 package dynacache.engine
 
+import dynacache.engine.ds.HashTable
+
 /**
  * What a key holds. A key is one kind and never another, and a command declares the [Kind]
  * it needs so a wrong-type command is refused before it can touch the entry (C13).
@@ -13,9 +15,9 @@ internal sealed class Value(val kind: Kind) {
 
     /**
      * Field names are held as ISO-8859-1 text: that charset maps every byte to one character and
-     * back, so a binary-safe field name survives, and the JDK's own map does the hashing.
+     * back, so a binary-safe field name survives and the table hashes text.
      */
-    class Hash(val fields: LinkedHashMap<String, ByteArray> = LinkedHashMap()) : Value(Kind.HASH)
+    class Hash(val fields: HashTable<String, ByteArray> = HashTable()) : Value(Kind.HASH)
 
     /**
      * An ordered sequence. Kotlin's own [ArrayDeque] is a circular buffer, so both ends push and

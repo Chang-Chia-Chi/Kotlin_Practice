@@ -223,14 +223,12 @@ class CommandEngineTest {
         val h = Key("h")
         assertEquals(Reply.Array(emptyList()), run(Command.HGetAll(h)), "a missing hash is an empty array")
         run(Command.HSet(h, listOf("a".toByteArray() to "1".toByteArray(), "b".toByteArray() to "2".toByteArray())))
+        // Redis defines no order for HGETALL, and the T05 table walks its buckets, so the pairs
+        // are compared as a set.
+        val flat = (run(Command.HGetAll(h)) as Reply.Array).items
         assertEquals(
-            Reply.Array(
-                listOf(
-                    Reply.Bulk("a".toByteArray()), Reply.Bulk("1".toByteArray()),
-                    Reply.Bulk("b".toByteArray()), Reply.Bulk("2".toByteArray()),
-                ),
-            ),
-            run(Command.HGetAll(h)),
+            setOf(bulks("a", "1"), bulks("b", "2")),
+            flat.chunked(2).map { Reply.Array(it) }.toSet(),
             "every field and its value, flat and in one array",
         )
     }
@@ -270,10 +268,11 @@ class CommandEngineTest {
             run(Command.HMGet(h, listOf(a, gone, b))),
             "in the order the fields were asked for",
         )
-        assertEquals(Reply.Array(listOf(Reply.Bulk(a), Reply.Bulk(b))), run(Command.HKeys(h)))
+        // HKEYS and HVALS come out in the table's bucket order, which Redis leaves undefined too.
+        assertEquals(setOf(Reply.Bulk(a), Reply.Bulk(b)), (run(Command.HKeys(h)) as Reply.Array).items.toSet())
         assertEquals(
-            Reply.Array(listOf(Reply.Bulk("1".toByteArray()), Reply.Bulk("2".toByteArray()))),
-            run(Command.HVals(h)),
+            setOf(Reply.Bulk("1".toByteArray()), Reply.Bulk("2".toByteArray())),
+            (run(Command.HVals(h)) as Reply.Array).items.toSet(),
         )
     }
 
@@ -487,6 +486,109 @@ class CommandEngineTest {
         val drawn = (1..200).map { (run(Command.RandomKey) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }.toSet()
         assertTrue(seeded.map(Key::toString).containsAll(drawn), "every draw is a live key, never the expired one")
         assertTrue(drawn.map { engine.partitionOf(Key(it)) }.toSet().size > 1, "the draws come from more than one partition")
+    }
+
+    /** One `SCAN` call: the next cursor and the keys as text, duplicates kept. */
+    private fun scanOnce(cursor: Long, pattern: String? = null, count: Int = 10): Pair<Long, List<String>> {
+        val reply = run(Command.Scan(cursor, pattern?.toByteArray(), count)) as Reply.Array
+        val next = (reply.items[0] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1).toLong()
+        val keys = (reply.items[1] as Reply.Array).items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+        return next to keys
+    }
+
+    /** A full `SCAN` walk, cursor 0 to 0; [between] runs after every call with the call's index. */
+    private fun scanAll(pattern: String? = null, count: Int = 10, between: (Int) -> Unit = {}): List<String> {
+        val seen = ArrayList<String>()
+        var cursor = 0L
+        var calls = 0
+        do {
+            val (next, keys) = scanOnce(cursor, pattern, count)
+            seen += keys
+            cursor = next
+            between(calls++)
+            assertTrue(calls < 100_000, "SCAN never terminated")
+        } while (cursor != 0L)
+        return seen
+    }
+
+    @Test
+    fun scan_returns_all_keys() {
+        val seeded = (0 until 200).map { "k$it" }
+        seeded.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertTrue(seeded.map(::Key).map(engine::partitionOf).toSet().size == 4, "the keys span every partition")
+        assertEquals(seeded.toSet(), scanAll().toSet())
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(seeded.toSet(), scanAll().toSet(), "an expired key is not in SCAN")
+    }
+
+    @Test
+    fun scan_cursor_zero_terminates() {
+        assertEquals(emptyList<String>(), scanAll(), "an empty keyspace is a walk that ends with nothing found")
+        (0 until 50).forEach { run(Command.Set(Key("k$it"), "v".toByteArray())) }
+        var calls = 0
+        val seen = scanAll(count = 5) { calls++ }
+        assertTrue(calls > 1, "COUNT 5 over 50 keys takes several calls: $calls")
+        assertEquals(50, seen.toSet().size)
+        var wide = 0
+        scanAll(count = 1_000) { wide++ }
+        assertEquals(4, wide, "a COUNT past the keyspace takes one call per partition and no more")
+        assertEquals(0L to emptyList<String>(), scanOnce(Long.MAX_VALUE), "a cursor past the last partition is done")
+    }
+
+    @Test
+    fun scan_match_filters() {
+        listOf("user:1", "user:2", "user:10", "admin", "a", "b").forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertEquals(setOf("user:1", "user:2", "user:10"), scanAll("user:*").toSet())
+        assertEquals(setOf("user:1", "user:2"), scanAll("user:?", count = 1).toSet())
+        assertEquals(emptySet<String>(), scanAll("nothing*").toSet())
+    }
+
+    @Test
+    fun C15_scan_completeness() {
+        val random = Random(15)
+        val stable = (0 until 300).map { "stable$it" }
+        stable.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        val churn = (0 until 2_000).map { "churn$it" }
+        churn.take(500).forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        var storms = 0
+        val seen = scanAll(count = 3) {
+            // A seeded insert and delete storm between every two SCAN calls: enough churn to
+            // grow and shrink the partitions' tables while the walk is under way.
+            repeat(40) {
+                val key = Key(churn[random.nextInt(churn.size)])
+                if (random.nextBoolean()) run(Command.Set(key, "v".toByteArray())) else run(Command.Del(key))
+            }
+            storms++
+        }
+        assertTrue(storms > 50, "the walk took many calls, so the storm ran alongside it: $storms")
+        assertTrue(seen.containsAll(stable), "keys present throughout were missed: ${stable - seen.toSet()}")
+        assertTrue(seen.all { it in stable || it in churn }, "SCAN never invents a key")
+    }
+
+    @Test
+    fun `HSCAN walks one hash, MATCH and COUNT included`() {
+        val h = Key("h")
+        fun hscan(pattern: String? = null, count: Int = 10): Map<String, String> {
+            val seen = HashMap<String, String>()
+            var cursor = 0L
+            var calls = 0
+            do {
+                val reply = run(Command.HScan(h, cursor, pattern?.toByteArray(), count)) as Reply.Array
+                cursor = (reply.items[0] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1).toLong()
+                val flat = (reply.items[1] as Reply.Array).items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+                flat.chunked(2).forEach { (field, value) -> seen[field] = value }
+                assertTrue(calls++ < 1_000, "HSCAN never terminated")
+            } while (cursor != 0L)
+            return seen
+        }
+        assertEquals(emptyMap<String, String>(), hscan(), "a missing key is an empty walk that ends at once")
+        val fields = (0 until 100).map { "f$it" to "$it" }
+        run(Command.HSet(h, fields.map { (f, v) -> f.toByteArray() to v.toByteArray() }))
+        assertEquals(fields.toMap(), hscan(count = 7))
+        assertEquals(fields.toMap().filterKeys { it.startsWith("f9") }, hscan("f9*"))
+        run(Command.Set(Key("s"), "v".toByteArray()))
+        assertEquals(WRONG_TYPE, run(Command.HScan(Key("s"), 0)), "HSCAN on a String is refused")
     }
 
     @Test
