@@ -5840,3 +5840,136 @@ same shape: the test's `when` is what forces the author of a new mutating varian
   conditional `SET`), so the `if (reply is Reply.Error || ...)` check there becomes the null. The
   replicate's `expiresAtMillis` field is the same decision as `encode`'s `now`: pass the
   coordinator's instant and the TTL travels absolute.
+
+---
+
+## T59 - Acceptance tests run on the injected clock
+
+Plan rule 1.5 at the acceptance tier. No test in the repository constructs `Clock.systemUTC()`
+or `Clock.systemDefaultZone()` any more, and the four acceptance tests no longer spin on wall
+time except where the thing being waited for is another thread that reads no clock at all.
+
+Test sources only; no production file changed. Six files, +110 / -41.
+
+### What changed, per test
+
+**`P1AcceptanceTest`** - the engine was built on `Clock.systemUTC()` and `aTtlThatFires` spun on
+`System.nanoTime()` for up to five seconds. It now holds one `MutableClock` at
+`2026-09-06T00:00:00Z` and hands the same instance to the engine *and* to the server, which is
+the shape T52 gave `DynaCacheServerTest.withServer`: the parser works out a `PX` deadline from
+the server's clock and the engine compares it against its own, so the two must be one clock.
+`aTtlThatFires` advances 201 ms past the `PX 200` and calls `engine.tick().join()` - the tick the
+server's scheduler would otherwise have run - then asserts as before. Every assertion and the
+test's name are unchanged.
+
+**`CpRoutingTest`** and **`CpSessionLifecycleTest`** - both built the AP engine on
+`Clock.systemUTC()`; the ticket names only the first, but the acceptance criterion is about every
+test, so both are on a `MutableClock` now, shared with the server as in P1. The clock never
+moves. This is safe across the CP boundary because a lease is measured on log time, which only a
+CP member's own (kit) clock moves, and `EXPIRE`'s absolute deadline is turned straight back into
+a span by `CommandDispatcher` using the same clock the parser built it from - so the AP clock and
+the CP clocks never need to agree on what the date is. Freezing it also removes a small real
+wobble: `TTL` on a 100 s reference lease used to lose the milliseconds spent between the parser
+and the dispatcher.
+
+**`P2AcceptanceTest`** - the three `ClusterNode`s take the shared `MutableClock`, so the TTL that
+crosses the quorum is measured against a "now" the test sets. The gossip wait stays (below).
+
+**`P4AcceptanceTest`** - every generation of nodes, including the single node the memory-pressure
+section builds, takes one `MutableClock` that survives the restarts as the data dirs do. Three
+changes follow from it:
+
+- `aMixedKeyspaceThroughJedis` no longer answers `System.nanoTime()`, and `everyKeyCameBack` no
+  longer subtracts the seconds spent restarting. No clock time passes across the restart, so the
+  restored TTL is asserted exactly: `assertEquals(60L, three.ttl("sess:1"))` where it used to be
+  `in 1L..(60L - spent)`.
+- the `blink` key's 300 ms deadline is reached by advancing 301 ms rather than by polling. The
+  restart now costs no clock time at all, which is what lets the test assert `blink` is *still
+  there* when the node comes back before advancing past its deadline.
+- `aTtlFiresOnAClusterNode` advances 201 ms instead of polling for up to ten seconds.
+
+The snapshot wait stays (below).
+
+**`P5AcceptanceTest`** - the three nodes take the shared `MutableClock`. P5 constructed no system
+clock, so this is not required by the acceptance criterion; it is here because
+`SET cp:counter:x 5 EX 10` was a live wall-clock dependency, and a run slow enough under CI load
+could have let that lease lapse between the `SET` and the `INCR` that reads it back. The election
+wait stays (below).
+
+### Bounded waits that remain (plan rule 1.7)
+
+Each waits for a thread that consults no clock, so there is nothing a test could advance to bring
+it forward. All three are bounded polls; none sleeps.
+
+1. `P2AcceptanceTest.gossipSeesTheDeadNode`, 30 s. Waits for **SWIM's own gossip coroutine** on
+   `Dispatchers.Default`, and the gRPC transport it probes over. `Swim` takes no `Clock` at all -
+   it counts its own gossip periods through `delay` - so a burial cannot be brought forward by
+   moving the injected clock.
+2. `P4AcceptanceTest.awaitUntil`, one remaining call ("the snapshot completed on every node"),
+   20 s. Waits for the **gRPC transport threads and each node's router coroutine** to carry the
+   Chandy-Lamport markers past the envelopes in flight. No clock is read anywhere on that path.
+3. `P5AcceptanceTest.awaitValue` in `cpLeader()`, 20 s. Waits for **MicroRaft's election timer
+   threads** on the three members. MicroRaft runs its own scheduler and takes no injected clock -
+   the same reason the CP kit's waits were recorded at T45 and T46.
+
+Already recorded elsewhere and cited rather than re-recorded: `CpTestKit.awaitApplied` and
+`ChaosDriver`'s submit deadline (T38, T43, T45, T46 deviations). Both stand unchanged.
+
+### The two flakes
+
+**`ReadRepairTest.read_repair_does_not_delay_reply`** - reproduced once here, on the first full
+reactor run of this ticket, as `IllegalStateException: no READ reached node-3` at
+`ReadRepairTest.kt:150`. It is **not** a real-time wait and not a clock read, so it is left alone
+per the ticket. `arrived()` does `repeat(10) { network.drain(); yield(); tryReceive() }` inside
+`runTest`, on a `TestDispatcher`. The READ envelope it is looking for is sent only after
+`Replication.submit(Command.Get)`'s local `engine.view` future completes, and that future
+completes on an **`ApEngine` partition executor thread**, outside the test dispatcher. `yield()`
+only reschedules within the dispatcher; it does not wait for the partition thread, so all ten
+iterations can run before the view completes. Converting it means awaiting the engine's future
+(or a real bounded wait) - a logic change, not a clock injection - so it is out of this ticket.
+
+**`CpEngineTest.C23_every_member_agrees_on_expiry_at_same_index`** - already on the injected
+clock: it drives the expiry with `kit.clock(leader).advance(Duration.ofSeconds(2))` and an
+explicit `leader.tick()`. Its only real-time wait is `CpTestKit.awaitApplied`, which polls a
+member's MicroRaft `report` until the commit index arrives, waiting on **MicroRaft's replication
+and heartbeat threads**. That is the already-recorded T45/T46 deviation and no clock advance
+reaches it. Nothing changed; it passed on every run here.
+
+### Wall time
+
+Four acceptance classes, run on their own (`-Dtest=P1,P2,P4,P5AcceptanceTest`), seconds. Two other
+Maven builds were running on the machine throughout, so run-to-run noise is roughly +/- 0.7 s on
+an 11 s total. The first baseline sample was taken under lighter load than everything after it;
+samples 2 and 3 were taken by reverting the six files in place, so they share the load of the
+"after" runs.
+
+| Run | P1 | P2 | P4 | P5 | total |
+| --- | --- | --- | --- | --- | --- |
+| before, sample 1 (light load) | 1.144 | 4.485 | 1.513 | 3.304 | 10.446 |
+| before, sample 2 | 1.627 | 4.699 | 1.939 | 3.357 | 11.622 |
+| before, sample 3 | 1.509 | 4.750 | 1.671 | 3.279 | 11.209 |
+| after, sample 1 (fresh compile) | 1.830 | 4.795 | 1.909 | 3.401 | 11.935 |
+| after, sample 2 | 1.524 | 4.724 | 1.667 | 3.372 | 11.287 |
+
+Flat within the noise: 11.21 before against 11.29 after, comparing the two samples taken under
+the same load. Inside the full reactor run, where P1 is no longer the first class to pay the JVM
+and Netty warm-up, P1 falls from about 1.5 s to 0.38 s.
+
+Suite totals unchanged, as no test was added or removed: engine 151, cluster 86, cp 92, server
+92, **421 total**, green.
+
+### Deviations
+
+1. Three bounded real-time waits remain, named above with the thread each waits for (rule 1.7).
+2. `P4AcceptanceTest` gained one assertion, `assertEquals("gone", three.get("blink"))`, against
+   the brief's "keep every assertion" (it says keep, not freeze). It is here because the frozen
+   clock is what makes "the key is still alive when the node comes back" checkable at all, and
+   without it the `assertNull` that follows would go green on a key the RDB had dropped entirely.
+3. `P4AcceptanceTest`'s restored TTL assertion was tightened from `in 1L..(60L - spent)` to
+   `assertEquals(60L, ...)`, for the same reason: the elapsed-time slack it allowed no longer
+   exists.
+4. Two tests beyond the four the ticket names were changed: `CpSessionLifecycleTest` also built
+   its AP engine on `Clock.systemUTC()`, and the acceptance criterion covers every test, so it was
+   fixed alongside `CpRoutingTest`.
+5. `P5AcceptanceTest`'s nodes were put on the injected clock although P5 constructed no system
+   clock, to remove the `EX 10` lease's dependency on how slow the machine is.
