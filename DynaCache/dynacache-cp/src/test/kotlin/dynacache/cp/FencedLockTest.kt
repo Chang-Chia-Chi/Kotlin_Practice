@@ -87,14 +87,56 @@ class FencedLockTest {
         assertEquals(CYCLES, tokens.distinct().size, "no token issued twice: $tokens")
     }
 
+    /**
+     * I13 under its own name: at any committed log index at most one session holds a lock key.
+     * The assertion is [lock_mutual_exclusion]'s -- exactly one of two racing sessions is granted
+     * and the other denied -- so this delegates rather than restating it.
+     */
+    @Test
+    fun I13_at_most_one_session_holds_a_lock() = lock_mutual_exclusion()
+
+    /**
+     * I14 under its own name: for one lock key, a later acquire's token is greater than an
+     * earlier one's. [lock_fencing_token_monotonic] is that assertion over a hundred cycles.
+     */
+    @Test
+    fun I14_a_later_acquire_gets_a_greater_token() = lock_fencing_token_monotonic()
+
+    /**
+     * C17 under its own name: the token a successful `LOCK_TRY` returns is strictly greater than
+     * every token previously returned for the key. Within one term that is
+     * [lock_fencing_token_monotonic]; across a leader change it is
+     * [I18_lock_held_across_leader_failover], and across a skewed one
+     * [C17_lease_expires_after_skewed_failover].
+     */
+    @Test
+    fun C17_fencing_tokens_never_repeat() = lock_fencing_token_monotonic()
+
     @Test
     fun lock_reentrant_same_session() {
         assertEquals(granted(1), tryLock(session = 7))
         assertEquals(granted(1), tryLock(session = 7), "held again with the same token")
         assertEquals(heldBy(session = 7, token = 1, remaining = LEASE.toMillis() - 2, holds = 2), state())
 
-        assertEquals(Reply.Integer(0), submit(Command.Cp.LockUnlock(lock, 7, 1)), "one hold dropped, still held")
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LockUnlock(lock, 7, 1)), "one hold dropped, still held")
         assertEquals(Reply.Integer(1), submit(Command.Cp.LockUnlock(lock, 7, 1)), "released")
+        assertEquals(unowned(token = 1), state())
+    }
+
+    /**
+     * CP spec 3.1 and 6.1: every accepted `LOCK_UNLOCK` answers `:1` -- the release and the
+     * reentrant decrement that still holds alike -- and a rejection is the error of CP spec 6.8.
+     * The spec gives `:0` no meaning of its own, so nothing answers it.
+     */
+    @Test
+    fun lock_unlock_reply_shape() {
+        assertEquals(granted(1), tryLock(session = 7))
+        assertEquals(granted(1), tryLock(session = 7), "held twice by the one session")
+
+        assertEquals("REENTRANCE", (submit(Command.Cp.LockUnlock(lock, session = 8, token = 1)) as Reply.Error).kind, "a non-holder is refused")
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LockUnlock(lock, 7, 1)), "the reentrant decrement is accepted")
+        assertEquals(heldBy(session = 7, token = 1, remaining = LEASE.toMillis() - 4, holds = 1), state(), "and still holds")
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LockUnlock(lock, 7, 1)), "the release is accepted")
         assertEquals(unowned(token = 1), state())
     }
 

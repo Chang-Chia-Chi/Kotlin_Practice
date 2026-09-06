@@ -18,11 +18,8 @@ private val EXPIRY_SHAPES = listOf(
     listOf("EXPIREAT", "k", ARGUMENT),
     listOf("PEXPIREAT", "k", ARGUMENT),
     listOf("SETEX", "k", ARGUMENT, "v"),
-    listOf("PSETEX", "k", ARGUMENT, "v"),
     listOf("SET", "k", "v", "EX", ARGUMENT),
     listOf("SET", "k", "v", "PX", ARGUMENT),
-    listOf("SET", "k", "v", "EXAT", ARGUMENT),
-    listOf("SET", "k", "v", "PXAT", ARGUMENT),
 )
 
 /**

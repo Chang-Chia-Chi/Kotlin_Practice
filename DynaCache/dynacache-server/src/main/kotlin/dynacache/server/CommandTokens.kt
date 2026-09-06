@@ -14,7 +14,7 @@ import dynacache.engine.Command
  * Where the wire has several spellings of one meaning, this writes the one that carries
  * everything the variant holds. `Command.Expire` is an absolute instant however the client
  * spelled it (spec 5.4), so it goes out as `PEXPIREAT`; `Command.Set`'s TTL is a duration that
- * no longer knows whether it arrived as `EX`, `EXAT` or `PXAT`, so it goes out as `PX`.
+ * no longer knows whether it arrived as `EX`, `PX` or `SETEX`, so it goes out as `PX`.
  */
 fun commandToTokens(command: Command): List<ByteArray> = when (command) {
     is Command.Keyed -> keyedTokens(command)

@@ -341,7 +341,6 @@ object CpWire {
             is Command.Cp.LongIncr -> tagged(CMD_INCR, command.key) {}
             is Command.Cp.LongDecr -> tagged(CMD_DECR, command.key) {}
             is Command.Cp.LongIncrBy -> tagged(CMD_INCR_BY, command.key) { writeLong(command.delta) }
-            is Command.Cp.LongDecrBy -> tagged(CMD_DECR_BY, command.key) { writeLong(command.delta) }
             is Command.Cp.LongCas -> tagged(CMD_CAS, command.key) {
                 writeLong(command.expected)
                 writeLong(command.new)
@@ -414,7 +413,8 @@ object CpWire {
             CMD_INCR -> Command.Cp.LongIncr(key)
             CMD_DECR -> Command.Cp.LongDecr(key)
             CMD_INCR_BY -> Command.Cp.LongIncrBy(key, readLong())
-            CMD_DECR_BY -> Command.Cp.LongDecrBy(key, readLong())
+            CMD_DECR_BY_RETIRED ->
+                error("CP command tag $tag is the retired DECRBY: a DECRBY is an ADD with a negative delta")
             CMD_CAS -> Command.Cp.LongCas(key, readLong(), readLong())
             CMD_EXPIRE -> Command.Cp.LongExpire(key, Duration.ofMillis(readLong()))
             CMD_TTL -> Command.Cp.LongTtl(
@@ -546,7 +546,8 @@ object CpWire {
     private const val CMD_INCR = 3
     private const val CMD_DECR = 4
     private const val CMD_INCR_BY = 5
-    private const val CMD_DECR_BY = 6
+    /** Was `DECRBY`, deleted in T62 (CP spec 6.2 gives it no verb). Retired, never reused. */
+    private const val CMD_DECR_BY_RETIRED = 6
     private const val CMD_CAS = 7
     private const val CMD_EXPIRE = 8
     private const val CMD_TTL = 9

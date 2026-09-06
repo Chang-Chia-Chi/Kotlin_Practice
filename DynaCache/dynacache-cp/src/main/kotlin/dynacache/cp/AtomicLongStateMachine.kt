@@ -27,7 +27,6 @@ class AtomicLongStateMachine {
         is Command.Cp.LongIncr -> add(command.key, 1, now)
         is Command.Cp.LongDecr -> add(command.key, -1, now)
         is Command.Cp.LongIncrBy -> add(command.key, command.delta, now)
-        is Command.Cp.LongDecrBy -> add(command.key, -command.delta, now)
         is Command.Cp.LongCas -> {
             // A counter that was never written reads as 0, as INCR treats it (I21: the compare
             // and the swap happen in one applied entry, so no reader sees a half state).

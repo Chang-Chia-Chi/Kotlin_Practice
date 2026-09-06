@@ -90,10 +90,16 @@ class ChaosDriver(seed: Long, fileStoreDir: Path? = null) : AutoCloseable {
         }
     }
 
+    /**
+     * An accepted unlock answers `:1` whether it released the lock or only dropped one reentrant
+     * hold (CP spec 3.1), and a `LockTry` retried after a lost reply may have taken a hold this
+     * driver never saw, so the new owner is read back through the log rather than guessed.
+     */
     private fun unlock(key: Key, owner: HashMap<Key, Long?>, token: MutableMap<Key, Long>) {
         val session = owner[key] ?: return
         val reply = submit(Command.Cp.LockUnlock(key, session, token.getValue(key)))
-        if (reply is Reply.Integer && reply.value == 1L) owner[key] = null
+        if (reply !is Reply.Integer || reply.value != 1L) return
+        owner[key] = ((submit(Command.Cp.LockState(key)) as? Reply.Array)?.items?.get(0) as? Reply.Integer)?.value
     }
 
     /**

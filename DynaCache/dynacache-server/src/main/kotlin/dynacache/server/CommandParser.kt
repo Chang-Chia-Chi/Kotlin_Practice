@@ -56,7 +56,6 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "set" -> set(args)
         "setnx" -> exactly(name, args, 2).let { Command.Set(Key(it[0]), it[1], Command.Set.Condition.NX) }
         "setex" -> exactly(name, args, 3).let { Command.Set(Key(it[0]), it[2], ttl = span(name, seconds(it[1]))) }
-        "psetex" -> exactly(name, args, 3).let { Command.Set(Key(it[0]), it[2], ttl = span(name, millis(it[1]))) }
         "incr" -> Command.IncrBy(key(name, args, 1), 1)
         "decr" -> Command.IncrBy(key(name, args, 1), -1)
         "incrby" -> exactly(name, args, 2).let { Command.IncrBy(Key(it[0]), integer(it[1])) }
@@ -172,7 +171,7 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         else -> unknown(name, args)
     }
 
-    /** `SET key value [NX|XX] [EX s|PX ms|EXAT unix-s|PXAT unix-ms]`, in any order, each once. */
+    /** `SET key value [NX|XX] [EX s|PX ms]`, in any order, each once (spec 2.1). */
     private fun set(args: List<ByteArray>): Command.Set {
         if (args.size < 2) wrongArity("set")
         var condition: Command.Set.Condition? = null
@@ -190,12 +189,7 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
                 }
                 takesArgument -> {
                     if (ttl != null) syntaxError()
-                    ttl = when (flag) {
-                        "ex" -> span("set", seconds(args[at + 1]))
-                        "px" -> span("set", millis(args[at + 1]))
-                        "exat" -> until("set") { Instant.ofEpochSecond(integer(args[at + 1])) }
-                        else -> until("set") { Instant.ofEpochMilli(integer(args[at + 1])) }
-                    }
+                    ttl = if (flag == "ex") span("set", seconds(args[at + 1])) else span("set", millis(args[at + 1]))
                 }
                 else -> syntaxError()
             }
@@ -316,17 +310,6 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         return ttl
     }
 
-    /**
-     * The span from now to the deadline [compute] names; how `EXAT` and `PXAT` reach
-     * [Command.Set]'s duration. Redis refuses an absolute time at or before the epoch, and only
-     * there: a deadline merely in the past sets the key and expires it at once.
-     */
-    private fun until(name: String, compute: () -> Instant): Duration {
-        val at = deadline(name, compute)
-        if (at.toEpochMilli() <= 0) rejectExpireTime(name)
-        return Duration.between(now(), at)
-    }
-
     // ---- errors, in Redis's own wording ------------------------------------------------------
 
     /** Carries the reply out of a nested parse; never leaves [parse]. */
@@ -387,7 +370,7 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
     }
 
     private companion object {
-        val TTL_FLAGS = setOf("ex", "px", "exat", "pxat")
+        val TTL_FLAGS = setOf("ex", "px")
 
         /** Redis's own `COUNT` when a `SCAN` does not name one. */
         const val DEFAULT_SCAN_COUNT = 10

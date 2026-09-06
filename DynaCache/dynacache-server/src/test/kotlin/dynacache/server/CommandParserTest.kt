@@ -77,7 +77,6 @@ class CommandParserTest {
                 assertEquals(Command.Set.Condition.NX, (it as Command.Set).condition)
             },
             row("SETEX k 30 v", Command.Set::class),
-            row("PSETEX k 30 v", Command.Set::class),
             row("INCR k", Command.IncrBy::class) { assertEquals(1L, (it as Command.IncrBy).delta) },
             row("DECR k", Command.IncrBy::class) { assertEquals(-1L, (it as Command.IncrBy).delta) },
             row("INCRBY k 5", Command.IncrBy::class) { assertEquals(5L, (it as Command.IncrBy).delta) },
@@ -291,12 +290,6 @@ class CommandParserTest {
         assertEquals(Duration.ofSeconds(30), (command("set", "k", "v", "EX", "30") as Command.Set).ttl)
         assertEquals(Duration.ofMillis(1500), (command("set", "k", "v", "px", "1500") as Command.Set).ttl)
 
-        // EXAT and PXAT name the deadline instead of the span; the clock turns it back into one.
-        val exat = command("set", "k", "v", "EXAT", "${1_000_000 + 60}") as Command.Set
-        assertEquals(Duration.ofSeconds(60), exat.ttl)
-        val pxat = command("set", "k", "v", "PXAT", "${1_000_000_000L + 250}") as Command.Set
-        assertEquals(Duration.ofMillis(250), pxat.ttl)
-
         // Order does not matter, and both halves survive together.
         val both = command("set", "k", "v", "EX", "5", "NX") as Command.Set
         assertEquals(Command.Set.Condition.NX, both.condition)
@@ -318,12 +311,29 @@ class CommandParserTest {
     }
 
     @Test
-    fun `SETNX SETEX and PSETEX are spellings of SET`() {
+    fun `SETNX and SETEX are spellings of SET`() {
         val setnx = command("setnx", "k", "v") as Command.Set
         assertEquals(Command.Set.Condition.NX, setnx.condition)
         assertEquals(Duration.ofSeconds(30), (command("setex", "k", "30", "v") as Command.Set).ttl)
-        assertEquals(Duration.ofMillis(30), (command("psetex", "k", "30", "v") as Command.Set).ttl)
         assertEquals("v", (command("setex", "k", "30", "v") as Command.Set).value.toString(Charsets.ISO_8859_1))
+    }
+
+    /**
+     * No spec line asks for `EXAT`, `PXAT` or `PSETEX`. Spec 2.1 gives `SET` the flags `NX`, `XX`,
+     * `EX` and `PX`, and the Redis-compat-for-CP set (CP spec 6.2) names `SETEX` without its
+     * millisecond twin, so T62 deleted the three rows instead of leaving unrequested commands in
+     * the parser. `PEXPIREAT` stays: `CommandTokens` forwards every `Command.Expire` as one.
+     */
+    @Test
+    fun `EXAT PXAT and PSETEX are not commands here`() {
+        val syntaxError = Reply.Error("ERR", "syntax error")
+        assertEquals(syntaxError, error("set", "k", "v", "EXAT", "1000000060"))
+        assertEquals(syntaxError, error("set", "k", "v", "PXAT", "1000000250"))
+        assertEquals(
+            Reply.Error("ERR", "unknown command 'psetex', with args beginning with: 'k', '30', 'v', "),
+            error("psetex", "k", "30", "v"),
+        )
+        assertTrue(parse("pexpireat", "k", "1000000000000") is Parsed.Ok, "PEXPIREAT is the forward's carrier")
     }
 
     @Test
@@ -384,12 +394,10 @@ class CommandParserTest {
             listOf("pexpire", "k", "${Long.MAX_VALUE}"),
             listOf("expireat", "k", "99999999999999999"),
             listOf("setex", "k", "${Long.MAX_VALUE}", "v"),
-            listOf("psetex", "k", "${Long.MAX_VALUE}", "v"),
         )) {
             assertEquals(invalidExpireTime(wire[0]), error(*wire.toTypedArray()), wire.joinToString(" "))
         }
         assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EX", "${Long.MAX_VALUE}"))
-        assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EXAT", "99999999999999999"))
 
         // The largest deadline epoch milliseconds can name is a deadline, not an error.
         assertTrue(parse("pexpireat", "k", "${Long.MAX_VALUE}") is Parsed.Ok)
@@ -397,8 +405,7 @@ class CommandParserTest {
 
     /**
      * C8: Redis refuses a non-positive span on the `SET` family -- the value would be a TTL that
-     * has already run out -- while `SET`'s absolute `EXAT`/`PXAT` are refused only at or before
-     * the epoch. Both answer the same error, under the name the client actually typed.
+     * has already run out -- under the name the client actually typed.
      */
     @Test
     fun `a non-positive TTL on the SET family is Redis's error`() {
@@ -406,14 +413,7 @@ class CommandParserTest {
             assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EX", argument), "EX $argument")
             assertEquals(invalidExpireTime("set"), error("set", "k", "v", "PX", argument), "PX $argument")
             assertEquals(invalidExpireTime("setex"), error("setex", "k", argument, "v"), "SETEX $argument")
-            assertEquals(invalidExpireTime("psetex"), error("psetex", "k", argument, "v"), "PSETEX $argument")
         }
-        for (argument in listOf("0", "-1")) {
-            assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EXAT", argument), "EXAT $argument")
-            assertEquals(invalidExpireTime("set"), error("set", "k", "v", "PXAT", argument), "PXAT $argument")
-        }
-        // A deadline that is merely in the past is a deadline: the key is set and expires at once.
-        assertEquals(Duration.ofSeconds(-999_999), (command("set", "k", "v", "EXAT", "1") as Command.Set).ttl)
     }
 
     /**
@@ -443,11 +443,8 @@ class CommandParserTest {
             listOf("expireat", "k", ARGUMENT),
             listOf("pexpireat", "k", ARGUMENT),
             listOf("setex", "k", ARGUMENT, "v"),
-            listOf("psetex", "k", ARGUMENT, "v"),
             listOf("set", "k", "v", "EX", ARGUMENT),
             listOf("set", "k", "v", "PX", ARGUMENT),
-            listOf("set", "k", "v", "EXAT", ARGUMENT),
-            listOf("set", "k", "v", "PXAT", ARGUMENT),
         )
         repeat(2_000) {
             val argument = when (random.nextInt(4)) {
