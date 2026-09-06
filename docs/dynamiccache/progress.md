@@ -1964,3 +1964,72 @@ Nothing was stubbed and nothing throws `NotImplementedError`.
 
 **Build:** `mvn -B -o -q clean package` offline, green. Engine 107 tests, cluster 39, cp 24,
 server 16; 0 failures, 0 errors, 0 skipped. Commit `c74d77c` on branch `t31`.
+
+## T29: Type-specific merge rules
+
+**Built:** `dynacache.cluster.Versioned(value: Value, dvv: Dvv)` and the pure function
+`merge(local: Versioned, remote: Versioned, counter: DotCounter): Versioned` in
+`dynacache-cluster/src/main/kotlin/dynacache/cluster/Merge.kt`: spec 5.3's dispatch (remote
+dominates, take remote; local dominates or equal, keep local, no dot spent) and, for concurrent
+versions, the type table of spec 2.5 under `Dvv.merge` (one fresh dot from the counter). Nine
+tests in `MergeTest`. Engine: `Value` is public (was `internal`) so the cluster can hold one;
+`writeScore` moved from `Partition` onto `Value.ZSet.write(score, member)` as the dual index's one
+writer; `fieldBytes` is public. `mvn clean package` green: engine 100, cluster 49, server 16.
+Four files, 257 lines of new code and tests plus a net one-line engine change.
+
+**Concepts named:** A **versioned** value is a value with the DVV of its version, what replicas
+exchange and what `merge` reconciles. The **last writer** of two concurrent versions is the one
+with the higher dot, node name first and counter second; that is spec 2.5's "highest node-ID"
+tiebreak made total so same-node siblings also resolve. Per type: a string, or two values of
+different kinds, is the last writer's outright; a hash is a field-level union where a contested
+field takes the last writer's bytes; a list keeps the shared prefix and then both concurrent
+tails, the earlier writer's first, and when one side is a prefix of the other (a pop) the later
+side stands as it is; a sorted set is the union of members at the higher score. The merged
+sorted set's skip list is seeded from the new dot's counter so the result is deterministic. No
+new seam: `merge` is a concrete function, and the caller (T22, T26, T28) writes the result
+through the engine.
+
+**Acceptance:**
+- `merge_string_concurrent_tiebreak_highest_node`: alpha and bravo first writes, bravo's value
+  in both argument orders.
+- `merge_hash_field_level`: fields only one side holds survive; the field both wrote is the
+  higher node's.
+- `merge_list_union_of_concurrent_appends`: `[a,b,c,d]` and `[a,b,e]` merge to `[a,b,c,d,e]`
+  both ways; `merge_list_concurrent_pop_last_writer` covers the prefix case both ways.
+- `merge_zset_union_max_score`: union with the maximum score, checked on both indexes.
+- `merge_is_commutative_associative_idempotent`: 25 seeded triples of concurrent first writes
+  per kind. Idempotence returns the same instance; commutativity is exact on value and DVV;
+  the merged DVV is associative; value associativity is exact for a sorted set and holds for a
+  list's element multiset and a hash's field set; a string's three-way result is one of the
+  three inputs.
+- `merge_result_dvv_descends_from_both`, `merge_dominated_side_is_discarded`,
+  `merge_equal_dvvs_keep_local` (the counter hands out dot 1 afterwards, so no dot was spent),
+  `merge_different_kinds_concurrent_tiebreak`.
+- This entry.
+
+**Deviations:**
+- Associativity of a last-writer pick (a string, a contested hash field, the order of list
+  tails) does not hold across three-way concurrency, and the test says so rather than claiming
+  it: the merged version carries the coordinator's fresh dot (T21's `Dvv.merge`), not the
+  winning writer's, so `merge(merge(a,b),c)` and `merge(a,merge(b,c))` can pick different
+  writers. Convergence is unaffected because every merge dominates its inputs: two nodes that
+  paired differently resolve on their next exchange. Making it associative would need the
+  value to carry its winning writer's dot; not built.
+- Hash "per-field LWW by DVV" is coarser than the spec's wording: there is one DVV per value,
+  so the last writer is decided once per value and applied to every contested field. A
+  concurrent `HDEL` is undone by the side still holding the field (a deletion is
+  indistinguishable from never having written it). Per-field dots would repay it.
+- List merges have no common ancestor to look at: two sides sharing no prefix (a concurrent
+  `LPOP`, or two first writes) are concatenated; a pop against an append is last-writer-wins.
+- The plan entry's `merge(local, remote)`: the code also takes the node's `DotCounter` (T21's
+  reason: the fresh dot is the node's), and nothing else; `self` is `counter.node`.
+- `Value` public and `writeScore` moved onto `Value.ZSet`: the cluster could not see an
+  `internal` engine class at all, and building a merged sorted set from outside the engine
+  needed the pair's writer. Two `Partition` call sites changed, nothing renamed.
+
+**For the next ticket:** T22 and T28 call `merge(local, remote, counter)` and write the result
+through the engine when it is not the same instance as `local`. A merged value shares byte
+arrays with its inputs (the engine's own convention: nothing copies); the inputs are meant to
+be discarded. T31's codec needs a `Value` encoder; `Value` is now public and `ZSet.write` is how
+to rebuild a sorted set. `Value` has no `equals`; `MergeTest.canon` is a test-side content view
+worth lifting into the test kit if T30's I1 checker compares values.

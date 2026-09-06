@@ -9,12 +9,12 @@ a DVV descending from both; replication, read repair and anti-entropy call it.
 
 **Nature:** conflict resolution semantics, spec 2.5 and 5.3 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 4f82f54 + merge 515825e, merged into misc/ai_gen)
 
-- [ ] `merge_string_concurrent_tiebreak_highest_node`, `merge_hash_field_level`, `merge_list_union_of_concurrent_appends`, `merge_zset_union_max_score`
-- [ ] `merge_is_commutative_associative_idempotent` with seeded triples per type
-- [ ] `merge_result_dvv_descends_from_both`
-- [ ] Progress entry appended
+- [x] `merge_string_concurrent_tiebreak_highest_node`, `merge_hash_field_level`, `merge_list_union_of_concurrent_appends`, `merge_zset_union_max_score`
+- [x] `merge_is_commutative_associative_idempotent` with seeded triples per type
+- [x] `merge_result_dvv_descends_from_both`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
