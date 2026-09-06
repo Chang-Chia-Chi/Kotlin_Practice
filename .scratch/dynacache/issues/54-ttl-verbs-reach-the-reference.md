@@ -11,15 +11,15 @@ place is ticket 71; this ticket fixes the visible bug only.
 
 **Nature:** routing, C16 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 14e44e43, merged into misc/ai_gen)
 
-- [ ] `ref_ttl_via_compat_reports_reference_ttl`: `SET cp:ref:x v EX 10` then `TTL` and
+- [x] `ref_ttl_via_compat_reports_reference_ttl`: `SET cp:ref:x v EX 10` then `TTL` and
       `PTTL` report the remaining lease on log time
-- [ ] `ref_expire_and_persist_via_compat`: `EXPIRE` shortens, `PERSIST` removes, and a TTL
+- [x] `ref_expire_and_persist_via_compat`: `EXPIRE` shortens, `PERSIST` removes, and a TTL
       tick past the deadline deletes the reference
-- [ ] The counter path is unchanged: the same five verbs on a `cp:counter:` key pass their
+- [x] The counter path is unchanged: the same five verbs on a `cp:counter:` key pass their
       existing tests
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the server module's
 test tree (`BugHuntCpCompatTest`); reuse it if present, otherwise rewrite it from the first

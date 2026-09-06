@@ -5059,3 +5059,235 @@ deterministic (T44) and would let P5 kill the holder's connection and watch the 
 the connection lives, `channelInactive` is about the session outliving the connection. The two
 would meet in the same field, so whoever takes it should reuse `forgetSession` for the clearing
 half. The README's known-debts list still carries the `channelInactive` entry and should keep it.
+
+---
+
+## T56 - Settle the batch cross-partition error
+
+**Decision, and why the kind stays.** A batch whose keys span partitions now answers
+`-CROSSSLOT keys of a batch must share a partition (use a hash tag)`. The error KIND is
+unchanged and deliberately so: `CROSSSLOT` is what Redis client libraries switch on, and the
+"considered and rejected" line in ADR 0002 rejected `-CROSSSLOT` for fan-out commands like
+`MGET`, which DynaCache serves by fanning out to the partitions involved. A batch is the
+opposite case: it declares its keys, it must run on one executor with nothing interleaved
+(C12), and when the keys span partitions there is genuinely nothing to fan out, so the refusal
+is real. Only the message text was wrong. It spoke Redis Cluster's vocabulary ("hash to the
+same slot") in a project whose glossary bans "slot" and whose remedy is a hash tag, so it named
+neither the real constraint nor the fix. The new wording is the glossary's own: partition, and
+hash tag.
+
+**What changed.** One source of truth, so one edit reached all three paths. The message lives
+in `CrossPartitionBatch.error` in
+`DynaCache/dynacache-engine/src/main/kotlin/dynacache/engine/CommandEngine.kt`; the engine fails
+the batch future with that exception, and `orBatchError()` in `DynaCacheServer.kt` unwraps it
+for both the MULTI/EXEC path and the EVAL path (`Lua.kt` calls the same helper). No Lua bridge
+line re-renders the text: an EVAL that spans partitions is refused before the script starts, so
+the reply never round-trips through a Lua table. The round-trip was checked anyway for the
+`redis.call` path, where `Reply.Error` becomes `err = "$kind $message"` and is split back at the
+first space -- the new message has no leading space and no format character, so kind and message
+survive intact. Three comment lines above the error record why the kind stays. ADR 0002 gained a
+paragraph saying the rejection covers fan-out commands only and that a batch still answers the
+kind. Three pinned tests updated: `CommandEngineTest` (the constant, renamed `CROSS_SLOT` to
+`CROSS_PARTITION`, plus its one use), `DynaCacheServerTest.multi_exec_cross_partition_rejected`,
+`LuaTest.lua_cross_partition_rejected`.
+
+**Grep proof, with one honest deviation.** `grep -rni slot` under `DynaCache/` for `.kt`, `.md`,
+`.lua`, `.java` and `.xml`, excluding `CROSSSLOT`, leaves no use of "slot" in the partition
+sense. What remains is three unrelated senses, and the ticket's box as literally worded ("the
+word slot appears nowhere") cannot be met without changes the seams forbid:
+
+- `CONTEXT.md` lines 35 and 198: `_Avoid_: shard, slot, bucket`. This is the glossary declaring
+  the ban; deleting the word would delete the rule.
+- `ds/TimerWheel.kt` and `ds/CountMinSketch.kt`: a timer-wheel bucket and a sketch counter cell.
+  "Slot" is the standard name in both data structures and has nothing to do with partitions.
+  Renaming a `slots` constructor parameter is a code change outside this ticket's seams.
+- `CommandParserTest.kt:467` and `RespFuzzTest.kt:11`: "the slot a random expiry argument goes
+  in", meaning an argument position.
+
+Since the literal box is unreachable while `TimerWheel` keeps its slots, partially chasing it
+would add diff without satisfying it, so nothing outside the partition sense was touched. Read
+as the glossary means it, the box is met: "slot" now names a partition nowhere in DynaCache.
+
+**Tests.** Red first: the `CommandEngineTest` pin was updated ahead of the engine and failed on
+the old text (`Tests run: 63, Failures: 1`), then passed once `CrossPartitionBatch.error` was
+reworded. Full run `-pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 91, all
+green, counts unchanged as required -- this was wording only, so no test was added or removed.
+Diff is 4 files, well inside the size budget.
+
+---
+
+## T54 - TTL verbs on cp:ref: keys reach the reference
+
+**Built:** the compat re-target in `CommandDispatcher.compat` now reads the key's kind for
+`EXPIRE`, `PEXPIRE`, `TTL`, `PTTL` and `PERSIST` the way it already did for `GET` and `SET`, so a
+`cp:ref:` key goes to the AtomicReference and every other `cp:` key still goes to the counter. The
+reference had the expiry field and the tick's sweep since T42 but no verbs to reach them, so three
+commands were added beside the counter's: `RefExpire(key, ttl)`, `RefTtl(key, precision)` and
+`RefPersist(key)`, each a data class under `Command.Cp.AtomicReference`, with wire tags 31, 32 and
+33 in `CpWire` written and read exactly as `CMD_EXPIRE`, `CMD_TTL` and `CMD_PERSIST` are (a span in
+millis, a precision boolean, nothing). `AtomicReferenceStateMachine.apply` answers them from the
+same `now` its other verbs use, through a private `retime` that mirrors the counter's: `EXPIRE`
+gives a live reference the deadline `now + ttl` and answers 1, 0 when there is no live reference to
+give it to; `PERSIST` clears the deadline and answers 1, or 0 when there was none; `TTL` answers -2
+for a missing reference, -1 for one without a lease, the remaining millis for `PTTL` and Redis's
+`(remaining + 500) / 1000` rounding for `TTL`. Nothing reads a clock in the state machine, so the
+lease runs on log time (CP spec 5, 9.4) exactly as the counter's does. Main-code diff: 6 lines in
+`CommandDispatcher.kt`, 20 in `AtomicReferenceStateMachine.kt`, 14 in `CpWire.kt`, 15 in
+`Command.kt`; 93 lines of tests.
+
+**Repays the T42 deviation:** T42's deviation 2, "No `EXPIRE`, `TTL` or `PERSIST` on a reference" —
+CP spec 9.4 names AtomicReference among the state machines those verbs operate on, but 6.5's command
+table has no row for them, and T42 resolved the disagreement towards 6.5, leaving "T44 adds the
+three commands if the dispatcher needs to route `EXPIRE cp:ref:K`". It did need to, and this ticket
+adds them. Spec 9.4 wins over the empty 6.5 row, which is what the ticket and the P6 review (bug 6)
+asked for.
+
+**Acceptance:**
+- `ref_ttl_via_compat_reports_reference_ttl` (`CpRoutingTest`, a real three-member CP group behind
+  the RESP socket): `SET cp:ref:x v EX 100` then `TTL` reads 100 and `PTTL` reads the lease in
+  millis; advancing the leader's `MutableClock` 40 s makes `TTL` read 60, so the lease is on log
+  time; `TTL` of a reference nobody set is -2 and of one set without `EX` is -1. Before the fix the
+  first `TTL` read -2, which is the parked `BugHuntCpCompatTest` red.
+- `ref_expire_and_persist_via_compat` (same class): `EXPIRE` on a missing reference is 0, on a live
+  one 1; a second `EXPIRE` shortens the lease and `TTL` reads the shorter one; `PERSIST` answers 1
+  then 0 and the reference outlives its old deadline; `PEXPIRE 1000`, the clock two seconds on and
+  one `tick()` past the deadline, and `GET` is nil with `TTL` back to -2.
+- `the compat set reaches the CP engine as the verb it means` (`CommandDispatcherTest`) gains four
+  rows: the same five verbs on `cp:ref:r` re-target to `RefExpire`, `RefTtl` (both precisions) and
+  `RefPersist`, while every counter row in the table is unchanged, which is the "counter path
+  untouched" criterion at the seam.
+- `reference_commands_round_trip` (`CpWireTest`) gains the three new commands, both `RefTtl`
+  precisions among them, so a follower decodes what a leader replicated.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 90 (88 + 2), all
+  green. The cp count is unchanged because the new wire and dispatcher coverage went into existing
+  test methods rather than new ones.
+
+**Deviations:**
+1. **One assertion is a range, not an equality.** `PTTL` right after `SET ... EX 100` is not
+   100000: `RaftRuntime.stamp` is `max(clock, lastApplied + 1, lastStamped + 1)`, so with a frozen
+   test clock every appended entry moves log time on by a millisecond, and the three entries between
+   the `SET` and the `PTTL` cost three of them. The test asserts `99_900..100_000` and says why. The
+   counter's own TTL tests never saw this because seconds rounding hides it.
+2. **No `CP.REF.EXPIRE` spelling on the wire.** The new commands are reachable only through the
+   Redis-compat verbs, exactly as the counter's `LongExpire`, `LongTtl` and `LongPersist` are: the
+   parser has `cp.long.set/get/incr/decr/add/cas` and no `cp.long.expire`. CP spec 3.5 and 6.5 name
+   no `REF_EXPIRE` log op either, so adding a parser row would have invented a verb; the ticket's
+   seams also put the parser's command rows out of bounds.
+3. **The namespace rule is still read from the key prefix in two places.** `compat` now branches on
+   `reference` in four arms instead of two. That is the smallest fix the ticket asked for; folding
+   it is ticket 71.
+
+**For the next ticket:**
+- **Ticket 71** should fold `CommandDispatcher.REFERENCE_PREFIX` and the four `if (reference)`
+  branches into one key-to-kind decision, and with it the `ponytail:` note still standing above
+  `compat`: `GET cp:lock:x` reads an empty counter instead of `-WRONGTYPE`, and `EXPIRE cp:lock:x`
+  answers 0 where CP spec 9.4 says a lock's lease is `CP.LOCK.RENEW`'s alone and the verb is
+  rejected. Both want the same thing: the kind of a `cp:` key named once, mapping a compat verb onto
+  the owning primitive's command, with `-WRONGTYPE` and the lock's refusal falling out of it. The
+  five TTL verbs and `GET`/`SET` are then one table, not seven branches.
+- The reference is now the second primitive with a full TTL surface; the latch and the semaphore
+  still have none, and CP spec 9.4 names them too. Whoever gives them one has this shape to copy:
+  three commands, three wire tags, a `retime` in the state machine, and the dispatcher branch.
+
+---
+
+## T50 - The idle TTL tick runs on log time
+
+**Built:** Leases and sessions keep running out after a failover to a leader whose wall clock
+trails log time. `RaftRuntime` gains one field and one function: `skew`, how far log time ran
+ahead of this member's clock when its term's first entry applied (`max(0, lastAppliedTs -
+clock.millis())`, set in `termApplied` before `appliedTerm` so a tick never reads a leader's
+term with the previous term's skew), and `logClock()`, the wall clock plus that skew. The
+**log clock** is log time at the election plus whatever the leader's own clock has measured
+since, so it moves at the real rate however far the wall clock is behind. `tick()` now gates on
+the log clock (`logClock() >= lastStampedTs + tickInterval`) and stamps the tick with it
+(`stamp(now = logClock())`); `stamp()` took a `now` parameter that defaults to the wall clock,
+so a user entry is stamped exactly as before. `CONTEXT.md`'s **TTL tick** entry names the log
+clock. Nothing in the state machines, the session registry, the wire format or the stores
+changed. Size: 126 insertions, 13 deletions across five files, 42 lines of them in
+`RaftRuntime` (mostly doc comments) and 90 in tests.
+
+**The gate and the stamping choice.** The old gate compared the wall clock with the last stamp.
+After a failover to a trailing clock the first tick stamped `lastAppliedTs + 1` (C19), which put
+`lastStampedTs` seconds past the wall clock, and the gate stayed shut until the clock caught up:
+no tick, no expiry, no lapse for the whole skew. The ticket's phrase "due when log time has not
+advanced for one interval of the leader's own elapsed time" is the log clock compared with the
+last stamp: when the clock leads or matches log time the skew is zero and the gate reads exactly
+as it did before, and when it trails the gate keeps opening every interval of the leader's own
+elapsed time whatever user entries stamped in between. The tick's stamp is the choice the ticket
+asked to be recorded. CP spec 5 fixes `ts = max(clock_now, last_committed_ts + 1)` for every
+entry and asks for a tick every interval "to advance time in idle periods"; with the literal rule
+an idle tick on a trailing clock advances log time by 1 ms, so a 1 s lease would take 1000 ticks,
+100 s of the new leader's time, to run out, which breaks I19's "at most T plus the election".
+So a tick stamps `max(logClock, lastAppliedTs + 1, lastStampedTs + 1)`: the C19 rule with the
+log clock in place of the wall clock, which is the wall clock itself whenever the skew is zero.
+Log time therefore advances by exactly one tick interval per idle tick when the clock trails
+(`I19_idle_ticks_continue_after_failover_to_a_trailing_clock` pins the ten stamps to
+`lastByOld + k * interval`), and by the wall clock's own reading otherwise. User entries do not
+read the log clock: the brief fixed the stamping rule, and between ticks they crawl at one
+millisecond per entry under skew as T39 recorded; the next tick, at most one interval later,
+brings log time back to the log clock. The log clock is never ahead of real elapsed time: it
+equals the old leader's last stamp plus what the new leader measured since its term applied,
+so a lease can expire late by the election window but never early (the existing
+`I19_lease_expires_late_never_early_across_failover` still passes unchanged).
+
+**Acceptance:** `dynacache-cp` 92 tests, all green (89 before this ticket); full offline
+`-pl dynacache-cp -am test` green with engine 144, cluster 83, cp 92. Red before green in
+every case: the I19 test failed on the second tick (`tick 2 was not appended`) before the
+change; C17 and C18 were re-run against the old wall-clock gate after the fix and both failed
+at "every idle interval appends a tick" with 0, then the gate was restored.
+
+- `CpEngineTest.I19_idle_ticks_continue_after_failover_to_a_trailing_clock`: the leader's clock
+  is advanced 30 s and a SET carries that into the log; the leader is killed; the successor's
+  clock (30 s behind log time) is advanced ten intervals, each followed by `tick()`; all ten
+  ticks commit, the stamps climb strictly past the old leader's last stamp, and each is exactly
+  one interval past the previous.
+- `FencedLockTest.C17_lease_expires_after_skewed_failover`: a 1 s lease taken under a 30 s skew;
+  nine idle ticks on the successor leave the lock held (read straight from the leader's state
+  machine at its applied index, no entry appended), the tenth releases it, and the next holder
+  gets the next token.
+- `SessionTest.C18_session_lapses_after_skewed_failover`: a session with a 1 s timeout holds a
+  30 s lease under a 30 s skew and stops heartbeating; nine idle ticks leave it held, the tenth
+  tick's `SESSION_CLOSED` releases the lock, and a heartbeat answers `-NOSESSION`.
+- Every existing CP test passes unchanged, including `C19_log_timestamps_monotonic_across_leader_change`,
+  `C23_every_member_agrees_on_expiry_at_same_index` and `I19_lease_expires_late_never_early_across_failover`.
+
+**T39 deviation 4, corrected.** T39 recorded: "Lease time after a failover to a slow clock
+stands still. If the new leader's clock is behind log time, stamps advance by 1 ms per entry
+until the clock catches up; that is the spec's own rule (time never turns back) and not
+something this ticket changed." That described the stamping rule but missed the consequence:
+the idle tick was gated on the wall clock against that 1 ms stamp, so with no user entries
+nothing was appended at all for the whole skew and no lease or session could run out. Read it
+now as: "User entries under a trailing clock stamp 1 ms apart (the C19 rule). The idle tick is
+gated and stamped on the leader's log clock, log time at its election plus its own elapsed
+time, so it keeps appending every interval and carries log time forward at the real rate
+whatever the wall clock says (T50)."
+
+**Deviations:**
+
+1. **The tick's stamp is `max(C19 rule, log clock)`, not the literal spec 5 formula.** Recorded
+   above; the literal formula cannot satisfy I19 on a trailing clock. The user entries' rule is
+   untouched.
+2. **`skew` is computed on every member at every term, not only on the leader.** It is one
+   volatile long written by the Raft thread when the term's first entry applies; a follower
+   never reads it. Computing it before `appliedTerm` is what keeps a leader from ticking with a
+   stale skew, and doing it unconditionally is one line shorter than gating on leadership.
+3. **A clock that steps backwards during a leadership is not repaired.** The skew is measured
+   once per term. If the leader's own clock later jumps back, the log clock jumps back with it
+   and the gate shuts until it catches up, the same failure this ticket fixes but for a clock
+   step rather than a failover; a monotonic source for elapsed time (`System.nanoTime()` since
+   the election) would close it. Not in the ticket; noted as the ceiling.
+4. **A burst of user entries faster than one per millisecond pushes log time ahead of the log
+   clock**, by the size of the burst (the C19 rule's `last + 1`), and no tick is due until the
+   log clock passes it. That is T39's rule, bounded by the burst, and unchanged here.
+
+**For the next ticket:**
+
+- The `stateOnLeader` helper in `FencedLockTest` and `stateOn` in `SessionTest` read a member's
+  state machine at its own applied index without appending an entry; any test that must show
+  "no user command in between" wants one of them.
+- The kit's members all start at the same epoch, so a skew is one `clock(leader).advance` before
+  the entries that should carry it, and the successor's clock is then behind log time by that
+  much; `SKEW` in the two test classes is the constant to reuse.
+- The production tick loop (`ClusterNode`, `DynaCacheServer`) is unchanged: it calls `tick()`
+  every interval on the system clock, and with a zero skew the gate reads as it always did.

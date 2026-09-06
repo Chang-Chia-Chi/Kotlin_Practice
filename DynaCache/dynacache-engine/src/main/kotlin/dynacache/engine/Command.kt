@@ -211,6 +211,21 @@ sealed class Command {
                 new.toString(Charsets.ISO_8859_1) + ")"
         }
 
+        /** `EXPIRE` or `PEXPIRE cp:ref:K`: 1 when the reference exists and now has [ttl], else 0. */
+        data class RefExpire(override val key: Key, val ttl: Duration) : AtomicReference()
+
+        /**
+         * `TTL` or `PTTL cp:ref:K`: what is left in [precision]'s unit, seconds rounded the way
+         * Redis rounds them, -1 without a TTL and -2 when the reference is missing.
+         */
+        data class RefTtl(
+            override val key: Key,
+            val precision: Ttl.Precision = Ttl.Precision.SECONDS,
+        ) : AtomicReference()
+
+        /** `PERSIST cp:ref:K`: 1 when a TTL was removed, 0 when there was none to remove. */
+        data class RefPersist(override val key: Key) : AtomicReference()
+
         /** `CP.SESSION.CREATE`: the new session's id; it dies after [timeout] of log time without a heartbeat. */
         data class SessionCreate(val timeout: Duration = Duration.ofSeconds(15)) : Session()
 

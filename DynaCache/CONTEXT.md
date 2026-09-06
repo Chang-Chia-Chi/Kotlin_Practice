@@ -164,8 +164,11 @@ member's own clock.
 _Avoid_: wall time, current time, `clock.now()` in a state machine
 
 **TTL tick**:
-The entry a leader appends when nothing else has been appended for a tick interval, so log
-time keeps moving while the group is idle.
+The entry a leader appends when log time has not moved for a tick interval of its own elapsed
+time, so log time keeps moving while the group is idle. It is stamped with the leader's **log
+clock**: log time when the leader's term began plus what its own clock has measured since, so
+log time keeps real pace even when the leader's wall clock trails what an earlier leader
+stamped (I19). User entries keep the C19 rule and never read the log clock.
 _Avoid_: heartbeat (that is Raft's own, and carries no time)
 
 **Fencing token**:

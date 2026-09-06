@@ -213,10 +213,42 @@ class FencedLockTest {
         assertEquals(unowned(token = 1), state(), "late by no more than the election")
     }
 
+    /**
+     * C17, I19: the old leader's clock ran 30 s ahead of its successor's. A one-second lease taken
+     * there is released by the successor's idle ticks alone, one second of the successor's own
+     * clock later, with no user command carrying time into the log.
+     */
+    @Test
+    fun C17_lease_expires_after_skewed_failover() {
+        val old = kit.leader()
+        kit.clock(old.config.nodeId).advance(SKEW)
+        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
+
+        kit.killMember(old.config.nodeId)
+        val successor = kit.leader()
+        val interval = successor.config.tickInterval
+        fun idleTick(): Long {
+            kit.clock(successor.config.nodeId).advance(interval)
+            return successor.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+        }
+        val ticksInLease = (Duration.ofSeconds(1).toMillis() / interval.toMillis()).toInt()
+
+        repeat(ticksInLease - 1) { assertNotEquals(0L, idleTick(), "every idle interval appends a tick") }
+        assertEquals(7L, ((stateOnLeader(successor) as Reply.Array).items[0] as Reply.Integer).value, "held one interval short of the lease")
+        assertNotEquals(0L, idleTick(), "the tick that ends the lease")
+        assertEquals(unowned(token = 1), stateOnLeader(successor), "released by the tick, no user command in between")
+        assertEquals(granted(2), tryLock(session = 8), "C17: the next holder gets the next token")
+    }
+
+    /** STATE as the leader's state machine sees it at its applied index, without appending an entry. */
+    private fun stateOnLeader(leader: RaftRuntime): Reply =
+        leader.stateMachine.let { it.locks.apply(Command.Cp.LockState(lock), it.lastAppliedTs) }
+
     private companion object {
         const val REPLY_TIMEOUT_SECS = 10L
         const val CYCLES = 100
         const val SESSIONS = 8
         val LEASE: Duration = Duration.ofSeconds(30)
+        val SKEW: Duration = Duration.ofSeconds(30)
     }
 }
