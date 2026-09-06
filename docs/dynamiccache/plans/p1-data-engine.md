@@ -264,3 +264,22 @@ Reading for the human, not the agent: spec 7 rows for Pugh (skip lists), Varghes
 All spec 6.1, 6.1b, 6.2, 6.3, 6.4, 6.6, 6.9 tests green; `redis-cli` transcript in
 `progress.md`; no module imports a banned dependency; the engine module has no dependency but
 kotlin-stdlib.
+
+---
+
+## Measurement addendum (2026-09-06)
+
+### T47 - Single-node benchmark with redis-benchmark
+
+- **Goal:** the first real throughput and latency numbers for one node, next to Redis's on the
+  same machine, so the two marked ceilings (sequential multi-key fan-out, per-command memory
+  recount) and anything unexpected get a measured cost before anyone optimises.
+- **Deliverables:** `DynaCache/bench/single-node.sh` driving `redis-benchmark` from the
+  `redis:7` Docker image against a DynaCache node and against a Redis container, plain and
+  pipelined, small and 1 KB values; `docs/dynamiccache/benchmarks/<date>-single-node.md` with
+  the tables, the environment and one paragraph per anomaly naming the code path.
+- **Blocked by:** T16.
+- **Fixed contracts:** none; measurement only, no change under `src/main`.
+- **Acceptance:** the report exists with both columns for every supported command and a
+  skipped list for the rest; the script re-runs from a clean checkout.
+- **Model:** Opus. **Size:** small.

@@ -180,7 +180,7 @@ beside P3 and P4.
 | Tier | Model | Tickets | Why |
 |---|---|---|---|
 | 1 | Claude Fable 5.1 | T02, T05, T08, T18, T20, T21, T22, T25, T26, T28, T29, T30, T32, T34, T35, T36, T39, T40, T41, T45 | an interleaving, a causal order, a consistent cut or a monotonic counter is the deliverable |
-| 2 | Claude Opus 5 | T01, T03, T04, T06, T07, T09, T10, T11, T12, T13, T14, T15, T16, T17, T19, T23, T24, T27, T31, T33, T37, T38, T42, T43, T44, T46 | commands, codecs, data-structure craft with a sequential spec, adapters, wiring, acceptance |
+| 2 | Claude Opus 5 | T01, T03, T04, T06, T07, T09, T10, T11, T12, T13, T14, T15, T16, T17, T19, T23, T24, T27, T31, T33, T37, T38, T42, T43, T44, T46, T47 (measurement) | commands, codecs, data-structure craft with a sequential spec, adapters, wiring, acceptance |
 
 Escalation: an Opus ticket that fails compile or tests on its second attempt, or that tries to
 change a seam of 2.3, is terminated and relaunched fresh on Fable with the error context. A
