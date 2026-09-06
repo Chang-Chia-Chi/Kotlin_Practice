@@ -11,13 +11,13 @@ array with per-command errors in place without rolling back, and `DISCARD` clear
 
 **Nature:** batch semantics, C12 and I11 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 0033f64, merged into misc/ai_gen)
 
-- [ ] `multi_exec_atomic`: a reader on the same partition sees the pre-batch or the post-batch state, never between
-- [ ] `multi_exec_cross_partition_rejected`, `multi_exec_hash_tags_allow_two_keys`, `discard_clears_buffer`
-- [ ] `I11_failing_command_does_not_undo_neighbours`
-- [ ] `C12_atomically_rejects_span_before_running`, `C12_undeclared_key_inside_batch_is_an_error`
-- [ ] Progress entry appended
+- [x] `multi_exec_atomic`: a reader on the same partition sees the pre-batch or the post-batch state, never between
+- [x] `multi_exec_cross_partition_rejected`, `multi_exec_hash_tags_allow_two_keys`, `discard_clears_buffer`
+- [x] `I11_failing_command_does_not_undo_neighbours`
+- [x] `C12_atomically_rejects_span_before_running`, `C12_undeclared_key_inside_batch_is_an_error`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

@@ -2033,3 +2033,139 @@ arrays with its inputs (the engine's own convention: nothing copies); the inputs
 be discarded. T31's codec needs a `Value` encoder; `Value` is now public and `ZSet.write` is how
 to rebuild a sorted set. `Value` has no `equals`; `MergeTest.canon` is a test-side content view
 worth lifting into the test kit if T30's I1 checker compares values.
+
+## T14: MULTI, EXEC, DISCARD and `atomically`
+
+**Built:** the batch, at both seams the plan names for it.
+
+In the engine, `ApEngine.atomically(keys, block)` maps every declared key to a partition and
+refuses the batch when they do not agree, before anything is submitted. The refusal is
+`CrossPartitionBatch`, a new engine exception carrying the `Reply.Error("CROSSSLOT", "Keys in
+request don't hash to the same slot")` the caller writes back; the returned future fails with
+it. When the keys do agree, `Partition.inOneTask` runs `block` as a single task on that
+partition's executor, so the block's result completes the future on the partition thread and
+nothing interleaves for its duration. A batch that declares no key at all runs on partition 0,
+where every other keyless command runs. `Partition.execute` changed from `private` to internal
+visibility so the batch context can call it directly on that thread, which is what T02's note
+asked for.
+
+The `PartitionContext` handed to the block is a small `Batch` class holding the partition and
+the declared key set. A `Keyed` command whose key is declared runs; a `Keyed` command whose key
+is not gets `-ERR <key> was not declared by this batch`; `PING` and `COMMAND` run, since they
+read nothing outside the partition; everything else -- a `Fanned` fan-out, an `EveryPartition`
+keyspace walk, a `Scan` cursor, a `Cp` key -- gets `-ERR this command spans partitions and
+cannot run inside a batch`. The batch continues past every one of those (I11).
+
+In the server, `CommandHandler` gained two fields: `buffered`, the commands queued since
+`MULTI` or null outside one, and `spoiled`, set when a frame failed to parse while buffering.
+`MULTI` answers `+OK` and starts buffering, or `-ERR MULTI calls can not be nested`; a buffered
+command answers `+QUEUED`; a frame that fails to parse answers its own error at once and sets
+`spoiled`; `DISCARD` clears and answers `+OK`, or `-ERR DISCARD without MULTI`; `EXEC` answers
+`-ERR EXEC without MULTI` outside one, `-EXECABORT Transaction discarded because of previous
+errors.` when spoiled, and otherwise collects the keys of every buffered command, hands them to
+`atomically` as the declared span, runs the buffer in order inside the block and replies the
+array of per-command replies. A cross-partition span arrives back as the future's failure and is
+unwrapped into its `CROSSSLOT` error.
+
+**Concepts named:** The batch's one real idea is that **the block is the unit of exclusion, not
+the command**. `submit` gives one command one task; `atomically` gives the whole block one task.
+Nothing else was needed for C1 or I11: the partition already had exactly one thread, so a task
+that runs many commands already has the exclusion a batch asks for, and rollback never enters
+the picture because nothing is ever undone. That is why `Partition` gained six lines and not a
+lock.
+
+The second idea is that **the declared keys are the batch's contract**. C12's span check and the
+undeclared-key refusal are the same rule read at two moments: the span is checked before the
+block runs, because after it starts there is no partition left to move to, and a key the block
+names but did not declare is refused because it was never in that check. On a one-key batch that
+refusal looks pedantic; on a two-key batch it is precisely what stops a write to a third
+partition. CONTEXT.md's "batch" already said both halves, so no vocabulary was added.
+
+MULTI, EXEC and DISCARD are **connection state, not commands**, exactly as T13's note asked.
+They are recognised by name in `CommandHandler` before `CommandParser` is consulted, they are
+not `Command` variants, and `CommandParser` still answers only "what does this token list mean".
+The handler is already per-connection and already single-threaded on the channel's event loop,
+so the buffer needs no lock -- the same rule the pending reply queue lives by.
+
+Seams unchanged: `CommandEngine.atomically` and `PartitionContext.execute` have exactly T01's
+signatures, and `Reply`, `Key` and `PartitionId` were not touched. The one new public type is
+`CrossPartitionBatch`, discussed under deviations. No new interface: there is one batch context
+and one implementation, so an interface would have had nothing behind it.
+
+**Acceptance:**
+- `multi_exec_atomic`: the batch writes `{t}.a`, parks on a latch, then writes `{t}.b`. Two
+  `GET`s submitted while it is parked are both still not done -- the half-applied state where
+  `a` is "after" and `b` is still "before" is unobservable -- and both read the post-batch value
+  once it is released. Mutation-checked: with the block run on the common pool and each command
+  submitted as its own partition task, the test fails on `assertFalse(readA.isDone)`. Nothing
+  sleeps; the latches are the schedule.
+- `multi_exec_hash_tags_allow_two_keys`: `{user1}.a` and `{user1}.b` are on one partition and
+  both writes land.
+- `multi_exec_cross_partition_rejected`: over the socket, `MULTI`, two `SET`s on different
+  partitions, `EXEC` answers `-CROSSSLOT` and both keys read nil afterwards.
+- `discard_clears_buffer`: `SET k before`, `MULTI`, `SET k after`, `DISCARD`; `GET k` is
+  "before" and the next `EXEC` says `EXEC without MULTI`.
+- `I11_failing_command_does_not_undo_neighbours`: `SET a abc`, `INCR a`, `SET b 2` in one batch
+  replies `[+OK, -ERR value is not an integer or out of range, +OK]`, and afterwards `a` is
+  "abc" and `b` is "2".
+- `C12_atomically_rejects_span_before_running`: the future fails with `CrossPartitionBatch`
+  carrying the `CROSSSLOT` reply, an `AtomicBoolean` set on the block's first line is still
+  false, and the key is unwritten.
+- `C12_undeclared_key_inside_batch_is_an_error`: `{t}.b` on the same partition as the declared
+  `{t}.a` still gets the error, the next command still runs, and `{t}.b` is unwritten.
+- `server_multi_exec_roundtrip`: over `RespClient`, `MULTI`, `SET`/`INCR`/`GET` each `+QUEUED`,
+  a second connection reads nil mid-transaction, `EXEC` returns the three-element array, and the
+  second connection then sees the whole batch.
+- Supporting: a batch refuses `MGET`, `SCAN` and `DBSIZE` and still runs `PING`; a parse error
+  while queued is answered at once and aborts `EXEC`, after which the connection starts clean;
+  `MULTI` does not nest and the refused nesting leaves the first transaction open.
+- `mvn -B -o clean package`: engine 105, cluster 39, cp 24, server 35. Every earlier test green.
+- This entry.
+
+**Deviations:** Three, none against a fixed contract.
+1. **`CrossPartitionBatch` is a new public engine type.** `atomically` is frozen as returning
+   `CompletableFuture<R>` for a caller-chosen `R`, so a `Reply.Error` cannot be its normal
+   answer; C12's refusal travels as the future's failure and the exception carries the reply.
+   The alternative, throwing synchronously, would have made the seam answer two different ways
+   for two kinds of failure. No signature changed.
+2. **The `CROSSSLOT` kind is chosen, not specified.** Spec 2.2, 5.6 and C12 all say "an error"
+   without naming a kind, and the do-not-build list rules out the Redis Cluster protocol, so
+   `-MOVED` and `-ASK` were never candidates. `CROSSSLOT` with Redis's own wording is what a
+   client library already recognises for this exact situation. Recorded here as the deliberate
+   choice the ground rules ask for.
+3. **The batch is held mid-way by a latch inside the block, not by the T02 gate clock.** The
+   gate clock exists because T02 had no user code on the partition thread to park; a batch's
+   block *is* user code on that thread, so parking it there is both simpler and a more direct
+   statement of what the test means. Deterministic in both directions, and mutation-checked
+   above.
+
+Judgement calls, not deviations: `PING` and `COMMAND` are allowed inside a batch (they touch no
+key and the ticket's refusal list does not name them); a batch with an empty key list runs on
+partition 0, matching `submit`'s keyless routing, so `MULTI`/`EXEC` with nothing between them
+replies an empty array; `DISCARD` outside `MULTI` answers `-ERR DISCARD without MULTI`, which
+the ticket does not name but Redis does; and `MULTI`, `EXEC` or `DISCARD` with an argument gets
+the parser's usual arity error rather than being mistaken for an unknown command.
+
+**For the next ticket:** T15's `EVAL` runs its script inside `atomically` over `KEYS`, and
+everything it needs is already there: hand `atomically` the `KEYS` list and call
+`ctx.execute` from the `redis.call` bridge. Two things to know about that context. First, the
+undeclared-key error is the answer `redis.call` must raise on and `redis.pcall` must return as a
+table, so the Lua bridge should treat it exactly like any other `Reply.Error` rather than
+special-casing it. Second, the batch refuses `MGET`, `SCAN`, `DBSIZE`, `KEYS` and `RANDOMKEY`
+outright, so a script calling one of those gets an error reply, which is the right answer but
+worth a test of its own.
+
+`declaredKeys` in `DynaCacheServer.kt` is the one place that knows how to read a command's keys,
+and it deliberately has no `Command.Cp` branch: the parser cannot build a CP command today, and
+when T44 routes them a CP key inside `MULTI` will fall to the "spans partitions" refusal, which
+is the right answer either way. If T44 wants a CP key to be counted in the span check instead,
+that is the one line to add.
+
+T19 changes server dispatch in parallel with this ticket. Every server edit here is inside
+`CommandHandler` -- two fields, four private methods, and `channelRead` now calling `answer`
+instead of parsing inline -- plus four top-level private helpers at the bottom of the file, so a
+router that replaces what `answer` does with a parsed command has one call site to redirect.
+
+Nothing new is marked with a `ponytail:` ceiling. The pending queue's existing one, noted in
+T13, is untouched: a `MULTI` buffer is bounded by nothing either, so a client that queues
+forever grows it, and the same output-buffer limit repairs both.
