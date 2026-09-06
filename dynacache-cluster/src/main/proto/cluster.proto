@@ -25,6 +25,8 @@ message Envelope {
     ReplicateAck replicate_ack = 16;
     Read read = 17;
     ReadReply read_reply = 18;
+    ReplicateValue replicate_value = 19;
+    Repair repair = 20;
   }
 }
 
@@ -59,6 +61,24 @@ message ReadReply {
   int64 id = 1;
   ReplyMsg reply = 2;
   bytes dvv = 3;
+}
+
+// Read repair (spec 5.2 step 5, T26): the winning value itself, as the engine's ValueCodec writes
+// it, under the version it carries. A replica applies it only when that version dominates what
+// it holds. An empty value is a tombstone: the winner holds nothing under that version.
+message ReplicateValue {
+  bytes key = 1;
+  bytes value = 2;
+  bytes dvv = 3;
+  // Unix millis; 0 when the key has no TTL.
+  int64 expires_at_millis = 4;
+}
+
+// The coordinator's request to the replica that won a read: push your value for `key` to
+// `target` (the replicas the read found behind). Only the winner holds the value, so it sends.
+message Repair {
+  bytes key = 1;
+  repeated string target = 2;
 }
 
 // A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are

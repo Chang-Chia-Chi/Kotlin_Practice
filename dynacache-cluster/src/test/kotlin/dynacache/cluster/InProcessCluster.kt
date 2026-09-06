@@ -55,6 +55,8 @@ class InProcessCluster(
             clock = clock,
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
+            export = engines.getValue(node)::export,
+            install = engines.getValue(node)::install,
             scope = scope,
         )
     }
@@ -124,17 +126,20 @@ class InProcessCluster(
      * from an endpoint no node owns, so [node] applies it and holds [dvv] for the key. This is
      * how a test makes replicas disagree.
      */
-    suspend fun seed(node: NodeId, key: Key, value: ByteArray, dvv: Dvv) {
+    suspend fun seed(node: NodeId, key: Key, value: ByteArray, dvv: Dvv) = seed(node, Command.Set(key, value), dvv)
+
+    /** [seed] with any write, so a replica can be made to hold a hash or a list under [dvv]. */
+    suspend fun seed(node: NodeId, write: Command.Keyed, dvv: Dvv) {
         val seeder = network.endpoint(SEEDER)
         val body = Replicate.newBuilder().setId(0)
-            .addAllToken(TokenCodec.tokens(Command.Set(key, value)).map(ByteString::copyFrom))
+            .addAllToken(TokenCodec.tokens(write).map(ByteString::copyFrom))
             .setDvv(ByteString.copyFrom(dvv.encode()))
         seeder.send(node, Envelope.newBuilder().setFrom(SEEDER.name).setTo(node.name).setReplicate(body).build())
         repeat(SETTLE_ROUNDS) {
             drainMessages()
             if (seeder.inbound.tryReceive().isSuccess) return
         }
-        error("$node never acknowledged the seed of $key")
+        error("$node never acknowledged the seed of ${write.key}")
     }
 
     fun close() {

@@ -118,6 +118,15 @@ replication write and forgets it on the ack (**handoff**, I9). A hint whose TTL 
 dropped instead.
 _Avoid_: pending write, queued replica, backlog
 
+**Read repair**:
+What a coordinator does after a quorum read whose answers did not all carry the winning
+version: the replica that holds the winner pushes its value and version to every replica the
+winner dominates, after the client has its reply and never in its way. A replica whose version
+is concurrent with the winner's is a **sibling** and is left alone for the merge. The value
+crosses as bytes the engine encodes and decodes itself, so replication still ships commands
+(ADR 0003) and only a repair ships a value.
+_Avoid_: sync, anti-entropy (that is the background Merkle process), resend
+
 ### CP
 
 **Log time**:

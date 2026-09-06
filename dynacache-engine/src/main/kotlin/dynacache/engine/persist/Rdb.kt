@@ -64,14 +64,14 @@ private const val NO_TTL = -1L
  * The type byte, fixed here by the format rather than taken from the enum's order: reordering
  * [Value.Kind] must never change what an already-written file means.
  */
-private val KIND_BY_CODE = mapOf<Byte, Value.Kind>(
+internal val KIND_BY_CODE = mapOf<Byte, Value.Kind>(
     0.toByte() to Value.Kind.STRING,
     1.toByte() to Value.Kind.HASH,
     2.toByte() to Value.Kind.LIST,
     3.toByte() to Value.Kind.ZSET,
 )
 
-private val CODE_BY_KIND = KIND_BY_CODE.entries.associate { (code, kind) -> kind to code }
+internal val CODE_BY_KIND = KIND_BY_CODE.entries.associate { (code, kind) -> kind to code }
 
 /**
  * One key as a snapshot holds it: what it is, when it dies, and the opaque version vector the
@@ -127,7 +127,7 @@ internal object RdbWriter {
      * then its elements, each length-prefixed, so nothing needs a terminator. A sorted set is
      * written in score order and its score as IEEE-754 bits, which round-trip the infinities.
      */
-    private fun encode(value: Value): ByteArray = when (value) {
+    internal fun encode(value: Value): ByteArray = when (value) {
         is Value.Str -> value.bytes
         is Value.Hash -> body { out ->
             val fields = value.fields.entries().toList()
@@ -199,7 +199,7 @@ internal class RdbReader(private val seeds: Random) {
         return RdbEntry(key, decode(kind, value), if (ttl == NO_TTL) null else Instant.ofEpochMilli(ttl), dvv)
     }
 
-    private fun decode(kind: Value.Kind, input: DataInputStream): Value = when (kind) {
+    internal fun decode(kind: Value.Kind, input: DataInputStream): Value = when (kind) {
         Value.Kind.STRING -> Value.Str(input.readAllBytes())
         Value.Kind.HASH -> Value.Hash().also { hash ->
             repeat(count(input)) { hash.fields.put(fieldName(readBytes(input)), readBytes(input)) }

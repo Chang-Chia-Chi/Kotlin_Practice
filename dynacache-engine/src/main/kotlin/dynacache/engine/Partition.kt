@@ -6,6 +6,7 @@ import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
 import dynacache.engine.ds.TimerWheel
 import dynacache.engine.persist.RdbEntry
+import dynacache.engine.persist.ValueCodec
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -156,6 +157,20 @@ internal class Partition(
             val now = clock.instant()
             for (entry in entries) if (!entry.expired(now)) write(entry.key, now, Entry(entry.value, entry.expiresAt))
         }, executor)
+
+    /** The live value under [key] as [ValueCodec] writes it, with its deadline; null when there is none. */
+    fun export(key: Key): CompletableFuture<Pair<ByteArray, Instant?>?> =
+        task { live(key, clock.instant())?.let { ValueCodec.encode(it.value) to it.expiresAt } }
+
+    /**
+     * Puts a value another node exported under [key], through the same funnel a command uses;
+     * null, or a deadline already past, removes the key instead. Not logged (see [ApEngine.install]).
+     */
+    fun install(key: Key, value: ByteArray?, expiresAt: Instant?): CompletableFuture<Unit> = task {
+        val now = clock.instant()
+        if (value == null || (expiresAt != null && now.isAfter(expiresAt))) drop(key)
+        else write(key, now, Entry(ValueCodec.decode(value, random), expiresAt))
+    }
 
     private fun frozen(value: Value): Value = when (value) {
         is Value.Str -> value

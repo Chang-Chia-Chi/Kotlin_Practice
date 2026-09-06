@@ -259,6 +259,21 @@ class ApEngine(
         return CompletableFuture.allOf(*byPartition.map { (index, part) -> partitions[index].restore(part) }.toTypedArray())
     }
 
+    /**
+     * The value under [key] as [dynacache.engine.persist.ValueCodec] writes it, with its deadline,
+     * or null when the key is absent or expired: what the cluster ships when a replica is behind.
+     */
+    fun export(key: Key): CompletableFuture<Pair<ByteArray, Instant?>?> = partitions[partitionOf(key).index].export(key)
+
+    /**
+     * Puts a value exported elsewhere under [key], on its partition's executor (C1); a null
+     * [value] removes the key. Not appended to the WAL: the log holds commands, and no command
+     * says "this value" (debt: a value op in `WalCodec` would repay it, until then a repaired
+     * value is durable from the next snapshot on).
+     */
+    fun install(key: Key, value: ByteArray?, expiresAt: Instant?): CompletableFuture<Unit> =
+        partitions[partitionOf(key).index].install(key, value, expiresAt)
+
     override fun close() = partitions.forEach { it.close() }
 
 }

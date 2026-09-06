@@ -8,8 +8,10 @@ import dynacache.cluster.proto.Ping
 import dynacache.cluster.proto.PingReq
 import dynacache.cluster.proto.Read
 import dynacache.cluster.proto.ReadReply
+import dynacache.cluster.proto.Repair
 import dynacache.cluster.proto.Replicate
 import dynacache.cluster.proto.ReplicateAck
+import dynacache.cluster.proto.ReplicateValue
 import dynacache.cluster.proto.ReplyMsg
 import com.google.protobuf.ByteString
 import io.grpc.StatusException
@@ -98,6 +100,13 @@ class GrpcTransportTest {
             )
             Envelope.BodyCase.READ_REPLY -> envelope.setReadReply(
                 ReadReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK")).setDvv(ByteString.copyFromUtf8("dvv"))
+            )
+            Envelope.BodyCase.REPLICATE_VALUE -> envelope.setReplicateValue(
+                ReplicateValue.newBuilder().setKey(ByteString.copyFromUtf8("k")).setValue(ByteString.copyFromUtf8("v"))
+                    .setDvv(ByteString.copyFromUtf8("dvv")).setExpiresAtMillis(9)
+            )
+            Envelope.BodyCase.REPAIR -> envelope.setRepair(
+                Repair.newBuilder().setKey(ByteString.copyFromUtf8("k")).addTarget("charlie")
             )
             Envelope.BodyCase.BODY_NOT_SET -> throw AssertionError("BODY_NOT_SET is not a message type")
         }
