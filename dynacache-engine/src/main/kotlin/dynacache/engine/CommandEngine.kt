@@ -46,20 +46,36 @@ class ApEngine(partitionCount: Int, clock: Clock) : CommandEngine {
     /** The partition [key] lives on; keys sharing a hash tag share a partition (C12). */
     fun partitionOf(key: Key): PartitionId = PartitionId(key.hash % partitions.size)
 
-    override fun submit(command: Command): CompletableFuture<Reply> =
-        partitions[keyOf(command)?.let { partitionOf(it).index } ?: 0].submit(command)
+    override fun submit(command: Command): CompletableFuture<Reply> = when (command) {
+        is Command.Keyed -> partitions[partitionOf(command.key).index].submit(command)
+        is Command.Fanned -> fanOut(command)
+        is Command.Ping -> partitions[0].submit(command)
+    }
+
+    /**
+     * ADR 0002: the command is split by partition and run partition by partition, one part after
+     * the previous one finished, then joined in argument order. Nothing is atomic across
+     * partitions: a concurrent write lands between two parts, and a test pins that.
+     *
+     * Sequential on purpose; if fan-out latency ever matters, submit the parts together and
+     * gather them with `allOf` instead.
+     */
+    private fun fanOut(command: Command.Fanned): CompletableFuture<Reply> {
+        val joined = arrayOfNulls<Reply>(command.keys.size)
+        var parts = CompletableFuture.completedFuture(Unit)
+        for ((index, positions) in command.keys.indices.groupBy { partitionOf(command.keys[it]).index }) {
+            parts = parts.thenCompose {
+                partitions[index].submitAll(positions.map(command::single)).thenApply { replies ->
+                    positions.forEachIndexed { at, position -> joined[position] = replies[at] }
+                }
+            }
+        }
+        return parts.thenApply { command.join(joined.map { it!! }) }
+    }
 
     override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
         TODO("T14: batches")
 
     override fun close() = partitions.forEach { it.close() }
 
-    private fun keyOf(command: Command): Key? = when (command) {
-        is Command.Ping -> null
-        is Command.Get -> command.key
-        is Command.Set -> command.key
-        is Command.Del -> command.key
-        is Command.Exists -> command.key
-        is Command.Type -> command.key
-    }
 }

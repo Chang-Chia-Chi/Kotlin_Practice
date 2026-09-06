@@ -70,7 +70,9 @@
                 <version>0.6.1</version>
                 <configuration>
                     <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
-                    <!-- A jar-based generator needs a launcher; the plugin builds one from this block. -->
+                    <!-- A jar-based generator needs a launcher; the plugin builds one from this block and
+                         runs it as part of the protobuf-java execution, so the Kotlin coroutine stubs land in
+                         generated-sources/protobuf/java next to the message classes (T23). -->
                     <protocPlugins>
                         <protocPlugin>
                             <id>grpc-kotlin</id>
@@ -94,15 +96,6 @@
                         <configuration>
                             <pluginId>grpc-java</pluginId>
                             <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>grpc-kotlin</id>
-                        <goals><goal>compile-custom</goal></goals>
-                        <configuration>
-                            <pluginId>grpc-kotlin</pluginId>
-                            <!-- protoc must be told where the launcher above landed. -->
-                            <pluginExecutable>${project.build.directory}/protoc-plugins/protoc-gen-grpc-kotlin.exe</pluginExecutable>
                         </configuration>
                     </execution>
                 </executions>

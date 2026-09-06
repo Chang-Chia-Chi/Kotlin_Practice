@@ -46,3 +46,14 @@ message MembershipEntry {
   State state = 2;
   int64 incarnation = 3;
 }
+
+// The cluster-facing service (spec 2.3). Unary rather than client-streaming: one call carries
+// one envelope and its acceptance, which is all the Transport seam promises, and a stream would
+// add a lifecycle and a reconnect policy that nothing yet asks for.
+service ClusterService {
+  rpc Deliver(Envelope) returns (Delivered);
+}
+
+// Deliver's acknowledgement. The transport carries no reply of its own; a reply to an envelope
+// is another envelope (T19).
+message Delivered {}
