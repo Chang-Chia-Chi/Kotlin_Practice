@@ -2304,3 +2304,133 @@ integer. Nothing outside the engine reads it today, but T13's `INFO` over RESP a
 see only the joined bulk string, whose `# Memory` and `# Keyspace` sections are unchanged in shape.
 `atomically` is still `TODO("T14: batches")`; a batch will reach `execute` per command and so gets
 the accounting and the eviction step for free.
+
+## T41: Sessions and session-tied release
+
+**Built:** The session registry (CP spec 4) as a third primitive of the composite state machine,
+and the one entry that ends a session and releases what it held (C18, I15).
+
+In the engine module, `Command.Cp` gained a third sealed sub-hierarchy, `Cp.Session`:
+`SessionCreate(timeout = 15 s)`, `SessionHeartbeat(session)` and `SessionClose(session)`. A
+session is not a key's state, so the three share one constant key, `cp:session`, which is how
+they pass the `-NOTCP` edge of both engines (C16) without a special case. Beside it is one
+interface, `Cp.Sessioned { val session: Long }`, implemented by `LockTry`, `LockUnlock`,
+`LockRenew`, `SessionHeartbeat` and `SessionClose`: "a command done on behalf of a session".
+
+`SessionRegistry` (`dynacache-cp/.../SessionRegistry.kt`) is a plain primitive like the counter and
+the lock: `apply(command, now)`, `isAlive`, `close`, `lapsed(now)`, `snapshot`, `restore`. Ids climb
+from `lastId`, which is state-machine state, so every member and every successor leader hands out
+the same next number; each session holds `lastHeartbeat` (the log time of the entry that created
+or last refreshed it) and its timeout in milliseconds.
+
+`CpStateMachine` checks, at the top of dispatch, that a `Sessioned` command's session is alive and
+answers `-NOSESSION` ("session N expired or never created") before any primitive sees it. It applies
+`SessionClose` and the internal `SessionClosed(ts, session)` entry through one private
+`closeSession`: forget the session in the registry and, if it was alive, `locks.releaseAllOf(session)`,
+all inside the one applied entry (C18). A second closing of the same session is a no-op.
+`lapsedSessions()` exposes the registry's sweep at this member's log time. The snapshot chunk
+carries the registry's state next to the counters and the locks.
+
+`FencedLockStateMachine.releaseAllOf(session)` is one `replaceAll` over the map, releasing every
+lock the session owns and keeping each lock's token (C17 still holds after a session death).
+
+`RaftRuntime.tick()` now runs in two steps: the leader appends the `TtlTick` as before, and in that
+tick's completion (which runs only on the member whose tick it was, so only the leader) it asks the
+state machine for the lapsed sessions and appends one stamped `SessionClosed` per session. It
+completes with the index of the last entry it appended, so a caller awaiting the tick awaits the
+closes too. Followers never append; they only apply.
+
+`CpGrpcServer`'s `CpService.Heartbeat` submits `SessionHeartbeat` to this member's engine and
+answers `ok` only for a `+OK` reply: an unknown or unparsable session id and a follower's
+`-NOTLEADER` both answer `ok = false`. `CpWire` tags the three verbs (16 to 18) and the
+`SessionClosed` entry (operation tag 4). `CONTEXT.md`'s **session** entry names the registry,
+lapsing, `SESSION_CLOSED` and `-NOSESSION`.
+
+**Concepts named:** The **session registry** is the primitive that keeps the book of live sessions
+in log time; it never decides anything about locks. A session **lapses** when its timeout has run
+out since its last heartbeat at a TTL tick; the registry reports it, the leader closes it, and the
+composite releases what it held. **Sessioned** is the shape of a command done on behalf of a
+session, and the alive check is one place in the composite rather than one per primitive, so T42's
+permits get `-NOSESSION` by implementing the interface. The seam did not move: every test drives
+`CpEngine.submit`; the gRPC heartbeat is tested through the socket.
+
+**Acceptance:** `dynacache.cp.SessionTest`, 6 tests, all green; `CpWireTest` 6 (two new);
+`GrpcCpTest` 6 (one new); `FencedLockTest` 13 unchanged in substance. Full `clean package` green:
+engine 100, cluster 39, cp 47, server 30.
+
+- `session_create_heartbeat_close`: CREATE answers `:1` then `:2`, HEARTBEAT `+OK`, CLOSE `+OK`,
+  and a HEARTBEAT of the closed session is `-NOSESSION`.
+- `session_timeout_closes`: a session with a 1 s timeout takes the lock; the leader's clock moves
+  2 s and one `tick()`; STATE shows no owner and the session's HEARTBEAT is `-NOSESSION`.
+- `session_op_without_session_rejected`: TRY for a never-created session and TRY, UNLOCK and RENEW
+  for a closed one are all `-NOSESSION`; STATE shows nothing was granted.
+- `session_heartbeat_keeps_alive` (extra): 1 s timeout, 600 ms, HEARTBEAT, 600 ms, tick; still held.
+- `I15_no_lock_owned_after_session_closed_index`: two locks held by one session; the tick's
+  completion index is exactly `before + 2` (the tick, then the one `SESSION_CLOSED`); after
+  `awaitApplied` on the leader and a follower, STATE on each member shows both locks unowned.
+- `C18_release_is_one_log_entry`: two locks held, the commit index read after the last STATE
+  showing them held, CLOSE, and the commit index is exactly one higher while both STATEs show
+  released.
+- `cp_heartbeat_over_grpc`: a live session's heartbeat is `ok`, a never-created id and a
+  non-numeric id are not.
+- Every T38, T39, T40 and T43 test green.
+
+**Deviations:**
+
+1. **Session verbs carry the constant key `cp:session`.** `Command.Cp.key` is abstract and both
+   engines check it for C16; a session has no key of its own. The constant satisfies the rule with
+   no special case in `CpEngine`, `ForwardingCpEngine` or `CpWire` (which writes and skips it).
+   T44's parser never sees it: the verbs take no key argument.
+2. **Sessions are not auto-created.** CP spec 4 says the first CP op from a connection auto-creates
+   one; that is the dispatcher's business (T44 owns the connection), and the engine only knows
+   `SessionCreate`. A lock verb without a live session is `-NOSESSION` (CP spec 10.6).
+3. **A session's timeout is per session.** `SessionCreate(timeout)` carries it, defaulting to the
+   spec's 15 s; the spec's "N seconds, H heartbeats" is a client-side cadence the engine never sees.
+4. **Lapsing is `lastHeartbeat + timeout <= now`**, the same rule as a lock's lease, where CP spec
+   9.3 writes `now - last_heartbeat > timeout`. One millisecond, chosen to match the lease.
+5. **`tick()` completes with the last index it appended**, not the tick's own, when it closed a
+   session. `C23`'s `awaitApplied(tickIndex)` still holds (a later index is a stronger wait).
+6. **Two ticks can both close the same session** if the second runs before the first's
+   `SESSION_CLOSED` commits (the registry still lists it). The second entry is a no-op on apply;
+   in production ticks are 100 ms apart and a commit is faster than that.
+7. **A leader that loses leadership between the tick's commit and the close appends** completes
+   `tick()` exceptionally (MicroRaft's `NotLeaderException`), as a lost tick already did in T39.
+   The production tick loop (plan 2.5, not yet written) should ignore a failed tick.
+8. **T40's `FencedLockTest` registers eight sessions in `@BeforeEach`** so its literal session
+   numbers 1 to 8 are live, and moves every member's clock by those 8 ms so its absolute clock
+   jumps land where they did; `lock_fencing_token_monotonic` uses sessions 1 to 3 instead of 0 to 2.
+   No assertion in that class changed.
+9. **The registry's map is a plain `HashMap`.** Only the Raft thread reads and writes it (the tick's
+   completion runs on that thread too). T40 kept `ConcurrentHashMap` for the lock map because the
+   I15 test reads a follower's lock state from the test thread; the registry is never read that way.
+10. **Follower STATE in I15 is read on the primitive.** A follower's engine answers `-NOTLEADER`, so
+    the test applies `LockState` to the member's `locks` at its own `lastAppliedTs`, as T39's C23
+    test read `valueOf` on each member.
+11. **Forwarding stays at-least-once.** The registry gives a session an id but no request counter;
+    T43's dedup note stands until something needs it.
+12. **TDD granularity.** `session_create_heartbeat_close` was red (no variants), and the exhaustive
+    `when`s in the composite and `CpWire` forced all three verbs and their tags in that slice.
+    `session_op_without_session_rejected` was green first time on the top-of-dispatch check written
+    in that slice. `session_timeout_closes` was red (still held) and forced `releaseAllOf`, the
+    `SessionClosed` entry and the tick's second step. `session_heartbeat_keeps_alive`, I15 and C18
+    were green first time against that code. `cp_heartbeat_over_grpc` was red (`UNKNOWN` from the
+    `NotImplementedError`) then green. The two wire tests were green first time.
+13. **Real-time waits.** None added. `SessionTest` runs in well under a second; `FencedLockTest`
+    keeps its 15 s of failover waits from T40.
+
+**For the next ticket:**
+
+- **T42 (semaphore)**: permits held per session are released by extending `closeSession` in
+  `CpStateMachine` with one more call (`semaphores.releaseAllOf(session)`); the acquire and release
+  verbs implement `Cp.Sessioned` and get `-NOSESSION` for free. The registry itself needs no change.
+- **T44 (dispatcher)**: `CP.SESSION.CREATE [timeout_ms]`, `HEARTBEAT sid` and `CLOSE sid` map one to
+  one onto the three variants (`Reply.Integer` id, `+OK`, `+OK`). The session id on a lock verb comes
+  from the connection (CP spec 6.1): the parser needs the connection's session, and auto-creation on
+  the first CP op (spec 4) is a `SessionCreate` the dispatcher submits and remembers per connection.
+  `-NOSESSION` is already a `Reply.Error` kind. The heartbeat over gRPC is `CpService.Heartbeat`;
+  the RESP verb goes through `Apply` like every other command.
+- **T45 (snapshots)**: `CpStateMachine.Snapshot` carries `SessionRegistry.State` (last id and the
+  map); `installSnapshot` already restores it. `SessionClosed` has a wire form.
+- The production tick loop (plan 2.5) is still unwritten; `tick()` is complete for it, including the
+  session sweep, and a failed tick is safe to ignore.
+- `GrpcCpKit` gained `heartbeat(member, sessionId)` and a private `stub(member)` shared with `applyDirect`.

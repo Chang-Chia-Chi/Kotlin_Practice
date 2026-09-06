@@ -9,12 +9,12 @@ join in ticket 42); a lock or permit op with an unknown session is `-NOSESSION`.
 
 **Nature:** ephemeral ownership, C18 and I15 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache cb50fa2, merged into misc/ai_gen)
 
-- [ ] `session_create_heartbeat_close`, `session_timeout_closes`, `session_op_without_session_rejected`
-- [ ] `I15_no_lock_owned_after_session_closed_index`
-- [ ] `C18_release_is_one_log_entry`
-- [ ] Progress entry appended
+- [x] `session_create_heartbeat_close`, `session_timeout_closes`, `session_op_without_session_rejected`
+- [x] `I15_no_lock_owned_after_session_closed_index`
+- [x] `C18_release_is_one_log_entry`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
