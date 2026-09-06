@@ -72,8 +72,9 @@ class CommandDispatcher(
 
     /**
      * The CP verb [command] means, or the refusal when the `cp:` namespace does not answer it. The
-     * counter's verbs answer a key of any other shape, and `cp:ref:*` is the reference's own
-     * (CP spec 6.2, 6.5).
+     * counter's verbs answer a key of any other shape, and `cp:ref:*` is the reference's own,
+     * TTL verbs included: CP spec 9.4 gives `EXPIRE`, `TTL` and `PERSIST` to the state machine
+     * that owns the key (CP spec 6.2, 6.5).
      *
      * ponytail: the prefix is the only thing consulted, so `GET cp:lock:x` reads an empty counter
      * rather than answering `-WRONGTYPE`, and `EXPIRE cp:lock:x` answers 0 where CP spec 9.4 says
@@ -99,9 +100,12 @@ class CommandDispatcher(
             }
             // EXPIRE, PEXPIRE and EXPIREAT arrive as one absolute deadline; the CP verb carries
             // the span from here, because only the log may say when "here" was.
-            is Command.Expire -> Command.Cp.LongExpire(key, Duration.between(clock.instant(), command.deadline))
-            is Command.Ttl -> Command.Cp.LongTtl(key, command.precision)
-            is Command.Persist -> Command.Cp.LongPersist(key)
+            is Command.Expire -> Duration.between(clock.instant(), command.deadline).let { ttl ->
+                if (reference) Command.Cp.RefExpire(key, ttl) else Command.Cp.LongExpire(key, ttl)
+            }
+            is Command.Ttl ->
+                if (reference) Command.Cp.RefTtl(key, command.precision) else Command.Cp.LongTtl(key, command.precision)
+            is Command.Persist -> if (reference) Command.Cp.RefPersist(key) else Command.Cp.LongPersist(key)
             // DEL, EXISTS and TYPE are in the compat set of CP spec 9.5 but no CP primitive
             // answers them yet, so they are a rejection rather than a silent trip to AP.
             else -> refuse(command)

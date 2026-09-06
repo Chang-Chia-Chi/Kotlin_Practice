@@ -36,7 +36,7 @@ class CountDownLatchTest {
         assertEquals(Reply.Integer(0), down())
     }
 
-    /** The barrier has already fallen; counting down again cannot take it below zero. */
+    /** The latch has already run out; counting down again cannot take it below zero. */
     @Test
     fun latch_down_at_zero_stays_zero() {
         assertEquals(Reply.Integer(0), down(), "a latch nobody set is already at zero")
@@ -45,7 +45,7 @@ class CountDownLatchTest {
         assertEquals(Reply.Integer(0), down(), "still zero")
     }
 
-    /** Re-arming a latch parties are still waiting on would move the barrier under them. */
+    /** Re-arming a latch parties are still waiting on would move the count under them. */
     @Test
     fun latch_reset_only_at_zero() {
         assertEquals(Reply.Simple("OK"), submit(Command.Cp.LatchSet(latch, count = 3)))

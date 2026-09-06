@@ -244,7 +244,7 @@ object CpWire {
         writeTable(snapshot.locks) {
             writeLong(it.owner ?: NO_OWNER)
             writeLong(it.token)
-            writeLong(it.expiresAt)
+            writeLong(it.leaseUntil)
             writeInt(it.holds)
         }
         writeTable(snapshot.semaphores) { semaphore ->
@@ -353,7 +353,7 @@ object CpWire {
             is Command.Cp.LongPersist -> tagged(CMD_PERSIST, command.key) {}
             is Command.Cp.LockTry -> tagged(CMD_LOCK_TRY, command.key) {
                 writeLong(command.session)
-                writeLong(command.ttl.toMillis())
+                writeLong(command.lease.toMillis())
             }
             is Command.Cp.LockUnlock -> tagged(CMD_LOCK_UNLOCK, command.key) {
                 writeLong(command.session)
@@ -362,7 +362,7 @@ object CpWire {
             is Command.Cp.LockRenew -> tagged(CMD_LOCK_RENEW, command.key) {
                 writeLong(command.session)
                 writeLong(command.token)
-                writeLong(command.ttl.toMillis())
+                writeLong(command.lease.toMillis())
             }
             is Command.Cp.LockForceUnlock -> tagged(CMD_LOCK_FORCE_UNLOCK, command.key) {}
             is Command.Cp.LockState -> tagged(CMD_LOCK_STATE, command.key) {}
@@ -390,6 +390,11 @@ object CpWire {
                 writeBlob(command.expected)
                 writeBlob(command.new)
             }
+            is Command.Cp.RefExpire -> tagged(CMD_REF_EXPIRE, command.key) { writeLong(command.ttl.toMillis()) }
+            is Command.Cp.RefTtl -> tagged(CMD_REF_TTL, command.key) {
+                writeBoolean(command.precision == Command.Ttl.Precision.MILLIS)
+            }
+            is Command.Cp.RefPersist -> tagged(CMD_REF_PERSIST, command.key) {}
             is Command.Cp.SessionCreate -> tagged(CMD_SESSION_CREATE, command.key) { writeLong(command.timeout.toMillis()) }
             is Command.Cp.SessionHeartbeat -> tagged(CMD_SESSION_HEARTBEAT, command.key) { writeLong(command.session) }
             is Command.Cp.SessionClose -> tagged(CMD_SESSION_CLOSE, command.key) { writeLong(command.session) }
@@ -435,6 +440,12 @@ object CpWire {
                 Command.Cp.RefSet(key, readBlob(), readLong().takeIf { it != NO_TTL }?.let(Duration::ofMillis))
             CMD_REF_GET -> Command.Cp.RefGet(key)
             CMD_REF_CAS -> Command.Cp.RefCas(key, readBlob(), readBlob())
+            CMD_REF_EXPIRE -> Command.Cp.RefExpire(key, Duration.ofMillis(readLong()))
+            CMD_REF_TTL -> Command.Cp.RefTtl(
+                key,
+                if (readBoolean()) Command.Ttl.Precision.MILLIS else Command.Ttl.Precision.SECONDS,
+            )
+            CMD_REF_PERSIST -> Command.Cp.RefPersist(key)
             CMD_SESSION_CREATE -> Command.Cp.SessionCreate(Duration.ofMillis(readLong()))
             CMD_SESSION_HEARTBEAT -> Command.Cp.SessionHeartbeat(readLong())
             CMD_SESSION_CLOSE -> Command.Cp.SessionClose(readLong())
@@ -560,6 +571,9 @@ object CpWire {
     private const val CMD_REF_SET = 28
     private const val CMD_REF_GET = 29
     private const val CMD_REF_CAS = 30
+    private const val CMD_REF_EXPIRE = 31
+    private const val CMD_REF_TTL = 32
+    private const val CMD_REF_PERSIST = 33
     private const val NO_TTL = -1L
     private const val NO_OWNER = -1L
 

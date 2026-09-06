@@ -5,9 +5,12 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Reply
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Clock
+import java.time.Duration
+import java.util.concurrent.TimeUnit
 
 /**
  * Both engines behind one socket: a real AP engine, a real three-member CP group and the
@@ -90,6 +93,83 @@ class CpRoutingTest {
             // A CP.INFO names the leader the group elected, so the introspection verbs are wired.
             client.send("CP.MEMBERS")
             assertEquals(Reply.Array(kit.members.map { bulk(it.name) }), client.read())
+        }
+    }
+
+    /**
+     * CP spec 9.4: `TTL` and `PTTL` on a `cp:ref:` key operate on the AtomicReference, so a
+     * reference set with `EX` reports its own lease. The lease is measured on log time, which
+     * only the leader's clock moves.
+     */
+    @Test
+    fun ref_ttl_via_compat_reports_reference_ttl() {
+        RespClient(server.boundPort).use { client ->
+            client.send("SET", "cp:ref:x", "v", "EX", "100")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("GET", "cp:ref:x")
+            assertEquals(bulk("v"), client.read())
+
+            client.send("TTL", "cp:ref:x")
+            assertEquals(Reply.Integer(100), client.read(), "the reference's lease, not the counter's -2")
+            // Every appended entry moves log time on by at least a millisecond (CP spec 5), so
+            // PTTL is the lease minus the handful of entries this test has already written.
+            client.send("PTTL", "cp:ref:x")
+            val pttl = (client.read() as Reply.Integer).value
+            assertTrue(pttl in 99_900..100_000, "PTTL of a 100 s reference lease, got $pttl")
+
+            // Log time moves, and the lease reported moves with it.
+            kit.clock(kit.leader().config.nodeId).advance(Duration.ofSeconds(40))
+            client.send("TTL", "cp:ref:x")
+            assertEquals(Reply.Integer(60), client.read())
+
+            // A reference nobody set has no lease, and one set without EX has none to report.
+            client.send("TTL", "cp:ref:missing")
+            assertEquals(Reply.Integer(-2), client.read())
+            client.send("SET", "cp:ref:plain", "v")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("TTL", "cp:ref:plain")
+            assertEquals(Reply.Integer(-1), client.read())
+        }
+    }
+
+    /**
+     * CP spec 9.4 for the other two verbs: `EXPIRE` gives or shortens the reference's lease,
+     * `PERSIST` takes it away, and a tick past the deadline is what removes the reference.
+     */
+    @Test
+    fun ref_expire_and_persist_via_compat() {
+        val leader = kit.leader()
+        val clock = kit.clock(leader.config.nodeId)
+        RespClient(server.boundPort).use { client ->
+            client.send("EXPIRE", "cp:ref:y", "100")
+            assertEquals(Reply.Integer(0), client.read(), "no reference to give a lease to")
+
+            client.send("SET", "cp:ref:y", "v")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("EXPIRE", "cp:ref:y", "100")
+            assertEquals(Reply.Integer(1), client.read())
+            client.send("EXPIRE", "cp:ref:y", "5")
+            assertEquals(Reply.Integer(1), client.read())
+            client.send("TTL", "cp:ref:y")
+            assertEquals(Reply.Integer(5), client.read(), "EXPIRE shortened the lease")
+
+            client.send("PERSIST", "cp:ref:y")
+            assertEquals(Reply.Integer(1), client.read())
+            client.send("PERSIST", "cp:ref:y")
+            assertEquals(Reply.Integer(0), client.read(), "nothing left to remove")
+            clock.advance(Duration.ofSeconds(10))
+            client.send("GET", "cp:ref:y")
+            assertEquals(bulk("v"), client.read(), "PERSIST outlived the old lease")
+
+            // PEXPIRE arrives as the same deadline, and the tick past it is what deletes.
+            client.send("PEXPIRE", "cp:ref:y", "1000")
+            assertEquals(Reply.Integer(1), client.read())
+            clock.advance(Duration.ofSeconds(2))
+            leader.tick().get(5, TimeUnit.SECONDS)
+            client.send("GET", "cp:ref:y")
+            assertEquals(Reply.Bulk(null), client.read())
+            client.send("TTL", "cp:ref:y")
+            assertEquals(Reply.Integer(-2), client.read())
         }
     }
 }

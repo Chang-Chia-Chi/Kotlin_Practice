@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertDoesNotThrow
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import kotlin.random.Random
 import kotlin.reflect.KClass
 
 private val FIXED_CLOCK: Clock = Clock.fixed(Instant.ofEpochSecond(1_000_000), ZoneOffset.UTC)
@@ -204,7 +206,7 @@ class CommandParserTest {
                 assertEquals(2L, it.new)
             },
             row("CP.LOCK.TRY cp:lock:k 30000", Command.Cp.LockTry::class) {
-                assertEquals(Duration.ofSeconds(30), (it as Command.Cp.LockTry).ttl)
+                assertEquals(Duration.ofSeconds(30), (it as Command.Cp.LockTry).lease)
                 assertEquals(NO_SESSION, it.session)
             },
             row("CP.LOCK.UNLOCK cp:lock:k 7", Command.Cp.LockUnlock::class) {
@@ -213,7 +215,7 @@ class CommandParserTest {
             },
             row("CP.LOCK.RENEW cp:lock:k 7 30000", Command.Cp.LockRenew::class) {
                 assertEquals(7L, (it as Command.Cp.LockRenew).token)
-                assertEquals(Duration.ofSeconds(30), it.ttl)
+                assertEquals(Duration.ofSeconds(30), it.lease)
             },
             row("CP.LOCK.STATE cp:lock:k", Command.Cp.LockState::class),
             row("CP.LOCK.FORCE_UNLOCK cp:lock:k", Command.Cp.LockForceUnlock::class),
@@ -367,4 +369,104 @@ class CommandParserTest {
         assertEquals(Reply.Error("ERR", "syntax error"), error("scan", "0", "COUNT", "0"))
         assertEquals(Reply.Error("ERR", "syntax error"), error("scan", "0", "NOSUCH", "x"))
     }
+
+    /**
+     * C8: an expiry no clock can hold is Redis's `invalid expire time` reply, under the
+     * lower-case command name, and never an exception. Redis's own bound is the deadline as
+     * epoch milliseconds in a signed 64-bit, which is also what the engine's WAL writes, so
+     * `EXPIRE` a second past that is refused while `PEXPIREAT Long.MAX_VALUE` is exactly at it.
+     */
+    @Test
+    fun `an unrepresentable expiry is Redis's error, not an exception`() {
+        for (wire in listOf(
+            listOf("expire", "k", "${Long.MAX_VALUE}"),
+            listOf("expire", "k", "${Long.MIN_VALUE}"),
+            listOf("pexpire", "k", "${Long.MAX_VALUE}"),
+            listOf("expireat", "k", "99999999999999999"),
+            listOf("setex", "k", "${Long.MAX_VALUE}", "v"),
+            listOf("psetex", "k", "${Long.MAX_VALUE}", "v"),
+        )) {
+            assertEquals(invalidExpireTime(wire[0]), error(*wire.toTypedArray()), wire.joinToString(" "))
+        }
+        assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EX", "${Long.MAX_VALUE}"))
+        assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EXAT", "99999999999999999"))
+
+        // The largest deadline epoch milliseconds can name is a deadline, not an error.
+        assertTrue(parse("pexpireat", "k", "${Long.MAX_VALUE}") is Parsed.Ok)
+    }
+
+    /**
+     * C8: Redis refuses a non-positive span on the `SET` family -- the value would be a TTL that
+     * has already run out -- while `SET`'s absolute `EXAT`/`PXAT` are refused only at or before
+     * the epoch. Both answer the same error, under the name the client actually typed.
+     */
+    @Test
+    fun `a non-positive TTL on the SET family is Redis's error`() {
+        for (argument in listOf("0", "-1", "${Long.MIN_VALUE}")) {
+            assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EX", argument), "EX $argument")
+            assertEquals(invalidExpireTime("set"), error("set", "k", "v", "PX", argument), "PX $argument")
+            assertEquals(invalidExpireTime("setex"), error("setex", "k", argument, "v"), "SETEX $argument")
+            assertEquals(invalidExpireTime("psetex"), error("psetex", "k", argument, "v"), "PSETEX $argument")
+        }
+        for (argument in listOf("0", "-1")) {
+            assertEquals(invalidExpireTime("set"), error("set", "k", "v", "EXAT", argument), "EXAT $argument")
+            assertEquals(invalidExpireTime("set"), error("set", "k", "v", "PXAT", argument), "PXAT $argument")
+        }
+        // A deadline that is merely in the past is a deadline: the key is set and expires at once.
+        assertEquals(Duration.ofSeconds(-999_999), (command("set", "k", "v", "EXAT", "1") as Command.Set).ttl)
+    }
+
+    /**
+     * Redis's `EXPIRE` family takes any value it can hold: a past deadline deletes the key, and
+     * `expireGenericCommand` says so in as many words ("EXPIRE allows negative numbers"). Only
+     * the `SET` family refuses a non-positive one, so zero and negative stay commands here.
+     */
+    @Test
+    fun `the EXPIRE family accepts zero and negative, as Redis does`() {
+        assertEquals(at(0), (command("expire", "k", "0") as Command.Expire).deadline)
+        assertEquals(at(-1), (command("expire", "k", "-1") as Command.Expire).deadline)
+        assertEquals(at(0), (command("pexpire", "k", "0") as Command.Expire).deadline)
+        assertEquals(Instant.EPOCH, (command("expireat", "k", "0") as Command.Expire).deadline)
+        assertEquals(Instant.EPOCH.minusSeconds(1), (command("expireat", "k", "-1") as Command.Expire).deadline)
+    }
+
+    /**
+     * The property behind the two above: whatever number reaches an expiry-taking command, the
+     * parser answers with a value. Nothing it does with a `Clock` may leave `CommandParser.parse`.
+     */
+    @Test
+    fun `no expiry argument escapes the parser as an exception`() {
+        val random = Random(20260906)
+        val shapes = listOf(
+            listOf("expire", "k", ARGUMENT),
+            listOf("pexpire", "k", ARGUMENT),
+            listOf("expireat", "k", ARGUMENT),
+            listOf("pexpireat", "k", ARGUMENT),
+            listOf("setex", "k", ARGUMENT, "v"),
+            listOf("psetex", "k", ARGUMENT, "v"),
+            listOf("set", "k", "v", "EX", ARGUMENT),
+            listOf("set", "k", "v", "PX", ARGUMENT),
+            listOf("set", "k", "v", "EXAT", ARGUMENT),
+            listOf("set", "k", "v", "PXAT", ARGUMENT),
+        )
+        repeat(2_000) {
+            val argument = when (random.nextInt(4)) {
+                0 -> random.nextLong().toString()
+                1 -> random.nextLong(Long.MIN_VALUE / 2, 0).toString()
+                2 -> listOf(Long.MAX_VALUE, Long.MIN_VALUE, 0L, -1L).random(random).toString()
+                else -> random.nextLong(-1_000, 1_000).toString()
+            }
+            for (shape in shapes) {
+                val words = shape.map { if (it === ARGUMENT) argument else it }.toTypedArray()
+                assertDoesNotThrow(words.joinToString(" ")) { parse(*words) }
+            }
+        }
+    }
 }
+
+/** The slot a random expiry argument goes in; matched by identity, so a literal `"k"` is never it. */
+private val ARGUMENT = String(charArrayOf('%', 's'))
+
+/** Redis's own wording, which the parser must answer byte for byte (C8). */
+private fun invalidExpireTime(name: String) =
+    Reply.Error("ERR", "invalid expire time in '${name.lowercase()}' command")

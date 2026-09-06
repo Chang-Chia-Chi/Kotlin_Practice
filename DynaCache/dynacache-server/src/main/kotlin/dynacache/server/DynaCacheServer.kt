@@ -31,6 +31,7 @@ import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.handler.codec.ByteToMessageDecoder
+import io.netty.util.concurrent.EventExecutor
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
@@ -150,16 +151,25 @@ private class CommandHandler(
 
     /**
      * This connection's CP session (CP spec 4), as the reply that created it: the first
-     * session-bearing CP verb makes one and every later verb on this connection uses it. Only the
-     * event loop reads or writes it, so it needs no lock.
+     * session-bearing CP verb makes one, every later verb on this connection uses it, and it is
+     * forgotten once the group no longer has it. Only the event loop reads or writes it, so it
+     * needs no lock; a reply that arrives on an engine's thread hands the forgetting back to
+     * [loop] first.
      */
     private var session: CompletableFuture<Reply>? = null
+
+    /** This connection's event loop: the one thread that may touch [session]. */
+    private var loop: EventExecutor? = null
 
     /** The commands buffered since MULTI, or null when this connection is not in one. */
     private var buffered: MutableList<Command>? = null
 
     /** Whether a frame that failed to parse arrived while buffering; EXEC refuses the lot. */
     private var spoiled = false
+
+    override fun handlerAdded(ctx: ChannelHandlerContext) {
+        loop = ctx.executor()
+    }
 
     override fun channelRead(ctx: ChannelHandlerContext, message: Any) {
         @Suppress("UNCHECKED_CAST")
@@ -171,7 +181,7 @@ private class CommandHandler(
 
     private fun answer(tokens: List<ByteArray>): CompletableFuture<Reply> {
         val name = tokens[0].toString(Charsets.ISO_8859_1).lowercase()
-        if (name in TRANSACTION) {
+        if (name in BATCH) {
             if (tokens.size != 1) return done(Reply.Error("ERR", "wrong number of arguments for '$name' command"))
             return when (name) {
                 "multi" -> done(multi())
@@ -191,7 +201,7 @@ private class CommandHandler(
         return when (val parsed = parser.parse(tokens)) {
             is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: submit(parsed.command)
             // Redis answers the error the moment the bad frame arrives and refuses the whole
-            // transaction later, so the client learns which command was wrong.
+            // batch later, so the client learns which command was wrong.
             is Parsed.Failed -> {
                 if (buffered != null) spoiled = true
                 done(parsed.error)
@@ -206,8 +216,9 @@ private class CommandHandler(
      */
     private fun submit(command: Command): CompletableFuture<Reply> = when {
         command is Command.Cp.SessionCreate -> session()
-        // CP.SESSION.HEARTBEAT and CP.SESSION.CLOSE name their session on the wire (CP spec 6.6);
-        // every other session-bearing verb takes the connection's.
+        command is Command.Cp.SessionClose -> closeSession(command)
+        // CP.SESSION.HEARTBEAT names its session on the wire (CP spec 6.6); every other
+        // session-bearing verb takes the connection's.
         command is Command.Cp.Sessioned && command !is Command.Cp.Session -> onSession(command as Command.Cp)
         else -> engine.submit(command)
     }
@@ -224,10 +235,41 @@ private class CommandHandler(
         return engine.submit(Command.Cp.SessionCreate()).also { session = it }
     }
 
-    private fun onSession(command: Command.Cp): CompletableFuture<Reply> =
-        session().thenCompose { created ->
-            if (created is Reply.Integer) engine.submit(command.withSession(created.value)) else done(created)
+    /**
+     * `CP.SESSION.CLOSE sid` (CP spec 6.6). The verb names its session on the wire, so it may end
+     * this connection's session or another connection's; when it ends this one, the cache goes
+     * with it and the next verb creates a fresh session rather than naming the closed one.
+     */
+    private fun closeSession(command: Command.Cp.SessionClose): CompletableFuture<Reply> {
+        val mine = session?.takeIf {
+            !it.isCompletedExceptionally && it.getNow(null) == Reply.Integer(command.session)
         }
+        return engine.submit(command).whenComplete { reply, _ ->
+            // +OK is the close; -NOSESSION is a session that had already lapsed. Any other answer
+            // (a leader that moved, say) leaves the session where it was, so the cache stands.
+            if (mine != null && (reply is Reply.Simple || reply.isNoSession())) forgetSession(mine)
+        }
+    }
+
+    /**
+     * [command] with this connection's session put in. A `-NOSESSION` means the session lapsed
+     * between its creation and this verb (CP spec 4), so the cache is dropped and the next verb
+     * starts a new session; the error still reaches the client, once.
+     */
+    private fun onSession(command: Command.Cp): CompletableFuture<Reply> {
+        val mine = session()
+        return mine.thenCompose { created ->
+            if (created is Reply.Integer) engine.submit(command.withSession(created.value)) else done(created)
+        }.whenComplete { reply, _ -> if (reply.isNoSession()) forgetSession(mine) }
+    }
+
+    /**
+     * Forgets this connection's session once [gone] has ended, on the event loop that owns it.
+     * [gone] is the cached future itself, so a session created in the meantime is left alone.
+     */
+    private fun forgetSession(gone: CompletableFuture<Reply>) {
+        loop?.execute { if (session === gone) session = null }
+    }
 
     private fun multi(): Reply {
         if (buffered != null) return Reply.Error("ERR", "MULTI calls can not be nested")
@@ -303,9 +345,12 @@ private fun Command.Cp.withSession(id: Long): Command.Cp = when (this) {
     else -> error("$this does not take the connection's session")
 }
 
+/** The CP state machine's answer for a session that lapsed or was never created (CP spec 6.8). */
+private fun Reply?.isNoSession(): Boolean = this is Reply.Error && kind == "NOSESSION"
+
 private val OK = Reply.Simple("OK")
 private val QUEUED = Reply.Simple("QUEUED")
-private val TRANSACTION = setOf("multi", "exec", "discard")
+private val BATCH = setOf("multi", "exec", "discard")
 
 internal fun done(reply: Reply): CompletableFuture<Reply> = CompletableFuture.completedFuture(reply)
 

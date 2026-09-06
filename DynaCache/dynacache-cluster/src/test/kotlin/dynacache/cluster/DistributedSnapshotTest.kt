@@ -1,6 +1,8 @@
 package dynacache.cluster
 
+import com.google.protobuf.ByteString
 import dynacache.cluster.proto.Envelope
+import dynacache.cluster.proto.Replicate
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
@@ -10,11 +12,19 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit.SECONDS
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.name
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -179,6 +189,106 @@ class DistributedSnapshotTest {
             assertEquals(Reply.Bulk(null), restored.readVia(node, keys[2]), "k3 (created after) via $node")
         }
         restored.close()
+    }
+
+    /**
+     * The initiator's cut against its own demux (spec 2.8 step 1 before step 2). On a real node
+     * `initiate` runs on the node's scope while the router's inbound loop runs the demux, so here
+     * the initiator runs on [Dispatchers.Default] and a [Gate] clock parks it at the state
+     * save's first clock reading, before any partition's view is taken. A Replicate handed to
+     * the demux there is restored with its effect applied once: it is in the state or on the
+     * channel log, never both. With the channels opened before the cut (T36) it was in both and
+     * the restored node read 2.
+     */
+    @Test
+    fun I12_write_during_the_cut_is_restored_once() = runTest {
+        val gate = Gate()
+        val node = Lone(gate, backgroundScope)
+        val initiate = launch(Dispatchers.Default) { node.snapshot.initiate("s1") }
+        assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
+        val delivery = launch { node.demux(incr) }
+        runCurrent()
+        gate.release.countDown()
+        delivery.join()
+        initiate.join()
+        assertEquals(one, node.engine.submit(Command.Get(counted)).await(), "the live node applied the write once")
+        node.close()
+
+        val restored = Lone(clock, backgroundScope)
+        restored.snapshot.restoreFrom(dir, "s1")
+        assertEquals(one, restored.engine.submit(Command.Get(counted)).await(), "restored once: from the state or the channel log, not both")
+        restored.close()
+    }
+
+    /**
+     * While the state is being cut no channel takes an envelope; the one handed to the demux
+     * during the cut is on its channel afterwards and not in the state.
+     */
+    @Test
+    fun C10_state_is_cut_before_any_channel_opens() = runTest {
+        val gate = Gate()
+        val node = Lone(gate, backgroundScope)
+        val initiate = launch(Dispatchers.Default) { node.snapshot.initiate("s1") }
+        assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
+        val delivery = launch { node.demux(incr) }
+        runCurrent()
+        val logs = dir.resolve("s1").resolve(self.name).listDirectoryEntries("from-*.log")
+        assertEquals(emptyList<Path>(), logs, "no channel is open while the state is being cut")
+        gate.release.countDown()
+        delivery.join()
+        initiate.join()
+        node.close()
+        val part = recorded(dir.resolve("s1")).getValue(self)
+        assertEquals(Part(emptySet(), mapOf(peer to setOf(1))), part, "delivered during the cut: on the channel, not in the state")
+    }
+
+    private val self = NodeId("node-1")
+    private val peer = NodeId("node-2")
+    private val counted = Key("n")
+    private val one = Reply.Bulk("1".toByteArray())
+
+    /** What the peer replicates during the cut: not idempotent, so a second application shows. */
+    private val incr: Envelope = Envelope.newBuilder().setFrom(peer.name).setTo(self.name)
+        .setReplicate(Replicate.newBuilder().setId(1).addAllToken(TokenCodec.tokens(Command.IncrBy(counted, 1)).map(ByteString::copyFrom)))
+        .build()
+
+    /**
+     * The initiator alone, one silent peer on its network, and its demux in the router's shape:
+     * the snapshot hook first, then the replicated command on the engine. The peer never sends
+     * its marker back, so the part waits without a deadline: under `runTest` a finite one fires
+     * as soon as the test idles on the initiator's thread and deletes the set under the test.
+     */
+    private inner class Lone(snapshotClock: Clock, scope: CoroutineScope) {
+        val engine = ApEngine(1, clock)
+        val snapshot = DistributedSnapshot(
+            self, listOf(peer), engine, InMemoryTransport().endpoint(self), dir, snapshotClock,
+            demux = ::demux, scope = scope, deadline = Duration.INFINITE,
+        )
+
+        suspend fun demux(envelope: Envelope) {
+            if (snapshot.receive(envelope) || !envelope.hasReplicate()) return
+            engine.submit(TokenCodec.command(envelope.replicate.tokenList.map(ByteString::toByteArray))).await()
+        }
+
+        fun close() = engine.close()
+    }
+
+    /** A clock whose first reading parks its caller until [release]; every reading is the epoch. */
+    private class Gate : Clock() {
+        val blocked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        private val first = AtomicBoolean(true)
+
+        override fun instant(): Instant {
+            if (first.compareAndSet(true, false)) {
+                blocked.countDown()
+                check(release.await(5, SECONDS)) { "the gate was never released" }
+            }
+            return Instant.EPOCH
+        }
+
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
     }
 
     /** Runs the cluster's coroutines and engines until something is in flight on the network. */

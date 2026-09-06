@@ -139,7 +139,7 @@ message CpRequest {
   bytes command = 1;
 }
 
-message CpResponse {
+message CpReply {
   bytes reply = 1;
 }
 
@@ -158,13 +158,13 @@ message HeartbeatRequest {
   string session_id = 1;
 }
 
-message HeartbeatResponse {
+message HeartbeatReply {
   bool ok = 1;
 }
 
 service CpService {
-  rpc Apply(CpRequest) returns (CpResponse);
+  rpc Apply(CpRequest) returns (CpReply);
   rpc GetInfo(InfoRequest) returns (CpInfo);
   // Session keepalive: ok when this member's engine applied it (CP spec 6.6).
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);
 }
