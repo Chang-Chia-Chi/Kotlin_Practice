@@ -522,3 +522,86 @@ engine. Equal DVVs neither dominate nor are concurrent: a replica receiving the 
 already holds should treat that as "keep local". `DotCounter.of` reads only the dots and
 context entries for its own node; a node that loses its local data entirely can reuse counters,
 which is the known DVV limitation P4's persistence closes.
+
+## T18: Transport seam and in-process cluster test kit
+
+**Built:** `dynacache-cluster` gains its message model and its first seam. `src/main/proto/cluster.proto`
+(package `dynacache.cluster.proto`) declares `Envelope { from, to, oneof body }` with one placeholder
+body, `Ping { seq }`; later tickets add their own bodies to the oneof. The pom now runs protoc 3.25.3
+through `protobuf-maven-plugin` 0.6.1 (with `os-maven-plugin` 1.7.1 as a build extension) in three
+executions: protobuf Java, `protoc-gen-grpc-java` 1.63.0 and `protoc-gen-grpc-kotlin` 1.4.1 (jdk8),
+so T23 never has to go online. The generated Java classes are the cluster's message model; no codec
+exists. `Transport` (main sources) is the seam: `suspend fun send(to: NodeId, envelope: Envelope)`,
+`val inbound: ReceiveChannel<Envelope>`, `close()`, one endpoint per node, in-order delivery per
+sender-to-receiver pair and nothing promised across pairs. The test kit lives in the cluster module's
+test sources, package `dynacache.cluster`: `InMemoryTransport` (the hub: `endpoint(node)`,
+`networkPartition(sides)`, `heal()`, `drop(rate, seed)`, `delay(rounds, seed)`, `kill(node)`,
+`restart(node)`, `drain()`), `InProcessCluster(nodeCount, n, w, r, clock, partitionsPerNode)`
+(nodes `node-1..N`, one shared `Ring`, one `ApEngine` and one endpoint per node, `engine(node)`,
+`transport(node)`, `network`, `drainMessages()`, `writeVia`, `readVia`, `readAllReplicas(key)`,
+`close()`), and `RecordingEngine(reply)` (records `submitted`, answers with the canned reply,
+`atomically` is `TODO`). `kotlinx-coroutines-test` 1.10.1 joins the pom in test scope (it was in
+`~/.m2`). Seven new tests; `clean package` offline: engine 35, cluster 17, server 1.
+
+**Concepts named:** The hub is a **network** the test scripts; each node's `Transport` is an
+**endpoint** on it. Delivery is explicit stepping, not virtual time: nothing moves until `drain()`,
+which runs **delivery rounds** until nothing is in flight, yielding between rounds so receivers run
+and their replies join the next round. `delay(rounds, seed)` holds each envelope a seeded number of
+rounds, so it reorders delivery across pairs and never within one (each pair is a FIFO whose head
+alone is checked for being due). `drop` is decided at send time by its own seeded `Random`; the
+network partition and `kill` are judged at delivery time, so what is in flight when the fault forms
+is lost, which is what a real cable cut does. A **network partition** (CONTEXT.md, always in full) is
+a list of sides: an envelope crosses only when one side holds both ends. `kill` silences a node in
+both directions and leaves its inbox and its engine untouched; `restart` lifts that and replays
+nothing. `RecordingEngine` is the second adapter of the `CommandEngine` seam that plan 2.3 promised
+from T18.
+
+**Acceptance:**
+- `transport_delivers_in_order_per_pair`: two nodes, 20 pings each way under `delay(0..3, seed)`,
+  each side receives 1..20 in order (the delay is what makes ordering able to fail).
+- `network_partition_blocks_both_directions`: `{alpha} | {bravo}`, a ping each way, nothing arrives.
+- `heal_restores_delivery`: a ping lost under the split, then `heal()`, then a ping each way arrives.
+- `kill_stops_delivery_and_restart_resumes`: killed node neither receives nor is heard; after
+  `restart` both directions flow again and the lost ping stays lost.
+- `drop_is_reproducible_by_seed`: 100 pings at rate 0.5; seed 11 twice gives the same delivered
+  list, seed 12 a different one, and between 1 and 99 arrive.
+- `cluster_boots_three_nodes_sharing_one_ring`: three nodes, the cluster's ring answers like
+  `Ring.of(nodes)`, `writeVia`/`readVia` round-trip on one node's engine, `readAllReplicas` is keyed
+  by the key's preference list, and an envelope sent on one node's endpoint reaches another after
+  `drainMessages()`.
+- `the recording engine records every submit and answers with the canned reply`.
+- This entry.
+
+**Deviations:**
+- D-T18-1 (toolchain, approved by the orchestrator): `~/.m2` had no protoc, no protobuf plugin and no
+  gRPC generators, so T18 ran Maven online once. The `protocPlugins` route builds a WinRun4J launcher
+  for the jar-based grpc-kotlin generator but passes protoc no `--plugin=` flag for it, so the
+  grpc-kotlin execution names the launcher through `pluginExecutable`; that path ends in `.exe` and is
+  Windows-specific, which matches this project's single build machine. Debt: a `${os.detected.name}`
+  switch if the build ever moves.
+- No Kotlin protobuf DSL: `protobuf-maven-plugin` 0.6.1 has no `--kotlin_out` goal, so the generated
+  Java classes (`Envelope.newBuilder()...`) are the model. The `protobuf-kotlin` dependency stays in
+  the pom unused. Debt only if someone wants the `envelope { }` DSL; the ascopes plugin would give it.
+- `inbound` is a `ReceiveChannel<Envelope>` rather than plan 2.3's `Flow<message>`: the channel is
+  what a flow would wrap, `for (m in inbound)` reads like a flow, and `tryReceive()` is what the
+  fault tests need to assert that nothing arrived. `receiveAsFlow()` is one call away.
+- `delay` counts delivery rounds, not a `Duration`: explicit stepping (plan 1.5, 2.5) rather than
+  virtual time, so the hub needs no scheduler and no scope. A duration-based delay can be layered on
+  when a ticket drives timeouts through the transport (T20 drives SWIM by step functions instead).
+- Test kit placement: cluster module `src/test`, not `src/main`. Every named consumer (T19, T20, T22)
+  is a cluster-module test, and this keeps `kotlinx-coroutines-test` and the fakes out of the shipped
+  jar. If the server's tests ever need `InProcessCluster`, a `maven-jar-plugin` `test-jar` goal
+  exposes it; that is the "testFixtures" shape Maven has.
+
+**For the next ticket:** T19 builds its router from `cluster.engine(node)`, `cluster.transport(node)`
+and `cluster.ring`, adds `Forward`/`ForwardReply` to the oneof in `cluster.proto`, and in tests runs
+the router's inbound loop in `backgroundScope` before `drainMessages()`; a request that awaits a
+reply must be `async`-ed, then `drainMessages()` pumps request and reply in successive rounds.
+`RecordingEngine.atomically` is `TODO` until a batch test needs it. `InProcessCluster.network` is
+public so T22 can script faults on the cluster directly. `writeVia`/`readVia` hit the local engine;
+T22 swaps them for the coordinator path and `readAllReplicas` already walks the preference list.
+`Envelope.from`/`to` are strings the caller sets; the hub routes by the `send` parameter and never
+reads them. The protoc launcher lands in `target/protoc-plugins`, so `clean` rebuilds it every run
+from the cached artifacts (no network). Kotlin sources see the generated Java because Maven's
+compiler plugin runs before the Kotlin plugin in this reactor and the generated protobuf never
+references Kotlin code.

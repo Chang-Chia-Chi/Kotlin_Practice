@@ -13,12 +13,12 @@ ring and transport per node with `drainMessages()`, `writeVia`, `readVia` and
 
 **Nature:** the load-bearing test kit, deterministic concurrency (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache dbbea4c, merged into misc/ai_gen)
 
-- [ ] `transport_delivers_in_order_per_pair`, `network_partition_blocks_both_directions`, `heal_restores_delivery`
-- [ ] `kill_stops_delivery_and_restart_resumes`, `drop_is_reproducible_by_seed`
-- [ ] `cluster_boots_three_nodes_sharing_one_ring`
-- [ ] Progress entry appended
+- [x] `transport_delivers_in_order_per_pair`, `network_partition_blocks_both_directions`, `heal_restores_delivery`
+- [x] `kill_stops_delivery_and_restart_resumes`, `drop_is_reproducible_by_seed`
+- [x] `cluster_boots_three_nodes_sharing_one_ring`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
