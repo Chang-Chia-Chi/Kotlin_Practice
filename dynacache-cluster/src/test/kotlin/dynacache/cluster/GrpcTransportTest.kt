@@ -90,7 +90,7 @@ class GrpcTransportTest {
             )
             Envelope.BodyCase.REPLICATE -> envelope.setReplicate(
                 Replicate.newBuilder().setId(7).addAllToken(listOf("SET", "k", "v").map(ByteString::copyFromUtf8))
-                    .setDvv(ByteString.copyFromUtf8("dvv")).setExpiresAtMillis(9)
+                    .setDvv(ByteString.copyFromUtf8("dvv")).setExpiresAtMillis(9).setHintFor("charlie")
             )
             Envelope.BodyCase.REPLICATE_ACK -> envelope.setReplicateAck(ReplicateAck.newBuilder().setId(7))
             Envelope.BodyCase.READ -> envelope.setRead(

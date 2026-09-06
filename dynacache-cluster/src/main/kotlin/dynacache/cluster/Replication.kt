@@ -42,11 +42,14 @@ data class ReplicationConfig(val n: Int, val w: Int, val r: Int) {
  * the key's version with the node's [counter] (C2), applies locally, and ships the command's
  * tokens plus that version to the key's other replicas; a read runs locally and on R-1 replicas
  * and answers with the version that dominates (C4). Plan 2.5: every fan-out goes to at most N-1
- * nodes and waits at most [deadline]. Sloppy quorum is T25, read repair T26.
+ * nodes and waits at most [deadline]. A write whose replica is dead goes to the next healthy
+ * node on the ring instead, which keeps it as a hint in [hints] and hands it back when the
+ * replica returns (spec 2.4 sloppy quorum, spec 5.1 step 7). Read repair is T26.
  *
  * @param membership the gossip's view; a replica it holds dead is not asked.
  * @param deadline how long a quorum may take to form. Shorter than the router's forward
  * deadline, so a contact reports the quorum error and not its own timeout.
+ * @param replayBatch how many hints one handoff round sends before waiting for their acks.
  */
 class Replication(
     val self: NodeId,
@@ -61,6 +64,7 @@ class Replication(
     private val parse: (List<ByteArray>) -> Command,
     private val scope: CoroutineScope,
     private val deadline: Duration = 1.seconds,
+    private val replayBatch: Int = 64,
 ) : CommandEngine {
 
     init {
@@ -70,6 +74,10 @@ class Replication(
     private val versions = ConcurrentHashMap<Key, Dvv>()
     private val ids = AtomicLong()
     private val gathers = ConcurrentHashMap<Long, Gather>()
+    private val hints = HintStore()
+
+    /** How many hints this node holds for others: what `INFO` reports. */
+    val hintCount: Int get() = hints.size
 
     /** Reads whose R replies did not all carry the winning version: what read repair (T26) pushes on. */
     val divergentReads = AtomicLong()
@@ -102,7 +110,9 @@ class Replication(
             .addAllToken(tokens(decided(command)).map(ByteString::copyFrom))
             .setDvv(ByteString.copyFrom(dvv.encode()))
             .setExpiresAtMillis((command as? Command.Set)?.ttl?.let { clock.instant().plus(it).toEpochMilli() } ?: 0L)
-        val acks = gather(command.key, config.w - 1) { id -> Envelope.newBuilder().setReplicate(body.setId(id)) }
+        val acks = gather(command.key, config.w - 1, sloppy = true) { id, hintFor ->
+            Envelope.newBuilder().setReplicate(body.setId(id).setHintFor(hintFor?.name ?: ""))
+        }
         return if (acks.size < config.w - 1) quorumError("write", config.w, acks.size + 1) else reply
     }
 
@@ -120,7 +130,7 @@ class Replication(
         val mine = engine.submit(command).await() to versions[command.key]
         if (config.r == 1) return mine.first
         val body = Read.newBuilder().addAllToken(tokens(command).map(ByteString::copyFrom))
-        val replies = gather(command.key, config.r - 1) { id -> Envelope.newBuilder().setRead(body.setId(id)) }
+        val replies = gather(command.key, config.r - 1, sloppy = false) { id, _ -> Envelope.newBuilder().setRead(body.setId(id)) }
         if (replies.size < config.r - 1) return quorumError("read", config.r, replies.size + 1)
         val answers = listOf(mine) + replies.values.map { it.readReply }.map {
             ReplyWire.decode(it.reply) to (if (it.dvv.isEmpty) null else Dvv.decode(it.dvv.toByteArray()))
@@ -144,19 +154,36 @@ class Replication(
      * Plan 2.5's bounded fan-out: one envelope to each live successor of [key]'s preference
      * list (at most N-1), then wait for [need] answers from distinct nodes (C4) or the
      * [deadline], whichever comes first. Fewer live successors than [need] is answered at once.
+     * [body] is told which dead node, if any, its receiver stands in for.
      */
-    private suspend fun gather(key: Key, need: Int, body: (Long) -> Envelope.Builder): Map<NodeId, Envelope> {
-        val replicas = ring.preferenceList(key, config.n).drop(1).filter { it !in membership.dead }
+    private suspend fun gather(key: Key, need: Int, sloppy: Boolean, body: (Long, NodeId?) -> Envelope.Builder): Map<NodeId, Envelope> {
+        val targets = successors(key, sloppy)
         val id = ids.incrementAndGet()
         val gather = Gather(need)
         gathers[id] = gather
         try {
-            for (replica in replicas) send(replica, body(id))
-            if (need in 1..replicas.size) withTimeoutOrNull(deadline) { gather.done.await() }
+            for ((replica, hintFor) in targets) send(replica, body(id, hintFor))
+            if (need in 1..targets.size) withTimeoutOrNull(deadline) { gather.done.await() }
             return gather.answers()
         } finally {
             gathers.remove(id)
         }
+    }
+
+    /**
+     * The live successors of [key]'s preference list, each mapped to null, and when [sloppy]
+     * a substitute for each dead one (spec 2.4): the next healthy nodes clockwise past the
+     * list, distinct from all of it, each mapped to the dead node it stands in for. A dead
+     * node with no healthy node left to stand in for it is simply not written to.
+     */
+    private fun successors(key: Key, sloppy: Boolean): Map<NodeId, NodeId?> {
+        val (live, dead) = ring.preferenceList(key, config.n).drop(1).partition { it !in membership.dead }
+        val targets = LinkedHashMap<NodeId, NodeId?>().apply { live.forEach { put(it, null) } }
+        if (sloppy && dead.isNotEmpty()) {
+            val substitutes = ring.preferenceList(key, ring.nodes.size).drop(config.n).filter { it !in membership.dead }
+            dead.zip(substitutes).forEach { (gone, standIn) -> targets[standIn] = gone }
+        }
+        return targets
     }
 
     /** One request's answers so far, by node, so the same node answering twice counts once. */
@@ -171,6 +198,34 @@ class Replication(
 
         @Synchronized
         fun answers(): Map<NodeId, Envelope> = LinkedHashMap(byNode)
+    }
+
+    /**
+     * The node's hint handoff (spec 2.4, plan 2.5): one coroutine that, each time gossip sees a
+     * node alive, replays the hints held for it round by round until none is left or a round
+     * goes unacked; what stays is retried at the next alive event. Tests call [replayHints].
+     */
+    suspend fun runHandoff() {
+        membership.changes.collect { member ->
+            if (member.state == MemberState.ALIVE) while (replayHints(member.node) > 0) continue
+        }
+    }
+
+    /**
+     * One handoff round: sends up to [replayBatch] of [target]'s hints exactly as they were
+     * stored (C5), waits for their acks or the [deadline], forgets the acked ones and answers
+     * how many that was. An unacked hint is kept for the next round.
+     */
+    suspend fun replayHints(target: NodeId): Int {
+        val batch = hints.pending(target, clock.instant(), replayBatch)
+        val rounds = batch.keys.associateWith { id -> Gather(1).also { gathers[id] = it } }
+        try {
+            for ((id, write) in batch) send(target, Envelope.newBuilder().setReplicate(write.toBuilder().setId(id).clearHintFor()))
+            if (rounds.isNotEmpty()) withTimeoutOrNull(deadline) { rounds.values.forEach { it.done.await() } }
+            return rounds.count { (id, gather) -> gather.done.isCompleted.also { acked -> if (acked) hints.remove(id) } }
+        } finally {
+            rounds.keys.forEach(gathers::remove)
+        }
     }
 
     /** One inbound envelope; true when it was replication's, false when it belongs to someone else. */
@@ -190,10 +245,16 @@ class Replication(
      * held is applied and stored; one that is dominated or equal is ignored; a concurrent one is
      * applied under a version descending from both. Tokens or a version this node cannot read
      * are not acked, so the coordinator counts this node as silent rather than as agreeing.
+     * A write this node only stands in for (`hint_for` set) is kept whole as a hint instead of
+     * applied (C5), and acked toward W all the same.
      */
     private suspend fun replicate(from: NodeId, request: Replicate) {
         val command = runCatching { parse(request.tokenList.map(ByteString::toByteArray)) }.getOrNull() as? Command.Keyed ?: return
         val remote = runCatching { Dvv.decode(request.dvv.toByteArray()) }.getOrNull() ?: return
+        if (request.hintFor.isNotEmpty()) {
+            hints.add(ids.incrementAndGet(), NodeId(request.hintFor), request)
+            return send(from, Envelope.newBuilder().setReplicateAck(ReplicateAck.newBuilder().setId(request.id)))
+        }
         val held = versions[command.key]
         val next = when {
             held == null || remote.dominates(held) -> remote
