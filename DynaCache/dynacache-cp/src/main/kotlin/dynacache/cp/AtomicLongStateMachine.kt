@@ -19,8 +19,14 @@ class AtomicLongStateMachine {
 
     fun apply(command: Command.Cp.AtomicLong, now: Long): Reply = when (command) {
         is Command.Cp.LongSet -> {
-            counters[command.key] = Counter(command.value, command.ttl?.let { now + it.toMillis() })
-            Reply.Simple("OK")
+            // NX and XX are read against the counter as of this entry's log time, and the value and
+            // the TTL land in the same entry, so no reader sees the write half done (I21).
+            if (command.condition?.refuses(live(command.key, now) != null) == true) {
+                Reply.Bulk(null)
+            } else {
+                counters[command.key] = Counter(command.value, command.ttl?.let { now + it.toMillis() })
+                Reply.Simple("OK")
+            }
         }
         is Command.Cp.LongGet ->
             valueOf(command.key, now)?.let(Reply::Integer) ?: Reply.Bulk(null)
