@@ -30,4 +30,51 @@
             <artifactId>mockito-core</artifactId>
         </dependency>
     </dependencies>
+    <build>
+        <extensions>
+            <extension>
+                <groupId>kr.motd.maven</groupId>
+                <artifactId>os-maven-plugin</artifactId>
+                <version>1.7.1</version>
+            </extension>
+        </extensions>
+        <plugins>
+            <!-- Same generator wiring as the cluster module (T23): protoc plus the grpc-java
+                 generator, with the jar-based grpc-kotlin generator launched inside the
+                 protobuf-java execution so the coroutine stubs land next to the messages. -->
+            <plugin>
+                <groupId>org.xolstice.maven.plugins</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <version>0.6.1</version>
+                <configuration>
+                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+                    <protocPlugins>
+                        <protocPlugin>
+                            <id>grpc-kotlin</id>
+                            <groupId>io.grpc</groupId>
+                            <artifactId>protoc-gen-grpc-kotlin</artifactId>
+                            <version>${grpc-kotlin.version}</version>
+                            <classifier>jdk8</classifier>
+                            <mainClass>io.grpc.kotlin.generator.GeneratorRunner</mainClass>
+                            <winJvmDataModel>64</winJvmDataModel>
+                        </protocPlugin>
+                    </protocPlugins>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>protobuf-java</id>
+                        <goals><goal>compile</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>grpc-java</id>
+                        <goals><goal>compile-custom</goal></goals>
+                        <configuration>
+                            <pluginId>grpc-java</pluginId>
+                            <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

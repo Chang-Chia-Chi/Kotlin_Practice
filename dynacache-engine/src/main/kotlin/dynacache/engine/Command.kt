@@ -1,6 +1,7 @@
 package dynacache.engine
 
 import java.time.Duration
+import java.time.Instant
 import java.util.Random
 
 /**
@@ -171,6 +172,26 @@ sealed class Command {
     data class Type(override val key: Key) : Keyed(null)
 
     /**
+     * `EXPIRE`, `PEXPIRE` and `EXPIREAT` in one variant. The three differ only in how the wire
+     * spells the [deadline] -- seconds from now, milliseconds from now, or an absolute Unix
+     * time -- and the parser reduces all three to the instant the engine stores (spec 5.4).
+     * Replies 1 when the TTL was set, 0 when the key is not there.
+     */
+    data class Expire(override val key: Key, val deadline: Instant) : Keyed(null)
+
+    /** `PERSIST key`: drops the TTL. 1 when there was one, 0 when the key had none or is absent. */
+    data class Persist(override val key: Key) : Keyed(null)
+
+    /**
+     * `TTL` and `PTTL` in one variant, differing only in the [unit] they answer in. Redis's two
+     * negative answers are not TTLs: -2 is "no such key" and -1 is "no TTL on this key".
+     */
+    data class Ttl(override val key: Key, val precision: Precision) : Keyed(null) {
+        /** `TTL` answers in [SECONDS], `PTTL` in [MILLIS]. */
+        enum class Precision { SECONDS, MILLIS }
+    }
+
+    /**
      * `INCR`, `DECR`, `INCRBY` and `DECRBY` in one variant: they differ only in [delta], which
      * the parser signs. A missing key counts as 0; a non-integer value is an error.
      */
@@ -208,6 +229,18 @@ sealed class Command {
 
     /** `HVALS key`: the field values. */
     data class HVals(override val key: Key) : Keyed(Value.Kind.HASH)
+
+    /**
+     * `SCAN cursor [MATCH pattern] [COUNT n]`: a stateless walk of the keyspace, one partition
+     * per call. The cursor carries the partition in its high 32 bits and that partition's own
+     * cursor in the low 32; 0 starts the walk and 0 comes back when it is over (C15). The
+     * fourth command shape: no key names a partition, and every partition at once is too many.
+     */
+    class Scan(val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) : Command()
+
+    /** `HSCAN key cursor [MATCH pattern] [COUNT n]`: the same walk over one hash's fields. */
+    class HScan(override val key: Key, val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) :
+        Keyed(Value.Kind.HASH)
 
     /** `HLEN key`: how many fields, 0 when the key is absent. */
     data class HLen(override val key: Key) : Keyed(Value.Kind.HASH)

@@ -45,11 +45,26 @@ class ApEngine(
     partitionCount: Int,
     clock: Clock,
     private val random: Random = Random(),
+    /**
+     * How wide one wheel tick is, and so how long after its deadline a key may linger before
+     * [tick] removes it (C7). The server's scheduler reads this to set its own period.
+     */
+    val tickMillis: Long = 1000,
 ) : CommandEngine {
 
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
-    private val partitions = List(partitionCount) { Partition(PartitionId(it), clock, Random(random.nextLong())) }
+    private val partitions =
+        List(partitionCount) { Partition(PartitionId(it), clock, Random(random.nextLong()), tickMillis) }
+
+    /**
+     * Advances every partition's timer wheel to the clock's current reading, deleting the keys
+     * whose deadlines have fallen due. The engine owns no thread beyond its partition executors:
+     * the server drives this once per [tickMillis] and the work runs on each partition's own
+     * thread, so an expiring key is deleted with the same exclusion a command has (C1).
+     */
+    fun tick(): CompletableFuture<Void> =
+        CompletableFuture.allOf(*partitions.map { it.tick() }.toTypedArray())
 
     /** The partition [key] lives on; keys sharing a hash tag share a partition (C12). */
     fun partitionOf(key: Key): PartitionId = PartitionId(key.hash % partitions.size)
@@ -59,6 +74,7 @@ class ApEngine(
         is Command.Fanned -> fanOut(command)
         is Command.EveryPartition -> everyPartition(command)
         is Command.Ping, is Command.CommandTable -> partitions[0].submit(command)
+        is Command.Scan -> scan(command)
         // C16: a cp:* key never belongs here. The dispatcher (T44) routes it away; if one still
         // arrives, the spec's answer is -NOTCP, not a partition write.
         is Command.Cp -> CompletableFuture.completedFuture(
@@ -66,6 +82,24 @@ class ApEngine(
         )
     }
 
+    /**
+     * One partition per call: the cursor's high 32 bits pick it, the low 32 are its own cursor.
+     * A partition that hands back 0 is done, so the next call starts the next partition at 0,
+     * and the last partition's 0 is the walk's. A cursor past the last partition is done too.
+     */
+    private fun scan(command: Command.Scan): CompletableFuture<Reply> {
+        val index = (command.cursor ushr 32).toInt()
+        if (index !in partitions.indices) return CompletableFuture.completedFuture(Partition.scanReply(0, emptyList()))
+        val inner = Command.Scan(command.cursor and 0xFFFF_FFFFL, command.pattern, command.count)
+        return partitions[index].scan(inner).thenApply { (next, found) ->
+            val cursor = when {
+                next != 0L -> (index.toLong() shl 32) or next
+                index + 1 < partitions.size -> (index + 1L) shl 32
+                else -> 0L
+            }
+            Partition.scanReply(cursor, found)
+        }
+    }
     /**
      * A keyless command run on every partition, one after the previous one finished, and joined
      * in partition order. Sequential for the same reason fan-out is: a caller sees the same

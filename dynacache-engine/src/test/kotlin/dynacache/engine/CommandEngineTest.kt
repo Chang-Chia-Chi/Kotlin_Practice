@@ -80,8 +80,10 @@ class CommandEngineTest {
     fun string_set_ex_expires() {
         run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofSeconds(1)))
         clock.now += Duration.ofMillis(999)
+        tick()
         assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(Key("k"))))
         clock.now += Duration.ofMillis(2)
+        tick()
         assertEquals(Reply.Bulk(null), run(Command.Get(Key("k"))))
     }
 
@@ -223,14 +225,12 @@ class CommandEngineTest {
         val h = Key("h")
         assertEquals(Reply.Array(emptyList()), run(Command.HGetAll(h)), "a missing hash is an empty array")
         run(Command.HSet(h, listOf("a".toByteArray() to "1".toByteArray(), "b".toByteArray() to "2".toByteArray())))
+        // Redis defines no order for HGETALL, and the T05 table walks its buckets, so the pairs
+        // are compared as a set.
+        val flat = (run(Command.HGetAll(h)) as Reply.Array).items
         assertEquals(
-            Reply.Array(
-                listOf(
-                    Reply.Bulk("a".toByteArray()), Reply.Bulk("1".toByteArray()),
-                    Reply.Bulk("b".toByteArray()), Reply.Bulk("2".toByteArray()),
-                ),
-            ),
-            run(Command.HGetAll(h)),
+            setOf(bulks("a", "1"), bulks("b", "2")),
+            flat.chunked(2).map { Reply.Array(it) }.toSet(),
             "every field and its value, flat and in one array",
         )
     }
@@ -270,10 +270,11 @@ class CommandEngineTest {
             run(Command.HMGet(h, listOf(a, gone, b))),
             "in the order the fields were asked for",
         )
-        assertEquals(Reply.Array(listOf(Reply.Bulk(a), Reply.Bulk(b))), run(Command.HKeys(h)))
+        // HKEYS and HVALS come out in the table's bucket order, which Redis leaves undefined too.
+        assertEquals(setOf(Reply.Bulk(a), Reply.Bulk(b)), (run(Command.HKeys(h)) as Reply.Array).items.toSet())
         assertEquals(
-            Reply.Array(listOf(Reply.Bulk("1".toByteArray()), Reply.Bulk("2".toByteArray()))),
-            run(Command.HVals(h)),
+            setOf(Reply.Bulk("1".toByteArray()), Reply.Bulk("2".toByteArray())),
+            (run(Command.HVals(h)) as Reply.Array).items.toSet(),
         )
     }
 
@@ -489,6 +490,109 @@ class CommandEngineTest {
         assertTrue(drawn.map { engine.partitionOf(Key(it)) }.toSet().size > 1, "the draws come from more than one partition")
     }
 
+    /** One `SCAN` call: the next cursor and the keys as text, duplicates kept. */
+    private fun scanOnce(cursor: Long, pattern: String? = null, count: Int = 10): Pair<Long, List<String>> {
+        val reply = run(Command.Scan(cursor, pattern?.toByteArray(), count)) as Reply.Array
+        val next = (reply.items[0] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1).toLong()
+        val keys = (reply.items[1] as Reply.Array).items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+        return next to keys
+    }
+
+    /** A full `SCAN` walk, cursor 0 to 0; [between] runs after every call with the call's index. */
+    private fun scanAll(pattern: String? = null, count: Int = 10, between: (Int) -> Unit = {}): List<String> {
+        val seen = ArrayList<String>()
+        var cursor = 0L
+        var calls = 0
+        do {
+            val (next, keys) = scanOnce(cursor, pattern, count)
+            seen += keys
+            cursor = next
+            between(calls++)
+            assertTrue(calls < 100_000, "SCAN never terminated")
+        } while (cursor != 0L)
+        return seen
+    }
+
+    @Test
+    fun scan_returns_all_keys() {
+        val seeded = (0 until 200).map { "k$it" }
+        seeded.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertTrue(seeded.map(::Key).map(engine::partitionOf).toSet().size == 4, "the keys span every partition")
+        assertEquals(seeded.toSet(), scanAll().toSet())
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(seeded.toSet(), scanAll().toSet(), "an expired key is not in SCAN")
+    }
+
+    @Test
+    fun scan_cursor_zero_terminates() {
+        assertEquals(emptyList<String>(), scanAll(), "an empty keyspace is a walk that ends with nothing found")
+        (0 until 50).forEach { run(Command.Set(Key("k$it"), "v".toByteArray())) }
+        var calls = 0
+        val seen = scanAll(count = 5) { calls++ }
+        assertTrue(calls > 1, "COUNT 5 over 50 keys takes several calls: $calls")
+        assertEquals(50, seen.toSet().size)
+        var wide = 0
+        scanAll(count = 1_000) { wide++ }
+        assertEquals(4, wide, "a COUNT past the keyspace takes one call per partition and no more")
+        assertEquals(0L to emptyList<String>(), scanOnce(Long.MAX_VALUE), "a cursor past the last partition is done")
+    }
+
+    @Test
+    fun scan_match_filters() {
+        listOf("user:1", "user:2", "user:10", "admin", "a", "b").forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertEquals(setOf("user:1", "user:2", "user:10"), scanAll("user:*").toSet())
+        assertEquals(setOf("user:1", "user:2"), scanAll("user:?", count = 1).toSet())
+        assertEquals(emptySet<String>(), scanAll("nothing*").toSet())
+    }
+
+    @Test
+    fun C15_scan_completeness() {
+        val random = Random(15)
+        val stable = (0 until 300).map { "stable$it" }
+        stable.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        val churn = (0 until 2_000).map { "churn$it" }
+        churn.take(500).forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        var storms = 0
+        val seen = scanAll(count = 3) {
+            // A seeded insert and delete storm between every two SCAN calls: enough churn to
+            // grow and shrink the partitions' tables while the walk is under way.
+            repeat(40) {
+                val key = Key(churn[random.nextInt(churn.size)])
+                if (random.nextBoolean()) run(Command.Set(key, "v".toByteArray())) else run(Command.Del(key))
+            }
+            storms++
+        }
+        assertTrue(storms > 50, "the walk took many calls, so the storm ran alongside it: $storms")
+        assertTrue(seen.containsAll(stable), "keys present throughout were missed: ${stable - seen.toSet()}")
+        assertTrue(seen.all { it in stable || it in churn }, "SCAN never invents a key")
+    }
+
+    @Test
+    fun `HSCAN walks one hash, MATCH and COUNT included`() {
+        val h = Key("h")
+        fun hscan(pattern: String? = null, count: Int = 10): Map<String, String> {
+            val seen = HashMap<String, String>()
+            var cursor = 0L
+            var calls = 0
+            do {
+                val reply = run(Command.HScan(h, cursor, pattern?.toByteArray(), count)) as Reply.Array
+                cursor = (reply.items[0] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1).toLong()
+                val flat = (reply.items[1] as Reply.Array).items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+                flat.chunked(2).forEach { (field, value) -> seen[field] = value }
+                assertTrue(calls++ < 1_000, "HSCAN never terminated")
+            } while (cursor != 0L)
+            return seen
+        }
+        assertEquals(emptyMap<String, String>(), hscan(), "a missing key is an empty walk that ends at once")
+        val fields = (0 until 100).map { "f$it" to "$it" }
+        run(Command.HSet(h, fields.map { (f, v) -> f.toByteArray() to v.toByteArray() }))
+        assertEquals(fields.toMap(), hscan(count = 7))
+        assertEquals(fields.toMap().filterKeys { it.startsWith("f9") }, hscan("f9*"))
+        run(Command.Set(Key("s"), "v".toByteArray()))
+        assertEquals(WRONG_TYPE, run(Command.HScan(Key("s"), 0)), "HSCAN on a String is refused")
+    }
+
     @Test
     fun `COMMAND and INFO answer in Redis shapes`() {
         assertEquals(EMPTY_ARRAY, run(Command.CommandTable), "COMMAND is minimal: an empty table")
@@ -497,6 +601,122 @@ class CommandEngineTest {
         run(Command.Set(Key("a"), "v".toByteArray()))
         run(Command.Set(otherPartitionThan(Key("a")), "v".toByteArray()))
         assertTrue(info().contains("db0:keys=2\r\n"), "INFO counts every partition: " + info())
+    }
+
+    private fun ttl(key: Key, precision: Command.Ttl.Precision = Command.Ttl.Precision.SECONDS): Long =
+        (run(Command.Ttl(key, precision)) as Reply.Integer).value
+
+    @Test
+    fun ttl_reports_remaining_and_minus_values() {
+        assertEquals(-2L, ttl(Key("k")), "Redis answers -2 for a key that is not there")
+        run(Command.Set(Key("k"), "v".toByteArray()))
+        assertEquals(-1L, ttl(Key("k")), "and -1 for a key with no TTL")
+        run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        assertEquals(10L, ttl(Key("k")))
+        assertEquals(10_000L, ttl(Key("k"), Command.Ttl.Precision.MILLIS), "PTTL reports milliseconds")
+        // Redis rounds TTL half up: 9500 ms is 10 s, 9499 ms is 9 s.
+        clock.now += Duration.ofMillis(500)
+        assertEquals(10L, ttl(Key("k")))
+        assertEquals(9_500L, ttl(Key("k"), Command.Ttl.Precision.MILLIS))
+        clock.now += Duration.ofMillis(1)
+        assertEquals(9L, ttl(Key("k")))
+        clock.now += Duration.ofMillis(9_499)
+        assertEquals(0L, ttl(Key("k")), "the key is readable through its deadline")
+        assertEquals(0L, ttl(Key("k"), Command.Ttl.Precision.MILLIS))
+        clock.now += Duration.ofMillis(1)
+        assertEquals(-2L, ttl(Key("k")), "and gone after it")
+    }
+
+    /** What the server's scheduler will call once per tick: every partition advances its wheel. */
+    private fun tick() {
+        engine.tick().get(5, TimeUnit.SECONDS)
+    }
+
+    /**
+     * C7 at the command level: never early, at most one tick late. The lazy check on access
+     * covers the gap between the deadline and the tick that follows it, so both halves of spec
+     * 5.4 answer the same at every instant a client can look.
+     */
+    @Test
+    fun C7_key_readable_until_deadline_then_absent() {
+        val key = Key("k")
+        val deadline = clock.now + Duration.ofSeconds(10)
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        clock.now = deadline - Duration.ofMillis(1)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)), "never early")
+        assertEquals(Reply.Integer(1), run(Command.DbSize), "and DBSIZE agrees the key is there")
+        clock.now = deadline + Duration.ofMillis(engine.tickMillis)
+        tick()
+        assertEquals(Reply.Bulk(null), run(Command.Get(key)), "gone at most one tick after the deadline")
+        assertEquals(Reply.Integer(0), run(Command.DbSize), "and DBSIZE agrees it is gone")
+    }
+
+    @Test
+    fun expire_replaces_wheel_entry() {
+        val key = Key("k")
+        // SET EX puts a deadline on the wheel; the re-EXPIRE has to take it off again, or the
+        // tick below fires the old one and deletes a key that should have 80 s left.
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        run(Command.Expire(key, clock.now + Duration.ofSeconds(100)))
+        clock.now += Duration.ofSeconds(20)
+        tick()
+        assertEquals(
+            Reply.Bulk("v".toByteArray()),
+            run(Command.Get(key)),
+            "the replaced deadline was cancelled, so the wheel had nothing to fire at 10 s",
+        )
+        assertEquals(80L, ttl(key))
+        run(Command.Expire(key, clock.now + Duration.ofSeconds(5)))
+        clock.now += Duration.ofSeconds(6)
+        tick()
+        assertEquals(-2L, ttl(key), "a shortened TTL takes the key at its new deadline")
+    }
+
+    @Test
+    fun persist_cancels_expiry() {
+        val key = Key("k")
+        assertEquals(Reply.Integer(0), run(Command.Persist(key)), "a missing key has no TTL to drop")
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(5)))
+        assertEquals(Reply.Integer(1), run(Command.Persist(key)))
+        assertEquals(Reply.Integer(0), run(Command.Persist(key)), "and 0 again: there is no TTL left")
+        assertEquals(-1L, ttl(key))
+        clock.now += Duration.ofSeconds(30)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)), "PERSIST cancelled the wheel entry")
+        assertEquals(Reply.Integer(1), run(Command.DbSize))
+    }
+
+    @Test
+    fun del_cancels_wheel_entry_so_a_new_value_survives() {
+        val key = Key("k")
+        run(Command.Set(key, "old".toByteArray(), ttl = Duration.ofSeconds(5)))
+        assertEquals(Reply.Integer(1), run(Command.Del(key)))
+        run(Command.Set(key, "new".toByteArray()))
+        clock.now += Duration.ofSeconds(30)
+        tick()
+        assertEquals(
+            Reply.Bulk("new".toByteArray()),
+            run(Command.Get(key)),
+            "the deleted key's deadline cannot reach the value that replaced it",
+        )
+        assertEquals(Reply.Integer(1), run(Command.DbSize))
+    }
+
+    @Test
+    fun expireat_absolute() {
+        val key = Key("k")
+        val deadline = clock.now + Duration.ofSeconds(30)
+        assertEquals(Reply.Integer(0), run(Command.Expire(key, deadline)), "a missing key takes no TTL")
+        run(Command.Set(key, "v".toByteArray()))
+        assertEquals(Reply.Integer(1), run(Command.Expire(key, deadline)))
+        assertEquals(30L, ttl(key))
+        // The deadline is an instant, not a duration: it does not move when the clock does.
+        clock.now += Duration.ofSeconds(10)
+        assertEquals(20L, ttl(key))
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)))
+        run(Command.Expire(key, clock.now - Duration.ofSeconds(1)))
+        assertEquals(Reply.Bulk(null), run(Command.Get(key)), "a deadline already past takes the key at once")
     }
 
     @Test
