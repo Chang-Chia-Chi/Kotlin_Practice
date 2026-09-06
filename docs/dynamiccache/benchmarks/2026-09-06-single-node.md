@@ -1,5 +1,14 @@
 # T47 - Single-node benchmark, DynaCache against redis:7
 
+> **PROVISIONAL - EVERY TABLE BELOW WAS TAKEN UNDER CONTENTION.** Another session was running
+> Maven builds and test suites on this machine throughout. That was not known when these passes
+> ran, and the load was not recorded per pass. Sampled afterwards, the machine was carrying
+> three other Java processes at 25 percent CPU idle. It is the most likely explanation for the
+> factor-of-two run-to-run spread described at the end. The script now gates every pass on a
+> quiet machine and records what it saw, and these tables are to be replaced by a run taken in
+> a quiet window. Read the ratios and the four anomalies, which held across all three runs; do
+> not quote a single absolute number from here.
+
 Measured 2026-09-06 by `DynaCache/bench/single-node.sh`. Every number below is a value
 `redis-benchmark --csv` printed; nothing is rounded, averaged across runs or adjusted.
 
