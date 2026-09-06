@@ -1457,3 +1457,100 @@ cluster 39, cp 16, server 16.
   including the `SnapshotChunk` and `RaftGroupMembersView` inside them.
 - A production node builds the transport first, then the runtime, then the engine, then the
   server, and only then publishes its own address; `GrpcCpKit` shows that order.
+
+## T39: Log-carried time and TTL ticks
+
+**Built:** Every CP log entry is now a stamped envelope. `CpOp(ts, command)` wraps a
+`Command.Cp`; `TtlTick(ts)` is the entry a leader appends when the group is idle; `NewTerm(term)`
+is the no-op MicroRaft appends first in every term, now carrying the term number. All three live
+in `dynacache-cp/.../CpOp.kt` as plain data classes, which is all MicroRaft's in-memory path
+needs; gRPC serialization is T43's. `CpConfig` gains `clock: Clock` (default system UTC) and
+`tickInterval: Duration` (default 100 ms, CP spec 5). `RaftRuntime` owns the stamping:
+`replicate(command)` takes the stamp and appends under one lock, `tick()` appends a `TtlTick`
+when this member leads and its clock is a tick interval past the last stamp, and the stamp is
+`max(clock.millis(), stateMachine.lastAppliedTs + 1, lastStampedTs + 1)`. `AtomicLongStateMachine`
+keeps `lastAppliedTs` (the stamp of the entry it applied last), stores `Counter(value, expiresAt)`
+and answers every read through `live(key)`, which treats `expiresAt <= lastAppliedTs` as gone; a
+tick also sweeps expired counters. `Command.Cp` gains `LongSet(key, value, ttl = null)`,
+`LongExpire(key, ttl)`, `LongTtl(key)` and `LongPersist(key)` with Redis's replies (CP spec 9.4):
+INCR and CAS keep a TTL, SET without one clears it. The snapshot chunk now carries
+`lastAppliedTs` next to the counters. `CONTEXT.md` gains a CP section naming **log time** and
+**TTL tick**. The kit gives each member a `MutableClock`, exposes `clock(member)` and
+`awaitApplied(member, index)`.
+
+**Concepts named:** **Log time** is the time a CP state machine lives in; nothing in the state
+machine reads a clock, and the only clock in the module is the leader's, read once per stamp.
+The seam is unchanged: `CpEngine.submit` still takes a `Command.Cp` and answers a `Reply`; the
+stamp is the runtime's business, and `CpEngine` only moved from `runtime.node.replicate` to
+`runtime.replicate`. **A leader is a leader only once its term's first entry is applied.** MicroRaft
+lets a fresh leader replicate as soon as its `NewTerm` is *appended*, and at that moment its applied
+time may still trail the old leader's last commit (the follower learns a commit index on the
+next append or heartbeat, and the old leader was killed before that). A stamp taken then equals
+or precedes the old leader's, which is exactly what C19 forbids; the red run of the C19 test
+showed the successor stamping the same millisecond as the old leader's last entry. So
+`RaftRuntime.isLeader` is `leaderEndpoint == me && appliedTerm == node.term.term`, where
+`appliedTerm` is set by the state machine's callback when it applies a `NewTerm`; the
+leadership future completes there rather than on MicroRaft's role report, and is replaced
+when the member stops leading (the reset the T38 entry asked for).
+
+**Acceptance:** `dynacache.cp.CpEngineTest`, 16 tests, all green; full `clean package` green
+(engine 66, cluster 39, cp 16, server 16).
+
+- `C19_log_timestamps_monotonic_across_leader_change`: the leader's clock is advanced an
+  hour, it commits two entries and is killed; the successor (clock at the epoch) stamps three
+  entries that are strictly increasing, past the old leader's last stamp, and ahead of the
+  successor's own clock. Red before green: it failed with the successor's first stamp equal to
+  the old leader's last, fixed by the term gating above.
+- `C23_every_member_agrees_on_expiry_at_same_index`: only the leader's clock moves; at the
+  SET's index every member reads 5, at the tick's index every member reads nothing.
+- `ttl_tick_advances_time_when_idle`: the clock moves 2 s but the counter stays live until
+  `tick()` commits, then it is gone with no user entry in between.
+- `long_ttl_expires`: `SET ... EX 1`, clock +2 s, GET is nil; and `long_expire_ttl_persist`
+  pins -2 / -1 / seconds-rounded-as-Redis / PERSIST 1 then 0.
+- Every T38 test still green, unchanged.
+
+**Deviations:**
+
+1. **`TTL` answers seconds, and there is no `PTTL` variant.** `LongTtl` rounds as Redis's `TTL`
+   does (`(ms + 500) / 1000`). `PEXPIRE` needs no variant because `LongExpire` takes a
+   `Duration`. If T44 wants `PTTL`, a `LongPttl` is one data class and one branch.
+2. **`tick()` is unconditional in effect when called at its own cadence.** The idle check
+   compares the leader's clock against its last stamp, so a production loop calling `tick()`
+   every 100 ms appends nothing while user writes keep coming and one tick per interval when
+   they stop. No production loop exists yet; plan 2.5 says it is one coroutine owned by the
+   node's lifecycle, and that belongs with the server wiring.
+3. **Expired counters are swept on ticks and dropped lazily on access, never on a timer.** One
+   `removeIf` per tick over the whole map: fine for a counter set, the ceiling is a very large
+   one, and the repair is an expiry-ordered index.
+4. **Lease time after a failover to a slow clock stands still.** If the new leader's clock is
+   behind log time, stamps advance by 1 ms per entry until the clock catches up; that is the
+   spec's own rule (time never turns back) and not something this ticket changed.
+5. **Real-time waits.** No `Thread.sleep`. C19 takes about 5 s: the kit's MicroRaft config keeps
+   a 5 s leader heartbeat timeout (T38), so the successor notices the dead leader only then. The
+   CP class now runs in about 8 s. Shortening `setLeaderHeartbeatTimeoutSecs` to 1 would cut it,
+   but the instruction was to keep the kit's timing; it is a one-line change if wanted.
+   `awaitApplied` spins on `getReport()` futures with a deadline, not on a sleep.
+
+**For the next ticket:**
+
+- **T40 (FencedLock)** measures leases against `lastAppliedTs`. That field lives on
+  `AtomicLongStateMachine` today; a second state machine wants it hoisted into the composite
+  that dispatches by command type (the T38 note), and the `NewTerm` callback and `currentTerm`
+  lambda go with it. `RaftRuntime.stateMachine` is now built by the runtime (no constructor
+  parameter), which is where the composite will be constructed.
+- **Failover tests** can use `kit.leader()` as is: the leadership future is reset when a member
+  stops leading and completes only when the new leader has applied its `NewTerm`, so `leader()`
+  after `killMember` returns a successor that may stamp.
+- **T41 (sessions)** checks session timeouts "on every `TTL_TICK`": the state machine sees
+  `TtlTick` in `runOperation`, so that check is one more branch there, and the leader appending
+  `SESSION_CLOSED` is a `replicate` from the tick's completion.
+- **T43** serializes `CpOp`, `TtlTick` and `NewTerm` for gRPC; they are three data classes with
+  primitives and a `Command.Cp`.
+- `LongSet.ttl` is a `Duration`; T44's parser reduces `EX`/`PX` to it, as the AP `Set` does.
+
+**Addendum after merging T43:** `CpWire.encodeOperation`/`decodeOperation` now tag the three
+entries a leader appends (`CpOp` with stamp and command, `TtlTick`, `NewTerm` with its term), and
+the command encoding carries `LongSet.ttl` (-1 for none) plus `LongExpire`, `LongTtl` and
+`LongPersist`. Both functions became `internal` so `CpWireTest` (3 round-trip tests) can drive
+them directly. `GrpcCpTest`'s five tests pass over real gRPC with stamped entries. The T43 note
+in **For the next ticket** above is therefore done; nothing else in the entry changed.

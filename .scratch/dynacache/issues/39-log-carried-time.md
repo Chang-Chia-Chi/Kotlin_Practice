@@ -10,12 +10,12 @@ spec 9.4.
 
 **Nature:** monotonic time across leader changes, C19 and C23 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache ca8094d + dc17f60, merged into misc/ai_gen)
 
-- [ ] `C19_log_timestamps_monotonic_across_leader_change`: the leader killed with a clock ahead of its successor's
-- [ ] `C23_every_member_agrees_on_expiry_at_same_index`
-- [ ] `ttl_tick_advances_time_when_idle`, `long_ttl_expires`
-- [ ] Progress entry appended
+- [x] `C19_log_timestamps_monotonic_across_leader_change`: the leader killed with a clock ahead of its successor's
+- [x] `C23_every_member_agrees_on_expiry_at_same_index`
+- [x] `ttl_tick_advances_time_when_idle`, `long_ttl_expires`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
