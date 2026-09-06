@@ -1,5 +1,6 @@
 package dynacache.engine
 
+import java.time.Clock
 import java.util.concurrent.CompletableFuture
 
 /**
@@ -35,15 +36,30 @@ interface PartitionContext {
 }
 
 /**
- * The Dynamo-style AP engine. Partition executors, the store and the injected clock arrive in
- * T02; until then every entry point is a stub.
+ * The Dynamo-style AP engine: a fixed number of partitions, each with its own executor and
+ * store, chosen by `key.hash % partitionCount`. Keyless commands run on partition 0.
  */
-class ApEngine : CommandEngine {
+class ApEngine(partitionCount: Int, clock: Clock) : CommandEngine {
 
-    override fun submit(command: Command): CompletableFuture<Reply> = TODO("T02: partition executors")
+    private val partitions = List(partitionCount) { Partition(PartitionId(it), clock) }
+
+    /** The partition [key] lives on; keys sharing a hash tag share a partition (C12). */
+    fun partitionOf(key: Key): PartitionId = PartitionId(key.hash % partitions.size)
+
+    override fun submit(command: Command): CompletableFuture<Reply> =
+        partitions[keyOf(command)?.let { partitionOf(it).index } ?: 0].submit(command)
 
     override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        TODO("T02: partition executors")
+        TODO("T14: batches")
 
-    override fun close() = Unit
+    override fun close() = partitions.forEach { it.close() }
+
+    private fun keyOf(command: Command): Key? = when (command) {
+        is Command.Ping -> null
+        is Command.Get -> command.key
+        is Command.Set -> command.key
+        is Command.Del -> command.key
+        is Command.Exists -> command.key
+        is Command.Type -> command.key
+    }
 }
