@@ -13,8 +13,14 @@ import java.time.Instant
  * A mutation as the log holds it. The entry's op byte is the command's kind and the payload its
  * arguments, big-endian and length-prefixed as the RDB's are. A TTL travels as the absolute
  * instant the engine settled on, never as the duration the client sent, so a replay lands the
- * same deadline however late it runs (spec 5.4). A conditional `SET` is logged only when it took,
- * and then as a plain one: what is logged is what changed, not what was asked.
+ * same deadline however late it runs (spec 5.4).
+ *
+ * What is logged is what changed, not what was asked -- but the reply alone does not always say
+ * which that was. A refused `SET` answers nil, so its entry is dropped by shape; a `ZADD` answers
+ * a count that a refusal and a moved score share (`:0` without `CH`), and it may refuse some of
+ * its members and take the rest. So a `ZADD` carries its `NX`/`XX` condition into the log and is
+ * replayed under it, against the same state the live command saw: refused members write nothing,
+ * taken ones write exactly what they wrote. `CH` is not logged; it changes only the reply.
  */
 
 private const val NO_TTL = -1L
@@ -60,7 +66,7 @@ internal object WalCodec {
             is Command.Pop -> POP to body { key(command.key); end(command.end) }
             is Command.LSet -> LSET to body { key(command.key); writeLong(command.index); bytes(command.value) }
             is Command.LRem -> LREM to body { key(command.key); writeLong(command.count); bytes(command.value) }
-            is Command.ZAdd -> ZADD to body { key(command.key); pairs(command.entries) }
+            is Command.ZAdd -> ZADD to body { key(command.key); pairs(command.entries); condition(command.condition) }
             is Command.ZRem -> ZREM to body { key(command.key); list(command.members) }
             is Command.ZIncrBy -> ZINCR_BY to body { key(command.key); bytes(command.delta); bytes(command.member) }
             is Command.FlushDb -> FLUSH_DB to ByteArray(0)
@@ -93,7 +99,7 @@ internal object WalCodec {
             POP -> listOf(Command.Pop(input.key(), input.end()))
             LSET -> listOf(Command.LSet(input.key(), input.readLong(), input.bytes()))
             LREM -> listOf(Command.LRem(input.key(), input.readLong(), input.bytes()))
-            ZADD -> listOf(Command.ZAdd(input.key(), input.pairs()))
+            ZADD -> listOf(Command.ZAdd(input.key(), input.pairs(), input.condition()))
             ZREM -> listOf(Command.ZRem(input.key(), input.list()))
             ZINCR_BY -> listOf(Command.ZIncrBy(input.key(), input.bytes(), input.bytes()))
             FLUSH_DB -> listOf(Command.FlushDb)
@@ -114,6 +120,15 @@ internal object WalCodec {
     /** Fixed by the format, not the enum's order: reordering [Command.End] must not change a file's meaning. */
     private fun DataOutputStream.end(end: Command.End) = writeByte(if (end == Command.End.HEAD) 0 else 1)
 
+    /** Fixed by the format, as [end] is: the enum's order is free to change, these bytes are not. */
+    private fun DataOutputStream.condition(condition: Command.Set.Condition?) = writeByte(
+        when (condition) {
+            null -> 0
+            Command.Set.Condition.NX -> 1
+            Command.Set.Condition.XX -> 2
+        },
+    )
+
     private fun DataOutputStream.list(items: List<ByteArray>) {
         writeInt(items.size)
         items.forEach { bytes(it) }
@@ -130,6 +145,13 @@ internal object WalCodec {
     private fun DataInputStream.bytes(): ByteArray = readNBytes(readInt())
     private fun DataInputStream.key(): Key = Key(bytes())
     private fun DataInputStream.end(): Command.End = if (readByte() == 0.toByte()) Command.End.HEAD else Command.End.TAIL
+    private fun DataInputStream.condition(): Command.Set.Condition? = when (val byte = readByte().toInt()) {
+        0 -> null
+        1 -> Command.Set.Condition.NX
+        2 -> Command.Set.Condition.XX
+        else -> throw IllegalArgumentException("unknown WAL condition $byte")
+    }
+
     private fun DataInputStream.list(): List<ByteArray> = List(readInt()) { bytes() }
     private fun DataInputStream.pairs(): List<Pair<ByteArray, ByteArray>> = List(readInt()) { bytes() to bytes() }
 }
