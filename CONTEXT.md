@@ -92,6 +92,23 @@ It is not the **dispatcher**, which chooses between the AP and the CP engine by 
 sits above it.
 _Avoid_: proxy, forwarder, gateway
 
+**Replica**:
+Any node of a key's preference list; the coordinator is the first of them and a replica too.
+A replica applies what the coordinator ships and answers its reads; it never decides.
+_Avoid_: secondary, follower, slave
+
+**Quorum**:
+How many distinct replicas must answer before a request is answered: W acks for a write and R
+answers for a read, the coordinator counting as one of each, with R + W > N (C4). A quorum
+that does not form within the deadline is an error reply, never a hang.
+_Avoid_: majority (that is Raft's word), consensus
+
+**Version**:
+The DVV a stored value carries; on a node it lives in the replication layer's side table next
+to the engine, keyed by key, so the engine never learns of it. Replicas exchange values with
+their versions, and a read answers with the version that dominates.
+_Avoid_: timestamp, revision, vector clock
+
 ### CP
 
 **Log time**:
@@ -128,6 +145,24 @@ that entry (or a `CP.SESSION.CLOSE`) forgets the session and releases everything
 that one entry (C18, I15). A command on behalf of a session that lapsed, closed or never
 existed answers `-NOSESSION` before any primitive sees it.
 _Avoid_: client, connection (a session may outlive one), lease (that is a lock's word)
+
+**Permit**:
+The unit a Semaphore hands out. A key's permits are either **available** or held, and every
+held permit belongs to a session, so a session's death gives its permits back in the entry
+that ends it (C18, I15). A session may only release what it holds; asking for more than is
+available fails without blocking, and **draining** takes whatever is available at that entry.
+_Avoid_: lock, slot, token (a token is a lock's fencing number)
+
+**Latch**:
+A CountDownLatch: a count that only ever falls, and stops at zero. It is armed only from
+zero, so a latch parties are still counting down cannot be moved under them; a latch that
+has run out may be armed again.
+_Avoid_: barrier, gate, semaphore
+
+**Reference**:
+An AtomicReference: opaque bytes under a `cp:ref:*` key, swapped by a compare-and-set that
+matches on byte content and nothing else (I21). Its TTL, like a counter's, runs on log time.
+_Avoid_: value, object, string (the bytes are never decoded)
 
 ## Example dialogue
 

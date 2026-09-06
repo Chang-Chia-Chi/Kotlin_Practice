@@ -1,0 +1,59 @@
+package dynacache.cp
+
+import dynacache.engine.Command
+import dynacache.engine.Key
+import dynacache.engine.Reply
+
+/**
+ * The AtomicReference (CP spec 3.5): opaque bytes per `cp:ref:*` key, mutated only by applying
+ * committed entries in log order. The compare and the swap of a CAS happen inside the one applied
+ * entry, so no reader ever sees a half state (I21). A TTL is measured against the log time passed
+ * in with every call, exactly as the counter's is (CP spec 9.4); nothing here reads a clock.
+ */
+class AtomicReferenceStateMachine {
+
+    private val references = HashMap<Key, Reference>()
+
+    fun apply(command: Command.Cp.AtomicReference, now: Long): Reply {
+        val current = references[command.key]?.takeUnless { it.expired(now) }
+        return when (command) {
+            is Command.Cp.RefSet -> {
+                references[command.key] = Reference(command.value, command.ttl?.let { now + it.toMillis() })
+                Reply.Simple("OK")
+            }
+            is Command.Cp.RefGet -> Reply.Bulk(current?.value)
+            is Command.Cp.RefCas ->
+                if (current == null || !current.value.contentEquals(command.expected)) {
+                    Reply.Integer(0)
+                } else {
+                    // As with the counter, a swap keeps the reference's TTL.
+                    references[command.key] = Reference(command.new, current.expiresAt)
+                    Reply.Integer(1)
+                }
+        }
+    }
+
+    /** A tick drops every reference whose TTL has run out. */
+    fun sweep(now: Long) {
+        references.values.removeIf { it.expired(now) }
+    }
+
+    fun snapshot(): Map<Key, Reference> = HashMap(references)
+
+    fun restore(state: Map<Key, Reference>) {
+        references.clear()
+        references.putAll(state)
+    }
+
+    /** A reference's bytes and, when it has a TTL, the log time at which it stops existing. */
+    class Reference(val value: ByteArray, val expiresAt: Long?) {
+        fun expired(now: Long) = expiresAt != null && expiresAt <= now
+
+        override fun equals(other: Any?): Boolean = this === other ||
+            (other is Reference && value.contentEquals(other.value) && expiresAt == other.expiresAt)
+
+        override fun hashCode(): Int = 31 * value.contentHashCode() + expiresAt.hashCode()
+
+        override fun toString(): String = "Reference(${value.toString(Charsets.ISO_8859_1)}, $expiresAt)"
+    }
+}
