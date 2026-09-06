@@ -1,5 +1,6 @@
 package dynacache.engine
 
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -25,13 +26,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CommandEngineTest {
-
-    /** Time moves only when a test says so; the partition thread reads it, hence volatile. */
-    private class MutableClock(@Volatile var now: Instant) : Clock() {
-        override fun instant(): Instant = now
-        override fun getZone(): ZoneId = ZoneOffset.UTC
-        override fun withZone(zone: ZoneId): Clock = this
-    }
 
     private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
     private val engine = ApEngine(partitionCount = 4, clock = clock, random = Random(20260906))
@@ -919,19 +913,6 @@ class CommandEngineTest {
         }
     }
 
-    /** Records who read the clock and how often. */
-    private class RecordingClock(@Volatile var now: Instant) : Clock() {
-        val readers = Collections.synchronizedList(mutableListOf<String>())
-
-        override fun instant(): Instant {
-            readers += Thread.currentThread().name
-            return now
-        }
-
-        override fun getZone(): ZoneId = ZoneOffset.UTC
-        override fun withZone(zone: ZoneId): Clock = this
-    }
-
     /**
      * The C1 technique of T02, pointed at eviction: the engine reads the clock once per command
      * and never outside one, so twenty writes that evict are still twenty reads, all of them on
@@ -940,7 +921,7 @@ class CommandEngineTest {
      */
     @Test
     fun eviction_runs_on_the_partition_thread() {
-        val recording = RecordingClock(clock.now)
+        val recording = MutableClock(clock.now, record = true)
         val node = ApEngine(partitionCount = 1, clock = recording, random = Random(10), maxMemoryBytes = 3 * entryBytes)
         try {
             repeat(20) {
