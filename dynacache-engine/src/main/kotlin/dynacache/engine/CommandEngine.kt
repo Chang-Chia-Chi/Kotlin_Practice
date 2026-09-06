@@ -45,11 +45,26 @@ class ApEngine(
     partitionCount: Int,
     clock: Clock,
     private val random: Random = Random(),
+    /**
+     * How wide one wheel tick is, and so how long after its deadline a key may linger before
+     * [tick] removes it (C7). The server's scheduler reads this to set its own period.
+     */
+    val tickMillis: Long = 1000,
 ) : CommandEngine {
 
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
-    private val partitions = List(partitionCount) { Partition(PartitionId(it), clock, Random(random.nextLong())) }
+    private val partitions =
+        List(partitionCount) { Partition(PartitionId(it), clock, Random(random.nextLong()), tickMillis) }
+
+    /**
+     * Advances every partition's timer wheel to the clock's current reading, deleting the keys
+     * whose deadlines have fallen due. The engine owns no thread beyond its partition executors:
+     * the server drives this once per [tickMillis] and the work runs on each partition's own
+     * thread, so an expiring key is deleted with the same exclusion a command has (C1).
+     */
+    fun tick(): CompletableFuture<Void> =
+        CompletableFuture.allOf(*partitions.map { it.tick() }.toTypedArray())
 
     /** The partition [key] lives on; keys sharing a hash tag share a partition (C12). */
     fun partitionOf(key: Key): PartitionId = PartitionId(key.hash % partitions.size)

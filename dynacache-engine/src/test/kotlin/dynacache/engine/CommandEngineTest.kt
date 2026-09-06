@@ -80,8 +80,10 @@ class CommandEngineTest {
     fun string_set_ex_expires() {
         run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofSeconds(1)))
         clock.now += Duration.ofMillis(999)
+        tick()
         assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(Key("k"))))
         clock.now += Duration.ofMillis(2)
+        tick()
         assertEquals(Reply.Bulk(null), run(Command.Get(Key("k"))))
     }
 
@@ -497,6 +499,122 @@ class CommandEngineTest {
         run(Command.Set(Key("a"), "v".toByteArray()))
         run(Command.Set(otherPartitionThan(Key("a")), "v".toByteArray()))
         assertTrue(info().contains("db0:keys=2\r\n"), "INFO counts every partition: " + info())
+    }
+
+    private fun ttl(key: Key, precision: Command.Ttl.Precision = Command.Ttl.Precision.SECONDS): Long =
+        (run(Command.Ttl(key, precision)) as Reply.Integer).value
+
+    @Test
+    fun ttl_reports_remaining_and_minus_values() {
+        assertEquals(-2L, ttl(Key("k")), "Redis answers -2 for a key that is not there")
+        run(Command.Set(Key("k"), "v".toByteArray()))
+        assertEquals(-1L, ttl(Key("k")), "and -1 for a key with no TTL")
+        run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        assertEquals(10L, ttl(Key("k")))
+        assertEquals(10_000L, ttl(Key("k"), Command.Ttl.Precision.MILLIS), "PTTL reports milliseconds")
+        // Redis rounds TTL half up: 9500 ms is 10 s, 9499 ms is 9 s.
+        clock.now += Duration.ofMillis(500)
+        assertEquals(10L, ttl(Key("k")))
+        assertEquals(9_500L, ttl(Key("k"), Command.Ttl.Precision.MILLIS))
+        clock.now += Duration.ofMillis(1)
+        assertEquals(9L, ttl(Key("k")))
+        clock.now += Duration.ofMillis(9_499)
+        assertEquals(0L, ttl(Key("k")), "the key is readable through its deadline")
+        assertEquals(0L, ttl(Key("k"), Command.Ttl.Precision.MILLIS))
+        clock.now += Duration.ofMillis(1)
+        assertEquals(-2L, ttl(Key("k")), "and gone after it")
+    }
+
+    /** What the server's scheduler will call once per tick: every partition advances its wheel. */
+    private fun tick() {
+        engine.tick().get(5, TimeUnit.SECONDS)
+    }
+
+    /**
+     * C7 at the command level: never early, at most one tick late. The lazy check on access
+     * covers the gap between the deadline and the tick that follows it, so both halves of spec
+     * 5.4 answer the same at every instant a client can look.
+     */
+    @Test
+    fun C7_key_readable_until_deadline_then_absent() {
+        val key = Key("k")
+        val deadline = clock.now + Duration.ofSeconds(10)
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        clock.now = deadline - Duration.ofMillis(1)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)), "never early")
+        assertEquals(Reply.Integer(1), run(Command.DbSize), "and DBSIZE agrees the key is there")
+        clock.now = deadline + Duration.ofMillis(engine.tickMillis)
+        tick()
+        assertEquals(Reply.Bulk(null), run(Command.Get(key)), "gone at most one tick after the deadline")
+        assertEquals(Reply.Integer(0), run(Command.DbSize), "and DBSIZE agrees it is gone")
+    }
+
+    @Test
+    fun expire_replaces_wheel_entry() {
+        val key = Key("k")
+        // SET EX puts a deadline on the wheel; the re-EXPIRE has to take it off again, or the
+        // tick below fires the old one and deletes a key that should have 80 s left.
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        run(Command.Expire(key, clock.now + Duration.ofSeconds(100)))
+        clock.now += Duration.ofSeconds(20)
+        tick()
+        assertEquals(
+            Reply.Bulk("v".toByteArray()),
+            run(Command.Get(key)),
+            "the replaced deadline was cancelled, so the wheel had nothing to fire at 10 s",
+        )
+        assertEquals(80L, ttl(key))
+        run(Command.Expire(key, clock.now + Duration.ofSeconds(5)))
+        clock.now += Duration.ofSeconds(6)
+        tick()
+        assertEquals(-2L, ttl(key), "a shortened TTL takes the key at its new deadline")
+    }
+
+    @Test
+    fun persist_cancels_expiry() {
+        val key = Key("k")
+        assertEquals(Reply.Integer(0), run(Command.Persist(key)), "a missing key has no TTL to drop")
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(5)))
+        assertEquals(Reply.Integer(1), run(Command.Persist(key)))
+        assertEquals(Reply.Integer(0), run(Command.Persist(key)), "and 0 again: there is no TTL left")
+        assertEquals(-1L, ttl(key))
+        clock.now += Duration.ofSeconds(30)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)), "PERSIST cancelled the wheel entry")
+        assertEquals(Reply.Integer(1), run(Command.DbSize))
+    }
+
+    @Test
+    fun del_cancels_wheel_entry_so_a_new_value_survives() {
+        val key = Key("k")
+        run(Command.Set(key, "old".toByteArray(), ttl = Duration.ofSeconds(5)))
+        assertEquals(Reply.Integer(1), run(Command.Del(key)))
+        run(Command.Set(key, "new".toByteArray()))
+        clock.now += Duration.ofSeconds(30)
+        tick()
+        assertEquals(
+            Reply.Bulk("new".toByteArray()),
+            run(Command.Get(key)),
+            "the deleted key's deadline cannot reach the value that replaced it",
+        )
+        assertEquals(Reply.Integer(1), run(Command.DbSize))
+    }
+
+    @Test
+    fun expireat_absolute() {
+        val key = Key("k")
+        val deadline = clock.now + Duration.ofSeconds(30)
+        assertEquals(Reply.Integer(0), run(Command.Expire(key, deadline)), "a missing key takes no TTL")
+        run(Command.Set(key, "v".toByteArray()))
+        assertEquals(Reply.Integer(1), run(Command.Expire(key, deadline)))
+        assertEquals(30L, ttl(key))
+        // The deadline is an instant, not a duration: it does not move when the clock does.
+        clock.now += Duration.ofSeconds(10)
+        assertEquals(20L, ttl(key))
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)))
+        run(Command.Expire(key, clock.now - Duration.ofSeconds(1)))
+        assertEquals(Reply.Bulk(null), run(Command.Get(key)), "a deadline already past takes the key at once")
     }
 
     @Test
