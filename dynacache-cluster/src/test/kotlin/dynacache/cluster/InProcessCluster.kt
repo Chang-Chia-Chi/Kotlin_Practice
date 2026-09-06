@@ -7,6 +7,7 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.Value
 import dynacache.engine.view
 import dynacache.engine.install
 import java.nio.file.Path
@@ -17,6 +18,7 @@ import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import org.junit.jupiter.api.Assertions.assertEquals
 
 /**
  * The test kit's cluster: [nodeCount] nodes named `node-1..N`, one shared immutable [Ring]
@@ -155,11 +157,28 @@ class InProcessCluster(
         }
     }
 
-    suspend fun writeVia(node: NodeId, key: Key, value: ByteArray): Reply =
-        settle(router(node).submit(Command.Set(key, value)))
+    /** Every key a command or a seed went to through this kit: what [assertConverged] checks. */
+    val written = LinkedHashSet<Key>()
 
-    suspend fun readVia(node: NodeId, key: Key): Reply =
-        settle(router(node).submit(Command.Get(key)))
+    suspend fun writeVia(node: NodeId, key: Key, value: ByteArray): Reply = submitVia(node, Command.Set(key, value))
+
+    suspend fun readVia(node: NodeId, key: Key): Reply = submitVia(node, Command.Get(key))
+
+    /** [command] through [node]'s router, as a client would send it, driven until answered. */
+    suspend fun submitVia(node: NodeId, command: Command.Keyed): Reply {
+        written += command.key
+        return settle(router(node).submit(command))
+    }
+
+    /**
+     * [command] coordinated by [node] itself, whether or not the ring says so: what spec 5.1
+     * step 7's failover would do when the coordinator is unreachable, which the router does not
+     * do yet (progress T22 deviation 7). This is how a test writes on both sides of a partition.
+     */
+    suspend fun submitOn(node: NodeId, command: Command.Keyed): Reply {
+        written += command.key
+        return settle(replication(node).submit(command))
+    }
 
     /** What each of the key's [n] preference-list nodes holds, by node: local reads, no hop. */
     suspend fun readAllReplicas(key: Key): Map<NodeId, Reply> =
@@ -174,6 +193,7 @@ class InProcessCluster(
 
     /** [seed] with any write, so a replica can be made to hold a hash or a list under [dvv]. */
     suspend fun seed(node: NodeId, write: Command.Keyed, dvv: Dvv) {
+        written += write.key
         val seeder = network.endpoint(SEEDER)
         val body = Replicate.newBuilder().setId(0)
             .addAllToken(TokenCodec.tokens(write).map(ByteString::copyFrom))
@@ -184,6 +204,41 @@ class InProcessCluster(
             if (seeder.inbound.tryReceive().isSuccess) return
         }
         error("$node never acknowledged the seed of ${write.key}")
+    }
+
+    /**
+     * I1 (spec 4): heals every network partition, brings every node back alive, drains messages
+     * and hints, runs one full anti-entropy cycle on every node, drains again, and asserts that
+     * every replica of every key in [written] holds the same value, deadline and version. The first
+     * divergent key fails with both sides. A key absent on a replica compares as absent alone:
+     * anti-entropy carries no tombstones (progress T28 deviation 3), so the version a delete
+     * leaves behind is never synced to a replica that holds none, and no client can see it.
+     */
+    suspend fun assertConverged() {
+        network.heal()
+        nodes.forEach(network::restart)
+        membership.members.values.filter { it.state != MemberState.ALIVE }
+            .forEach { membership.set(it.node, MemberState.ALIVE, it.incarnation + 1) }
+        drainMessages()
+        drainHints()
+        for (node in nodes) {
+            val sync = antiEntropy(node)
+            val target = sync.rangesCompared.get() + sync.ranges.size
+            var steps = 0
+            while (sync.rangesCompared.get() < target) {
+                check(steps++ < 2 * sync.ranges.size) { "$node's anti-entropy cycle did not complete: a peer stayed silent" }
+                antiEntropyStep(node)
+            }
+        }
+        drainMessages()
+        for (key in written) {
+            val held = ring.preferenceList(key, n).associateWith { node ->
+                val stored = engine(node).view(listOf(key)).await().firstOrNull()
+                Triple(stored?.let { canon(it.value) }, stored?.expiresAt, stored?.let { replication(node).version(key) })
+            }
+            val (reference, expected) = held.entries.first()
+            for ((node, actual) in held) assertEquals(expected, actual, "$key on $node differs from $reference")
+        }
     }
 
     fun close() {
@@ -210,4 +265,13 @@ class InProcessCluster(
         const val SETTLE_ROUNDS = 100
         val SEEDER = NodeId("seeder")
     }
+}
+
+/** A value as plain data, so two values compare by content: what a client would read back. */
+fun canon(value: Value): Any = when (value) {
+    is Value.Str -> value.bytes.toList()
+    is Value.Hash -> value.fields.entries().associate { (name, bytes) -> name to bytes.toList() }
+    is Value.List -> value.items.map { it.toList() }
+    is Value.ZSet -> value.order.forward().map { it.member.toList() to it.score }.toList() to
+        value.scores.entries().associate { (member, score) -> member to score }
 }
