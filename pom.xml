@@ -23,11 +23,13 @@
         <grpc.version>1.63.0</grpc.version>
         <protobuf.version>3.25.3</protobuf.version>
         <coroutines.version>1.10.1</coroutines.version>
+        <microraft.version>0.7</microraft.version>
     </properties>
 
     <modules>
         <module>dynacache-engine</module>
         <module>dynacache-cluster</module>
+        <module>dynacache-cp</module>
         <module>dynacache-server</module>
     </modules>
 
