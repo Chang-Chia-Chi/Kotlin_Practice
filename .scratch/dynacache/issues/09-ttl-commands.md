@@ -11,12 +11,12 @@ partition's executor.
 
 **Nature:** expiry semantics, spec 5.4 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache a8f60bd + merge 456ada2, merged into misc/ai_gen)
 
-- [ ] `expire_replaces_wheel_entry`, `persist_cancels_expiry`, `expireat_absolute`, `ttl_reports_remaining_and_minus_values`
-- [ ] `C7_key_readable_until_deadline_then_absent`: readable at deadline minus one ms, absent after deadline plus one tick
-- [ ] `string_set_ex_expires` now runs through the wheel path
-- [ ] Progress entry appended
+- [x] `expire_replaces_wheel_entry`, `persist_cancels_expiry`, `expireat_absolute`, `ttl_reports_remaining_and_minus_values`
+- [x] `C7_key_readable_until_deadline_then_absent`: readable at deadline minus one ms, absent after deadline plus one tick
+- [x] `string_set_ex_expires` now runs through the wheel path
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

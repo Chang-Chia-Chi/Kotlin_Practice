@@ -1249,3 +1249,106 @@ this filter can stay as the lazy backstop. `HashTable.entries()` is lazy and the
 be mutated during it. Keep an eye on `HashTable.spread`: it is `hashCode` with the high bits
 folded down, so a `Key` hashes by its whole bytes (not by hash tag), which is right for a
 per-partition table. `atomically` is still `TODO("T14: batches")`.
+
+## T09: TTL commands and active expiry
+
+**Built:** The Key Expiry command set of spec 2.1, and the wheel behind it. `Command` gains three
+`Keyed` variants, all `needs = null` because a TTL is type-agnostic: `Expire(key, deadline: Instant)`
+covers `EXPIRE`, `PEXPIRE` and `EXPIREAT` (the three differ only in how the wire spells the deadline,
+and the parser reduces all of them to the absolute instant spec 5.4 asks the engine to store),
+`Ttl(key, precision)` over `enum Precision { SECONDS, MILLIS }` covers `TTL` and `PTTL`, and
+`Persist(key)` drops the TTL. `TTL` rounds seconds Redis's way, half up (`(millis + 500) / 1000`),
+and clamps at 0 rather than counting past the deadline; -2 and -1 are the two answers that are not
+durations.
+
+Each `Partition` now owns a `TimerWheel<Key>` whose callback removes the key from that partition's
+store, so it runs on the partition executor with the same exclusion a command has (C1). Every
+mutation of the store goes through one of two new private helpers, and they are the only place a
+deadline reaches the wheel: `write(key, now, entry)` schedules when the entry carries a TTL and
+cancels when it does not, and `drop(key)` removes the entry and its pending deadline together.
+`SET EX/PX`, `EXPIRE` and its siblings schedule (`TimerWheel.schedule` replaces, so a re-`EXPIRE`
+needs no second call); `PERSIST`, `DEL`, an overwrite without a TTL, an emptied list or hash and the
+lazy `live()` check all cancel; `FLUSHDB` drops the wheel whole rather than cancelling key by key.
+
+`ApEngine.tick()` advances every partition's wheel to the clock's current reading and returns a
+future over all of them. `ApEngine` gains a fourth, defaulted constructor parameter `tickMillis`
+(1000), public so the server's scheduler can set its own period from it.
+
+**Concepts named:** `write` and `drop` are the ticket's real content: the funnel that makes "a key's
+TTL and its wheel entry cannot disagree" true by construction rather than by eighteen careful
+branches. Before this ticket a branch could write an entry; now a branch states what the entry is
+and the funnel decides what the wheel owes it. That is what makes
+`del_cancels_wheel_entry_so_a_new_value_survives` pass for aggregates too, not just for the String
+path the test names. `Expire` carries an `Instant` rather than a `Duration`, the same reduction T02
+made for `SET EX/PX` and T03 made for `IncrBy`: the wire's three spellings are syntax, the absolute
+deadline is the meaning, and spec 5.4 wants the absolute one anyway so replication carries no clock
+skew. `tick` is the word for one advance of every partition's wheel; `tickMillis` is its width and
+therefore the "at most one tick late" of C7. Seams unchanged: `CommandEngine`, `PartitionContext`,
+`Reply`, `Key`, `PartitionId` are exactly T01's. `ApEngine.tick()` is a method on the AP engine, not
+on the `CommandEngine` interface, per the ticket.
+
+**Acceptance:**
+- `expire_replaces_wheel_entry`: `SET k EX 10` puts a deadline on the wheel, `EXPIRE k` to 100 s
+  replaces it, and a tick 20 s later leaves the key readable with 80 s to run; then a shortened TTL
+  takes it at the new deadline. Mutation-checked: with `EXPIRE` writing the store directly instead of
+  through `write`, the stale 10 s entry fires and the test fails.
+- `persist_cancels_expiry`: 0 for a missing key, 1 then 0 for the same key, `TTL` is -1, and a tick
+  30 s past the original deadline leaves the value and `DBSIZE` 1. Mutation-checked.
+- `del_cancels_wheel_entry_so_a_new_value_survives`: `SET k EX 5`, `DEL k`, `SET k` with no TTL, tick
+  30 s on, and `k` still holds the new value. Mutation-checked.
+- `expireat_absolute`: 0 for a missing key, 1 once it exists, and the deadline does not move when the
+  clock does (30 s becomes 20 s after 10 s pass); a deadline already past takes the key at once.
+- `ttl_reports_remaining_and_minus_values`: -2 missing, -1 no TTL, 10 s and 10,000 ms for a fresh
+  `SET EX 10`, then the half-up boundary (9500 ms is 10 s, 9499 ms is 9 s), 0 at the deadline itself
+  and -2 one millisecond later.
+- `C7_key_readable_until_deadline_then_absent`: with the clock at the deadline minus one millisecond
+  and a tick, `GET` returns the value and `DBSIZE` is 1; at the deadline plus one tick interval with
+  a tick, `GET` is nil and `DBSIZE` is 0. Never early, at most one tick late.
+- `string_set_ex_expires` now ticks the engine at both clock positions instead of only reading.
+- Every T01 to T04 and T08 test still green. `mvn -o clean package`: engine 72, cluster 39, server 16.
+- This entry.
+
+**Deviations:** None against the spec, the ticket, the frozen types or ADR 0002. Four judgement
+calls.
+1. **T04's `purgeExpired` stays.** The ticket allowed removing it only if every keyspace-wide command
+   stayed correct on lazy checks plus the wheel, and it does not: the wheel removes a key at the
+   first tick *after* its deadline, so `KEYS`, `DBSIZE`, `RANDOMKEY` and `INFO` asked in the gap
+   before that tick would see a key that no longer exists. Three T04 tests pin exactly that gap. The
+   `ponytail:` comment on it has been rewritten to say so, replacing T04's note that T09 would
+   retire it. What would retire it is a store that can find its expired keys without a walk.
+2. **The wheel is built lazily, on the first command that needs one, from that command's own reading
+   of the clock.** A wheel needs a starting instant, but the partition constructor cannot read the
+   clock: T02's `C1_one_command_at_a_time_per_partition` asserts exactly three clock reads for three
+   commands, and a constructor read is a fourth, on the wrong thread, before any command. Building it
+   on the first TTL keeps "the clock is read once per command and never outside one" literally true,
+   and a partition that has never held a TTL carries no wheel at all. The cost is a nullable field
+   and a `wheel?.` on the cancel paths.
+3. **`ApEngine` gains a fourth constructor parameter,** `tickMillis: Long = 1000`, exposed as a `val`.
+   `ApEngine`'s constructor is not on the frozen list, the default keeps every call site compiling,
+   and the server's scheduler needs the number to set its period; the C7 test reads it too rather
+   than hardcoding one second.
+4. **`Expire` on a deadline already past is not special-cased.** Redis deletes the key and answers 1;
+   here the entry is written with a past deadline, `live()` reports the key absent to the very next
+   access, and the wheel removes it on the next tick. Every observation a client can make agrees with
+   Redis, so the special case would be code with no consequence. Pinned by the last two lines of
+   `expireat_absolute`.
+
+**For the next ticket:** T10 (memory accounting and LRU) is the direct consumer. Notes for it.
+`Partition.write` and `Partition.drop` are now the only two paths in or out of the store, so the
+per-entry byte accounting T10 needs has exactly two places to hook rather than eighteen; do not add
+a third. The wheel callback is `store.remove(key)` inside the `TimerWheel` constructor and is the one
+removal that does *not* go through `drop` (the wheel has already dropped its own entry by then), so
+it needs its own accounting line. Spec 5.5's "remove all expired keys first" is `purgeExpired(now)`,
+already written and already the sweep in front of every keyspace-wide command.
+
+Active expiry is not observable through `CommandEngine.submit` on its own: `live()` and
+`purgeExpired` answer identically for a key past its deadline, so no test can prove *which* one
+removed it. What the wheel is provable by is the negative -- the three cancel tests above, where a
+missing cancel makes a live key vanish -- and that is how the acceptance tests are built. If T10
+wants direct proof that the wheel deletes, memory used after a tick is the observation to use.
+
+`TimerWheel.advanceTo` walks one tick at a time whenever entries are pending, so the server's
+scheduler (T13) must call `ApEngine.tick()` at least once per `tickMillis`; a scheduler that stalls
+for an hour makes the next tick walk 3,600 slots. C7 at the command level holds only under that.
+`atomically` is still `TODO("T14: batches")`, and a batch running TTL commands will reach `write` and
+`drop` on the partition thread just as `submit` does, so nothing there needs a second wheel path.
