@@ -1,6 +1,7 @@
 package dynacache.server
 
 import dynacache.cluster.AntiEntropy
+import dynacache.cluster.DistributedSnapshot
 import dynacache.cluster.DotCounter
 import dynacache.cluster.GrpcTransport
 import dynacache.cluster.HostPort
@@ -15,10 +16,13 @@ import dynacache.cluster.proto.Envelope
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
+import dynacache.engine.EvictionPolicy
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import dynacache.engine.install
+import dynacache.engine.persist.FsyncPolicy
+import dynacache.engine.persist.SnapshotEngine
 import dynacache.engine.view
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +32,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Clock
 import java.util.concurrent.CompletableFuture
 import kotlin.random.Random
@@ -54,15 +61,23 @@ class ClusterNode(
     grpcPort: Int = 7379,
     private val config: ReplicationConfig = ReplicationConfig(n = 3, w = 2, r = 2),
     partitionCount: Int = 16,
-    clock: Clock = Clock.systemUTC(),
+    private val clock: Clock = Clock.systemUTC(),
     gossipPeriod: Duration = 1.seconds,
+    /** Where this node's own RDB and log live (spec 2.8); null is a node that persists nothing. */
+    dataDir: Path? = null,
+    fsync: FsyncPolicy = FsyncPolicy.EVERY_SECOND,
+    /** The root of the snapshot sets this node takes part in; null is a node that takes none. */
+    private val snapshotDir: Path? = null,
+    /** This node's memory threshold and the policy it sheds keys by (spec 2.7); a node's own. */
+    maxMemoryBytes: Long? = null,
+    policy: EvictionPolicy = EvictionPolicy.LRU,
 ) : CommandEngine, AutoCloseable {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ring = Ring.of(nodes)
     private val parser = CommandParser(clock)
 
-    private val engine = ApEngine(partitionCount, clock)
+    private val engine = ApEngine(partitionCount, clock, maxMemoryBytes = maxMemoryBytes, policy = policy)
     private val wire = GrpcTransport(self, addresses, grpcPort)
     private val counter = DotCounter.of(self, emptyList())
 
@@ -114,9 +129,43 @@ class ClusterNode(
         parse = ::parse,
         scope = scope,
         others = { if (!replication.receive(it) && !antiEntropy.receive(it)) swim.deliver(it) },
+        snapshots = { distributed?.receive(it) ?: false },
     )
 
-    private val server = DynaCacheServer(respPort, engine, ap = this, clock = clock)
+    /**
+     * This node's part of a **snapshot set**: the router consults it ahead of every other
+     * handler, so a marker is consumed and an in-flight envelope recorded before the envelope is
+     * handled (T36). Null on a node with no [snapshotDir], and then the hook always says no.
+     */
+    private val distributed: DistributedSnapshot? = snapshotDir?.let {
+        DistributedSnapshot(
+            self = self,
+            peers = nodes - self,
+            engine = engine,
+            transport = NodeTransport(wire, reads = false),
+            dir = it,
+            clock = clock,
+            demux = router::receive,
+            scope = scope,
+        )
+    }
+
+    /**
+     * Local persistence, exactly as single-node `main` has it: the last snapshot and the log
+     * after it restored before the port opens, a snapshot on the tick's interval and one more at
+     * shutdown. A cluster node needs its own because a restart is what makes a node warm again;
+     * the cluster's own repair paths only cover what a peer still holds.
+     */
+    private val snapshots = dataDir?.let {
+        Files.createDirectories(it)
+        SnapshotEngine(engine, it, clock, fsync = fsync)
+    }
+
+    private val server = DynaCacheServer(respPort, engine, ap = this, clock = clock) {
+        engine.tick()
+        engine.wal?.tick()
+        snapshots?.maybeSave(clock.instant())
+    }
 
     /** The gRPC port this node listens on; the only way to learn an ephemeral one. */
     val grpcPort: Int get() = wire.boundPort
@@ -124,8 +173,9 @@ class ClusterNode(
     /** The RESP port this node listens on. Reads only after [start]. */
     val respPort: Int get() = server.boundPort
 
-    /** Opens the RESP socket and starts the node's four background loops. */
+    /** Restores what this node persisted, opens the RESP socket and starts its four loops. */
     fun start() {
+        snapshots?.restore()
         server.start()
         scope.launch { router.run() }
         scope.launch { swim.run() }
@@ -148,10 +198,34 @@ class ClusterNode(
     override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
         router.atomically(keys, block)
 
+    /**
+     * Starts snapshot [id] from this node (spec 2.8 step 1). An operator's control rather than a
+     * client's verb: nothing a Redis client can ask for takes a distributed cut, so it is a
+     * method here and not a command at the handler. Completion is [snapshotComplete].
+     */
+    fun snapshot(id: String) {
+        val part = checkNotNull(distributed) { "$self was given no snapshot directory" }
+        scope.launch { part.initiate(id) }
+    }
+
+    /** Whether every incoming channel of [id] has closed here; the set is done when all nodes say so. */
+    fun snapshotComplete(id: String): Boolean = distributed?.complete(id) == true
+
+    /**
+     * Loads this node's part of snapshot [id] and replays what its channels recorded (I12). A
+     * startup operation on a fresh node: it neither flushes the engine nor resets the version
+     * table (T36 deviation 6), so it runs before this node's first client, not beside one.
+     */
+    fun restoreSnapshot(id: String) = runBlocking {
+        checkNotNull(distributed) { "$self was given no snapshot directory" }.restoreFrom(checkNotNull(snapshotDir), id)
+    }
+
     override fun close() {
         server.close()
         scope.cancel()
         wire.close()
+        // The shutdown save (spec 2.8), while the engine is still open and nothing submits.
+        snapshots?.let { runCatching(it::close) }
         engine.close()
     }
 
@@ -225,9 +299,17 @@ private class NodeTransport(private val wire: Transport, private val reads: Bool
  * `--peers=id=host:port,...` and friends: one node of a cluster rather than a single node.
  * `--node` names this node, `--grpc` its cluster port, `--quorum=n/w/r` the replication factor,
  * and the RESP port, partition count and persistence are the positional arguments [main]
- * already takes.
+ * already takes -- [dataDir] and [fsync] mean here exactly what they mean on a single node, and
+ * the snapshot sets this node takes part in live under it, since a marker may arrive from any
+ * peer and a node with nowhere to put its part cannot answer one.
  */
-internal fun clusterMain(flags: Map<String, String>, respPort: Int, partitionCount: Int) {
+internal fun clusterMain(
+    flags: Map<String, String>,
+    respPort: Int,
+    partitionCount: Int,
+    dataDir: Path? = null,
+    fsync: FsyncPolicy = FsyncPolicy.EVERY_SECOND,
+) {
     val addresses = flags.getValue("peers").split(",").associate { peer ->
         val (id, address) = peer.split("=", limit = 2)
         val (host, port) = address.split(":", limit = 2)
@@ -244,6 +326,9 @@ internal fun clusterMain(flags: Map<String, String>, respPort: Int, partitionCou
         grpcPort = flags["grpc"]?.toInt() ?: addresses.getValue(self).port,
         config = ReplicationConfig(n, w, r),
         partitionCount = partitionCount,
+        dataDir = dataDir,
+        fsync = fsync,
+        snapshotDir = dataDir?.resolve("snapshots"),
     )
     Runtime.getRuntime().addShutdownHook(Thread(node::close))
     node.start()
