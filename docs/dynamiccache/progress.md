@@ -5394,3 +5394,84 @@ One intermediate run saw `ReadRepairTest.read_repair_does_not_delay_reply` error
 reached node-3". That test is in the cluster module, which this ticket does not touch, and it
 passed on both the run before it and the run after; it is a timing flake under three parallel
 Maven builds on the machine. The final run is clean.
+
+---
+
+## T51 - A node's dot counter survives restart
+
+**Built:** a node's `DotCounter` now resumes above everything it ever handed out, restart
+included (C2), which is what makes a restarted coordinator's first write new to every replica
+and closes the acknowledged-write loss the bug hunt found (I2). The counter reserves dots a
+block at a time: crossing its reserved ceiling persists the next ceiling (`(counter / block + 1)
+* block`, block 1000) through a new seam BEFORE the crossing dot is handed out, so the write
+path pays one fsync per 1000 writes and nothing otherwise, and a crash wastes at most one block.
+On start the counter takes the higher of two floors: the persisted ceiling and the highest own
+counter in the local-data scan T21 already had (empty on every node today, ticket 67's floor
+once versions persist).
+
+The seam is `dynacache.engine.persist.DotCeilingStore { load(): Long; reserve(ceiling: Long) }`,
+in the engine's persist package because that is the one package besides cp allowed
+`java.nio.file` (plan 2.2); the cluster module still does no file I/O. Two adapters, both in the
+same file as companion factories: `inFile(path)` writes the ceiling as decimal text to
+`<path>.tmp`, fsyncs, and renames it over `<path>` atomically (the snapshot engine's own idiom),
+and answers 0 for a missing file while a file it cannot parse fails loudly rather than starting
+over at 0; `inMemory()` is what a node with no data directory and every test uses. `ClusterNode`
+wires `inFile(dataDir/dots)` when it has a data directory and `inMemory()` otherwise; the file
+adapter creates the directory itself because the counter is built before the snapshot engine
+creates it. Inside the counter, `next()` stays an `AtomicLong` increment; only a dot past the
+ceiling enters the `@Synchronized` reservation, the first arrival writes and the rest re-check
+and go, and a reservation that throws leaves the ceiling where it was so the dot is never
+handed out and the next caller retries.
+
+The in-process test kit gained `restart(node)`: it cancels the node's router and handoff loops
+and rebuilds `Replication`, `AntiEntropy` and `Router` over the same engine, the same transport
+endpoint and the node's own `DotCeilingStore` (one in-memory store per node lives in the kit),
+so the version table empties and the counter resumes from the persisted ceiling exactly as a
+process restart does while the engine restores from disk. Node construction moved into one
+`start(node)` the constructor and `restart` share.
+
+**Acceptance:**
+- `C2_dot_counter_never_reuses_a_dot_across_restart` (`DvvTest`, block 4 against a recording
+  store): the first dot reserves 4 before it is out, dots 2 to 4 reserve nothing, dot 5 reserves
+  8; then 41 restarts dying after 0 to 40 dots each, and every restarted counter's first dot is
+  above everything handed out before; the recorded ceilings only rise.
+- `I2_acknowledged_write_survives_coordinator_restart` (`ReplicationTest`): v1 and v2 written
+  through the coordinator, replicas hold `(coord, 2)`; `restart(coordinator)`; v3 is written with
+  W acks and its dot is above 2; a quorum read through a replica answers v3; after read repair
+  drains every replica holds v3; `assertConverged` passes. Red at HEAD before the fix on the dot
+  assertion (the reused `(coord, 1)`), which is the mechanism the parked bug-hunt test named.
+- `dvv_no_counter_reuse` keeps its T21 assertions and is extended across a restart with no local
+  data (the persisted ceiling is the floor) and with local data above the ceiling (the higher
+  floor wins).
+- `DotCeilingStoreTest` (engine, `@TempDir`): a fresh node loads 0; the last of two reservations
+  is what a new instance loads and the temp file is gone; an unparseable file throws
+  `NumberFormatException`; the in-memory store survives only its own instance.
+- Every existing replication, hint, read-repair, anti-entropy and convergence test passes; the
+  P4 acceptance test restarts real nodes over data directories and now reads `dots` back.
+- Counts: engine 144 -> 148, cluster 83 -> 85, cp 89 -> 89, server 83 -> 83. Diff: 7 files,
+  about 300 lines including tests, inside the budget.
+
+**Deviations:** none against the spec or the plan entry. Three judgement calls.
+1. The seam lives in the engine's persist package, not the cluster, because the cluster depends
+   on the engine and not the reverse; its vocabulary ("dot") is the cluster's, and the KDoc says
+   where the word comes from. `inMemory()` is main code rather than test code because a node with
+   no data directory needs it.
+2. The reservation is a `@Synchronized` block holding an fsync, on the caller's thread, inside
+   `Replication.write`'s `versions.compute`. Once per 1000 writes on one key's map bin; the
+   plan's lock rule (2.5) is about the engine's data structures and this is the cluster module.
+   If a measurement ever shows the once-per-block stall, reserve the next block ahead of time on
+   a background coroutine; the seam does not change.
+3. The ceiling is rewritten whole (write, fsync, atomic rename) rather than appended to the WAL:
+   the WAL format is frozen for this ticket and a 20-byte file has nothing to gain from a log.
+
+**For the next ticket:**
+- Ticket 67 (persist the version table) should hand the restored versions to
+  `DotCounter.of(node, localData, ceilings)` as the scan floor it already takes; the ceiling
+  store stays as the guard for versions that were handed out but never reached the RDB. Do not
+  drop the ceiling in favour of the scan: the scan only sees what was persisted, and a write's dot
+  is handed out before the write is durable.
+- A restarted node's version table is still empty until ticket 67, so its own reads of keys it
+  wrote before the restart answer with no version and lose to any replica's; read repair then
+  refills it. Correct, and one round trip per key.
+- `InProcessCluster.restart(node)` restarts only the replication layer; the network's own
+  `kill`/`restart` stays separate, and a chaos run that wants "process restart" should call both.

@@ -16,17 +16,17 @@ full version table is ticket 67; this ticket closes the data loss on its own.
 
 **Nature:** causal ordering, C2 and I2 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 926f534e, merged into misc/ai_gen)
 
-- [ ] `C2_dot_counter_never_reuses_a_dot_across_restart`: hand out dots, restart the counter
+- [x] `C2_dot_counter_never_reuses_a_dot_across_restart`: hand out dots, restart the counter
       from its persisted state, and every new dot is above every old one, including when the
       process died between the last persisted ceiling and the last dot used
-- [ ] `I2_acknowledged_write_survives_coordinator_restart`: write a key twice on node A,
+- [x] `I2_acknowledged_write_survives_coordinator_restart`: write a key twice on node A,
       restart A's replication layer over the same engine state, write a third value on A with
       W acks, quorum-read from B; the third value is returned and survives read repair
-- [ ] `dvv_no_counter_reuse` passes and is extended across a restart
-- [ ] Every existing replication, hint, read-repair and convergence test passes
-- [ ] Progress entry appended
+- [x] `dvv_no_counter_reuse` passes and is extended across a restart
+- [x] Every existing replication, hint, read-repair and convergence test passes
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the cluster module's
 test tree (`BugHuntReplicationTest`); reuse it if present, otherwise rewrite it from the
