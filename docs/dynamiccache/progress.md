@@ -3667,3 +3667,107 @@ addition and would make `sem_session_death_releases` deterministic without a tim
 `CP.INFO` by asking the leader; only the `CpEngine` path is covered by a test here. The
 dispatcher's `compat` is the one place to extend when a CP primitive learns a new Redis spelling,
 and the `Rejected` exception it throws never leaves `submit`.
+
+## T36: Chandy-Lamport distributed snapshots
+
+**Built:** `Marker { snapshot_id }` is field 19 of the `Envelope` oneof in `cluster.proto`, and
+`GrpcTransportTest` round-trips it. `dynacache.cluster.DistributedSnapshot(self, peers, engine,
+transport, dir, clock, demux, scope, deadline = 30s)` is one node's part of a snapshot, spec
+2.8 steps 1 to 5 and the timeout. `initiate(id)` (step 1) records the node's state through the
+T32 `SnapshotEngine(engine, <dir>/<id>/<self>/, clock).save()` and sends a marker to every
+peer. `receive(envelope): Boolean` is the demux hook the router calls ahead of every other
+handler: a marker for an unknown id starts the node's part (steps 2, same as `initiate`), any
+marker closes the channel it arrived on (step 3), and a non-marker envelope arriving on a
+still-open channel of any recording snapshot is appended, length-delimited, to
+`<dir>/<id>/<self>/from-<peer>.log` before it is handed on. `complete(id)` is step 4 for the
+node: every incoming channel closed. Whole-snapshot completion is the kit observing every
+node's `complete`. `start` also launches a timer on the node's scope: at `deadline`, a part
+still waiting for a channel is aborted, which deletes `<dir>/<id>` recursively, forgets the
+id and ignores later markers for it; the engine is never written by the protocol.
+`restoreFrom(dir, id)` loads `<dir>/<id>/<self>/dump.rdb` through T32 `restore()` and then
+re-delivers each recorded channel's envelopes, in arrival order, to the node's own demux, so
+a `Replicate` in flight at the cut lands on the replica exactly as it would have.
+
+`Router` gains a `snapshots: suspend (Envelope) -> Boolean` hook consulted first in `receive`.
+`InProcessCluster` builds one `DistributedSnapshot` per node, wires it into the router, takes
+`snapshotDir` (default `target/snapshots`) and exposes `snapshot(node)`. `InMemoryTransport`
+gains `sent`, every envelope the hub was handed in send order, which is what C10 counts.
+`CONTEXT.md` gains **Channel**, **Marker** and **Snapshot set**.
+
+Offline `clean package` after the merge with misc/ai_gen (T25, T16, T35): engine 144, cluster 72,
+cp 66, server 79, all green. T36 alone: 7 files, 372 insertions, 5 deletions, plus CONTEXT.md.
+
+**Concepts named:** a **channel** is one peer's envelopes to one node in send order, which the
+`Transport` seam already promises, so a marker closes exactly one channel and there is one log
+per peer. The **marker** is the only new envelope. The **snapshot set** is the whole of one
+snapshot on disk, one directory per node under one id, consistent, restored and deleted as a
+whole. The coordinator is a decorator on the demux, the same shape as `Replication.receive`:
+the router's inbound loop stays the one place every envelope passes, so "record before handing
+on" needs no second inbound path. No new seam: `demux`, `scope` and `deadline` are constructor
+parameters, and `SnapshotEngine` is reused unchanged for both the state file and its restore.
+
+**Acceptance:**
+- `chandy_lamport_consistent_cut`: write 1 everywhere; write 2 applied on its coordinator with
+  its `Replicate`s held two rounds in the network when another node initiates, so the markers
+  overtake them; every recorded value's predecessors are recorded (tag `i` implies `1..i-1`);
+  write 3, issued after completion, is nowhere in the set; write 2 is in the coordinator's
+  state and, on every other node, in its state or on its channel from the coordinator, and on
+  at least one node only on the channel (the scenario really recorded something in flight).
+- `chandy_lamport_restorable`: the same scenario, then k1 overwritten and k3 written after the
+  snapshot; a fresh cluster restores every part; k1 reads 1, k2 reads 2, k3 reads nil through
+  every node, and every replica of k2 holds it locally. Mutation check: with the replay removed
+  from `restoreFrom`, two of the three replicas of k2 read nil, so the test depends on the
+  channel logs, not on the read quorum finding the coordinator's copy.
+- `chandy_lamport_timeout_aborts`: one node network-killed before a survivor initiates; the
+  survivors record their parts (files exist), a write through the other survivor answers OK
+  while the snapshot waits, neither survivor is complete; `advanceTimeBy(31s)` and the set is
+  gone, `complete` stays false, both keys read their values through both survivors.
+- `C10_marker_on_every_channel`: after one initiation, `network.sent` holds exactly one marker
+  per ordered node pair, and every node is complete.
+- `I12_reads_after_restore_return_snapshot_time_values`: k1 and k2 written, snapshot, then k1
+  overwritten, k2 deleted and k3 created; a fresh cluster restored from the set reads 1, 2 and
+  nil through every node. Green on first run: the behaviour already existed; the case it adds is
+  a key deleted after the cut coming back.
+- Every earlier test green, including after the merge with T25, T16 and T35.
+- Progress entry: this file.
+
+**Deviations:**
+1. **File layout.** The ticket names `<dir>/<id>/<node>.rdb` and `<node>.from-<peer>.log`;
+   the code writes `<dir>/<id>/<node>/dump.rdb` and `<dir>/<id>/<node>/from-<peer>.log`, so the
+   state file is exactly a T32 `SnapshotEngine` directory and `save()`/`restore()` are reused
+   with no path parameter added. One directory per node is also the natural unit to delete.
+2. **No `SnapshotComplete` envelope.** The ticket allows "the kit observing every node"; the
+   tests do that through `complete(id)`. An initiator that wants to learn completion over the
+   network is one more oneof case and a counter on the initiator; not built (YAGNI).
+3. **The timeout is per node, not per initiator.** Every node that started a part runs its own
+   deadline timer from the moment it recorded its state and deletes the whole `<dir>/<id>` when
+   it fires with a channel still open. On a shared directory (the kit) the first timer deletes
+   every part; on per-node directories each node deletes its own. Simpler than an abort
+   envelope and correct in both layouts. A late marker for an aborted id is dropped, so a slow
+   node cannot restart the snapshot after the survivors gave up.
+4. **The state file is written on the demux's coroutine.** `SnapshotEngine.save()` serializes
+   on the caller's thread (T32), and for a receiver the caller is the router's inbound loop, so
+   a large keyspace stalls inbound handling (acks, gossip) for the write time. The write path
+   itself (`Router.submit`, `Replication.write`, the engine) never waits on it, which is the
+   spec's promise and what `timeout_aborts` checks. Debt: `withContext(Dispatchers.IO)` around
+   the save if a measurement shows the stall.
+5. **The channel log is opened and closed per envelope** (`ponytail:` in `record`). Keep it
+   open per channel if a snapshot under heavy traffic shows it.
+6. **Restore into a live cluster is not supported.** `restoreFrom` neither flushes the engine
+   nor resets `Replication`'s version table, so it is a startup operation (fresh nodes, as
+   T37's "kill all three, restore" needs). Both I12 and `restorable` restore into a fresh
+   `InProcessCluster`.
+7. Size: with the inherited half, 372 insertions in 7 files plus 18 lines of CONTEXT.md, inside
+   the budget.
+
+**For the next ticket:** T37 restores a cluster from the set by constructing fresh nodes with
+the same `snapshotDir` and calling `snapshot(node).restoreFrom(dir, id)` on each, then
+`drainMessages()`: the replay sends `ReplicateAck`s to coordinators that have no pending
+request for them, which the router drops. `DistributedSnapshot.receive` runs inside
+`Router.receive`, so anything the server wires ahead of the router (none today) is not
+recorded. The `open` map is a `ConcurrentHashMap` because the deadline timer and the demux are
+two coroutines; the per-channel set inside it is touched only by the demux. `initiate` on an
+id already open throws; a second snapshot with a fresh id while one is open is fine, each
+channel log is per id. `SnapshotEngine` is constructed with `fsync = null` here, so a node's
+part carries no WAL: the snapshot is the view at the moment `save()` ran, which is what the cut
+wants. `InMemoryTransport.sent` is public and grows for the life of the hub.

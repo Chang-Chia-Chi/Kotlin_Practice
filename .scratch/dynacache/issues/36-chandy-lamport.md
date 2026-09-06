@@ -11,12 +11,12 @@ partial files left; a restore path that loads state and replays the recorded cha
 
 **Nature:** consistent-cut protocol, C10 and I12 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 30d5c60 + merge 53abeed, merged into misc/ai_gen)
 
-- [ ] `chandy_lamport_consistent_cut`: traffic during the snapshot; for every recorded B with A before B, A is recorded
-- [ ] `chandy_lamport_restorable`, `chandy_lamport_timeout_aborts` (a node killed mid-snapshot; no files, no state change)
-- [ ] `C10_marker_on_every_channel`, `I12_reads_after_restore_return_snapshot_time_values`
-- [ ] Progress entry appended
+- [x] `chandy_lamport_consistent_cut`: traffic during the snapshot; for every recorded B with A before B, A is recorded
+- [x] `chandy_lamport_restorable`, `chandy_lamport_timeout_aborts` (a node killed mid-snapshot; no files, no state change)
+- [x] `C10_marker_on_every_channel`, `I12_reads_after_restore_return_snapshot_time_values`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
