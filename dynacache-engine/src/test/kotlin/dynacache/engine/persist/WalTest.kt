@@ -43,13 +43,13 @@ class WalTest {
         val wal = dir.resolve("seq.wal")
 
         val first = WalWriter(wal, firstSeq = 100L).use { writer ->
-            (1..4).map { writer.append(OP_SET, byteArrayOf(it.toByte())) }
+            (1..4).map { writer.append(OP_SET, byteArrayOf(it.toByte())).seq }
         }
         assertEquals(listOf(100L, 101L, 102L, 103L), first)
 
         // A restart resumes the numbering from where recovery left off, appending to the same file.
         val resumed = WalWriter(wal, firstSeq = first.last() + 1).use { writer ->
-            listOf(writer.append(OP_DEL, byteArrayOf(9)))
+            listOf(writer.append(OP_DEL, byteArrayOf(9)).seq)
         }
         assertEquals(listOf(104L), resumed)
 
