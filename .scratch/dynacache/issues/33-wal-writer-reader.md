@@ -9,13 +9,13 @@ ticket 34).
 
 **Nature:** file format and crash recovery of the file (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 017d5f3, merged into misc/ai_gen)
 
-- [ ] `wal_write_read_roundtrip`
-- [ ] `wal_crash_recovery`: a torn last entry is skipped, all earlier entries returned
-- [ ] `wal_crc_detects_corruption`: a flipped byte stops the reader at that entry
-- [ ] `wal_seq_strictly_increasing`
-- [ ] Progress entry appended
+- [x] `wal_write_read_roundtrip`
+- [x] `wal_crash_recovery`: a torn last entry is skipped, all earlier entries returned
+- [x] `wal_crc_detects_corruption`: a flipped byte stops the reader at that entry
+- [x] `wal_seq_strictly_increasing`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

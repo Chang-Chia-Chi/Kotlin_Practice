@@ -130,3 +130,62 @@ are the ranges T27 and T28 build Merkle trees over; `Vnode.holds(position)` alre
 wrapping range, so anti-entropy does not need to special-case the top of the ring. Membership
 changes are out of scope here and stay so: a new node set means a new `Ring`, and dynamic
 rebalancing is on the do-not-build list.
+
+## T33: WAL writer and reader
+
+**Built:** `dynacache.engine.persist`, the engine's only `java.nio.file` package, gains the
+write-ahead log of spec 2.8: `WalWriter.append(op, payload)` appends one entry and returns the
+sequence number it assigned, and `WalReader.readAll()` reads the file back as a `WalScan`. An
+entry is the spec's layout verbatim, big-endian:
+`[crc32:u32][length:u32][seq:u64][op:u8][payload]`, where `length` is the payload's byte count,
+so the header is a fixed 17 bytes. Four tests, `@TempDir` only, no mocks: the filesystem is a
+true boundary and a real temp file is cheaper than faking one.
+
+**Concepts named:** A **WAL entry** is an opaque `payload` under a one-byte `op` code stamped
+with a `seq`; the engine, not the log, knows what an op means, so the log stays a byte pipe and
+T35 can add mutations without touching it. A **scan** is what one pass over a log file found:
+the entries it trusts, plus where and why it stopped. That pairing is the deliberate interface
+choice - recovery needs to know not only which entries survived but whether the file ended
+cleanly, so `WalStop` has three values and `stoppedAt` carries the byte offset. `CLEAN_END`
+means the last entry ended exactly at the end of the file. `TORN_TAIL` means the file ends
+mid-entry, the shape a crash mid-append leaves. `CRC_MISMATCH` means an entry's bytes disagree
+with its checksum. No seam was added: the writer and the reader are two concrete classes, and
+the fsync-policy seam belongs to T34, which owns the sink the tests will count.
+
+The checksum covers length, seq, op and payload, everything after itself. That is the choice
+the ticket asked to be stated, and it buys one thing: a corrupted length field is caught by the
+same check as a corrupted payload, instead of sending the reader off to a wrong offset. The
+`wal_crc_detects_corruption` test asserts this directly by flipping a byte in a sequence number
+as well as one in a payload.
+
+**Acceptance:**
+- `wal_write_read_roundtrip`: three entries written, including a zero-length payload, read back
+  equal with sequence numbers 1, 2, 3, stop `CLEAN_END`, `stoppedAt` equal to the file size.
+- `wal_crash_recovery`: three entries, then the file truncated inside the third entry's header
+  and, on a second log, inside its payload. Both return entries 1 and 2, stop `TORN_TAIL`, and
+  `stoppedAt` at the third entry's offset.
+- `wal_crc_detects_corruption`: one bit flipped in the second entry's payload, and on a second
+  log in its sequence number. Both return entry 1 only, stop `CRC_MISMATCH`, `stoppedAt` at the
+  second entry's offset.
+- `wal_seq_strictly_increasing`: a writer started at 100 returns 100 to 103; a second writer
+  opened on the same file at 104 appends there; the reader sees 100 to 104, sorted and distinct.
+- This entry.
+
+**Deviations:** None against the ticket, the plan or spec 2.8. Three judgement calls worth
+recording. First, a length field too large for the bytes that remain is reported as
+`TORN_TAIL`, not as corruption: from the reader's position the two are indistinguishable, both
+mean "no complete entry here", and a fourth enum value would buy nothing. Second, `append` is
+`@Synchronized`. Concurrent appenders are T34's subject and are not tested here, but a writer
+that interleaves half-records under two threads would be a trap to inherit, and the annotation
+is one word. Third, the tests hardcode the 17-byte header as `4 + 4 + 8 + 1` rather than
+importing a constant from the code, so the offsets they truncate and corrupt at come from the
+spec rather than from the implementation they are checking.
+
+**For the next ticket:** `WalReader.readAll()` throws `NoSuchFileException` on a missing file;
+an empty file is a clean scan of nothing. T35 owns whichever of the two a first boot should
+see, and the choice belongs there, not here. `WalWriter` takes its first sequence number rather
+than deriving one - deliberately, since only recovery knows whether to resume after the last
+entry or after a checkpoint, and `WalScan.entries.last().seq` gives it the number. The writer
+opens the channel in `APPEND` mode, so T34's group commit must batch before the channel, not
+seek within it, and T35's checkpoint truncation needs its own handle. `WalScan` carries no
+`nextSeq` field because nothing needed one yet.
