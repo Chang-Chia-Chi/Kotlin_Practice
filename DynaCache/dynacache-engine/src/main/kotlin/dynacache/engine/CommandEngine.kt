@@ -43,9 +43,12 @@ interface CommandEngine {
 class CrossPartitionBatch(keys: List<Key>, spanned: List<PartitionId>) :
     RuntimeException("keys span ${spanned.size} partitions: $keys") {
 
+    // The kind is Redis's, because that is what client libraries switch on; the message is this
+    // project's, in the glossary's words (a partition, not a slot). ADR 0002 rejected -CROSSSLOT
+    // for fan-out commands like MGET, not for a batch, which does have to share one partition.
     val error: Reply.Error = Reply.Error(
         "CROSSSLOT",
-        "Keys in request don't hash to the same slot",
+        "keys of a batch must share a partition (use a hash tag)",
     )
 }
 

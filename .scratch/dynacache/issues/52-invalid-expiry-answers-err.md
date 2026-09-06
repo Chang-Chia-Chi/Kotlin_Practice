@@ -12,16 +12,16 @@ unrepresentable value; nothing in the parser can throw past the reply.
 
 **Nature:** command semantics, C8 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 2e27b490, merged into misc/ai_gen; EXPIRE family accepts zero and negative per Redis, see progress)
 
-- [ ] `C8_invalid_expire_answers_err_not_disconnect`: for `EXPIRE`, `PEXPIRE`, `EXPIREAT`,
+- [x] `C8_invalid_expire_answers_err_not_disconnect`: for `EXPIRE`, `PEXPIRE`, `EXPIREAT`,
       `PEXPIREAT`, `SET EX`, `SET PX`, `SETEX`, each of zero, a negative number and
       `Long.MAX_VALUE` answers the Redis error and the next command on the same connection
       still works
-- [ ] A property-style loop over random large and negative arguments never sees an exception
+- [x] A property-style loop over random large and negative arguments never sees an exception
       escape the parser
-- [ ] The existing RESP fuzz test is extended with expiry-taking commands
-- [ ] Progress entry appended
+- [x] The existing RESP fuzz test is extended with expiry-taking commands
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the server module's
 test tree (`BugHuntParserTest`); reuse it if present, otherwise rewrite it from the first

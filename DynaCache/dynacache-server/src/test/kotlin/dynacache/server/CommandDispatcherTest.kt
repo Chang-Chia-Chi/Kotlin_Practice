@@ -158,6 +158,15 @@ class CommandDispatcherTest {
             // rather than the counter's (CP spec 6.5).
             Command.Get(reference) to Command.Cp.RefGet(reference),
             Command.Set(reference, bytes("v")) to Command.Cp.RefSet(reference, bytes("v")),
+            // The TTL verbs read the key's kind too: CP spec 9.4 gives them to the owning state
+            // machine, so a reference's lease is the reference's own and not a missing counter's.
+            Command.Expire(reference, FIXED.instant().plusSeconds(10)) to
+                Command.Cp.RefExpire(reference, Duration.ofSeconds(10)),
+            Command.Ttl(reference, Command.Ttl.Precision.SECONDS) to
+                Command.Cp.RefTtl(reference, Command.Ttl.Precision.SECONDS),
+            Command.Ttl(reference, Command.Ttl.Precision.MILLIS) to
+                Command.Cp.RefTtl(reference, Command.Ttl.Precision.MILLIS),
+            Command.Persist(reference) to Command.Cp.RefPersist(reference),
         )
         expected.forEach { (sent, _) -> dispatcher.submit(sent).get() }
         assertEquals(expected.map { it.second }, cp.seen)

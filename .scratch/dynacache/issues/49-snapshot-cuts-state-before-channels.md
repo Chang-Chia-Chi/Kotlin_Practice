@@ -13,16 +13,16 @@ the progress entry as a known limitation, not fixed here.
 
 **Nature:** consistent-cut protocol, C10 and I12 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 3886d81d, merged into misc/ai_gen)
 
-- [ ] `I12_write_during_the_cut_is_restored_once`: with the in-memory transport under
+- [x] `I12_write_during_the_cut_is_restored_once`: with the in-memory transport under
       `runTest`, a replicate envelope delivered while the initiator is suspended inside its
       state save is restored with its effect applied exactly once on every node
-- [ ] `C10_state_is_cut_before_any_channel_opens`: no channel log for a snapshot id contains
+- [x] `C10_state_is_cut_before_any_channel_opens`: no channel log for a snapshot id contains
       an envelope whose effect is also in that node's saved state
-- [ ] `chandy_lamport_consistent_cut` and every existing snapshot test still pass
-- [ ] The progress entry names the gRPC no-FIFO limitation and what a fix would need
-- [ ] Progress entry appended
+- [x] `chandy_lamport_consistent_cut` and every existing snapshot test still pass
+- [x] The progress entry names the gRPC no-FIFO limitation and what a fix would need
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the cluster module's
 test tree (`BugHuntSnapshotTest`); reuse it if present, otherwise rewrite it from the first

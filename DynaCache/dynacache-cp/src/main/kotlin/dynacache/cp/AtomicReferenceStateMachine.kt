@@ -30,7 +30,27 @@ class AtomicReferenceStateMachine {
                     references[command.key] = Reference(command.new, current.expiresAt)
                     Reply.Integer(1)
                 }
+            // The counter's TTL verbs, over a reference: CP spec 9.4 gives them to whichever
+            // state machine owns the key, and the deadline is log time, never a clock.
+            is Command.Cp.RefExpire -> retime(command.key, current, now + command.ttl.toMillis())
+            is Command.Cp.RefPersist ->
+                if (current?.expiresAt == null) Reply.Integer(0) else retime(command.key, current, null)
+            is Command.Cp.RefTtl -> Reply.Integer(
+                when {
+                    current == null -> -2
+                    current.expiresAt == null -> -1
+                    command.precision == Command.Ttl.Precision.MILLIS -> current.expiresAt - now
+                    else -> (current.expiresAt - now + 500) / 1000
+                },
+            )
         }
+    }
+
+    /** Gives a live reference the expiry [expiresAt]: 1 when there was one to give it to, else 0. */
+    private fun retime(key: Key, current: Reference?, expiresAt: Long?): Reply {
+        if (current == null) return Reply.Integer(0)
+        references[key] = Reference(current.value, expiresAt)
+        return Reply.Integer(1)
     }
 
     /** A tick drops every reference whose TTL has run out. */

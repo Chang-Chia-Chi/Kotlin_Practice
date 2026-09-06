@@ -4615,3 +4615,576 @@ the targeted runs never saw it -- only a run with the rest of the suite ahead of
 - The README now carries the running instructions, the test tiers and their timings, and the five
   known debts of the last five progress entries. It is the first document a reader meets, so a
   ticket that repays one of those debts should strike it from there as well as recording it here.
+
+---
+
+## T48: WAL logs nothing for a refused conditional ZADD
+
+**Built:** a `ZADD` carries its `NX`/`XX` condition into its WAL entry and is replayed under it,
+so a warm restart reproduces exactly the effect the live command had (C14, spec 2.8). Before
+this ticket `WalCodec.encode` dropped `ZAdd.condition`: a `ZADD NX` on a member already there
+and a `ZADD XX` on one that was not both answered `:0`, were logged as plain `ZADD`s, and moved
+or created the member on the next boot.
+
+`WalCodec` gains one symmetrical pair, `DataOutputStream.condition` and
+`DataInputStream.condition`, alongside the `end` pair it already had and fixed by the format the
+same way: `0` none, `1` `NX`, `2` `XX`, so reordering `Command.Set.Condition` cannot change a
+file's meaning. The `ZADD` payload is now `key, pairs, condition`; `decode` rebuilds
+`Command.ZAdd(key, entries, condition)`. `CH` is not logged -- it changes only the reply's count,
+never the store. Nothing else moved: the entry header, the op codes, the RDB, `Partition`'s
+command semantics and the engine hook are all untouched.
+
+**The mixed case.** `ZADD NX 5 a 2 b` with `a` present and `b` missing takes `b` only. The
+ticket offered two ways to log that: the taken subset as a plain `ZADD b 2`, or the condition
+carried and replayed. Carried, because the taken subset is not derivable inside the seam this
+ticket owns -- `encode` sees `(command, reply, now)` and nothing of the store, and which members
+a condition admitted depends on the state *before* the command, which only `Partition` holds.
+Logging the subset would have meant returning it out of `Partition.run`, i.e. changing the hook
+and the command path for one command's benefit. Carrying the condition is one byte in the `ZADD`
+payload, no new op code, no header change, and replay is exact because replay reaches that entry
+in the same state the live command saw.
+
+**Correcting T35's wording.** T35's entry says: "What is logged is what changed: an error reply,
+a refused conditional `SET` and an empty `POP` (both nil) log nothing, and a conditional `SET`
+that took is logged as a plain one." That is true as written, of `SET`. What is not true, and
+what the codec's file comment did imply by closing on "what is logged is what changed, not what
+was asked", is that the *reply's shape* settles every conditional command. It settles `SET`
+only: a refused `SET` answers nil, which no successful `SET` answers, so the entry is dropped by
+shape. A `ZADD` answers an integer, and `:0` is what both a full refusal and a score moved
+without `CH` answer -- and one call can be part refused and part taken, which no single count can
+express. The old entry is left as it stands; the codec's comment is rewritten to say which
+commands the reply shape settles and why `ZADD` is settled by its condition instead.
+
+**Tests** (`WalRecoveryTest`, the engine's own recovery seam; nothing here reads the log's
+layout, which stays `WalTest`'s):
+
+- `C14_refused_conditional_zadd_replays_nothing`: `ZADD NX` on a present member and `ZADD XX` on
+  a missing one, then a crash (no save, no close) and recovery from the log alone -- the score is
+  where it was and the refused member is still absent. Red before the fix on the score.
+- `C14_taken_conditional_zadd_replays_as_taken`: an `XX` that moved one of two members replays
+  with that one change only.
+- `C14_partly_refused_conditional_zadd_replays_only_the_taken_members`: `ZADD NX 5 a 2 b` with
+  `a` present replays as `a=1, b=2`. Red before the fix on `a`.
+
+The parked red test from the review worktree (`BugHuntWalTest`) is folded into the first of these
+and is not carried over under its own name. Engine module: 144 tests before, 147 after, all green
+offline; `WalRecoveryTest` 9 of 9.
+
+**Deviations:**
+
+- A refused conditional `ZADD` still *appends* an entry; what it no longer does is change
+  anything on replay. The ticket's title reads "logs nothing", and that literal form is not
+  reachable from the encode seam: `:0` does not distinguish a refusal from a move without `CH`,
+  so dropping on `:0` would silently lose a real score change, and a part-refused call must log
+  its taken half regardless. The ticket names carrying the condition as an accepted answer.
+- `CH` is deliberately not logged. It is a reply-shape flag; a replay ignores replies.
+- The `ZADD` payload grew a trailing byte, so a log file written before this ticket ends its
+  `ZADD` entries one byte short and its recovery now fails loudly (`EOFException`) instead of
+  replaying the wrong thing. The entry header and op codes are unchanged and the format carries
+  no version field to bump (T35 did not give it one), so there was nothing to version; a pre-1.0
+  log is not a compatibility contract, and a loud failure is the right shape of one anyway.
+
+**For the next ticket:** `SET` and `ZADD` are the only commands in `Command.kt` carrying a
+condition today (grep `condition`), and both are now correct, so the WAL's rule holds across the
+whole command set. If `EXPIRE` ever gains Redis's `NX`/`XX`/`GT`/`LT` flags it joins `ZADD`'s
+class, not `SET`'s -- its refusal answers `:0` -- and must carry them into the log the same way.
+More generally: `encode` sees only `(command, reply, now)`. Any future rule that needs the state
+*before* the command has to move the decision into `Partition`, where the condition is evaluated;
+that is a hook change, and worth doing once rather than per command.
+
+## T47: Single-node benchmark with redis-benchmark
+
+**Built:** `DynaCache/bench/single-node.sh`, a Git Bash script that builds the jars if they are
+missing, starts one DynaCache node in single-node mode (`dynacache 6390 16 %TEMP%\dynacache-bench\data`),
+waits for `PING` through a `redis:7` container, runs four `redis-benchmark` passes against it,
+then starts a `redis:7` container on 6391 and runs the identical four passes against that. It
+starts and stops both itself, writes every CSV under `%TEMP%\dynacache-bench\`, times out each
+pass and exits non-zero on any failure. `DynaCache/bench/.gitattributes` pins `*.sh` to LF,
+because the repository has `core.autocrlf=true` and a CRLF checkout breaks the shebang.
+`docs/dynamiccache/benchmarks/2026-09-06-single-node.md` holds the environment, the node's
+arguments, four tables with a DynaCache column and a Redis column, the skipped list and four
+anomaly paragraphs. Nothing under `src/main` or `src/test` changed. The server is launched with
+`java -cp` over the module jars plus a runtime classpath emitted by `dependency:build-classpath`
+in the same reactor invocation as `package`, which is the only way the sibling modules resolve
+offline; the script does that itself.
+
+**Concepts named:** No new domain vocabulary. Two operational terms the report uses: the
+**plain pass** (`-c 50 -n 100000 -d 3`), which on this machine measures the Docker round trip
+rather than either engine, since Redis answers every command in it at 19 to 24 thousand
+requests per second regardless of which command it is; and the **spread pass** (`-r 100000`),
+which exists because `redis-benchmark` leaves `__rand_int__` in the command literally unless
+`-r` is given, so without it every `SET`, `GET` and `INCR` names one key and `MSET (10 keys)`
+names that same key ten times, and no multi-key fan-out is exercised at all.
+
+**Acceptance:**
+- Script starts a node, waits for `PING`, runs the ticket's thirteen tests at `-c 50 -n 100000
+  -d 3`, again with `-P 16`, once with `-d 1024`, and stops the node: done, plus a fourth pass
+  with `-r 100000` and a short `EVERY_SECOND` pass.
+- The same passes against a `redis:7` container, same flags, so every DynaCache number sits
+  next to a Redis number: done, `redis-plain`, `redis-pipelined`, `redis-1024b`, `redis-spread`.
+- Report with tables, environment and one paragraph per anomaly naming the code path: done,
+  four anomalies.
+- Every unsupported test listed as skipped with the reason: `SADD`, `SPOP` (no Set type),
+  `ZPOPMIN` (no `zpopmin` in the parser), `XADD` (no Stream type), and `LRANGE_300/500/600`
+  (supported, left out by the ticket's list).
+- Progress entry: this.
+
+**Headline numbers** (requests per second, DynaCache then redis:7):
+
+| | plain | pipelined `-P 16` |
+|---|---|---|
+| SET | 26483.05 / 23702.30 | 145348.83 / 313479.62 |
+| GET | 27654.87 / 24189.65 | 389105.06 / 320512.81 |
+| INCR | 27225.70 / 23917.72 | 139275.77 / 294117.66 |
+| MSET (10 keys) | 13877.33 / 20559.21 | 17540.78 / 176991.16 |
+
+Worst cases: `RPUSH` 1072.78 against 22841.48 plain (5 percent) and 1351.39 against 362318.84
+pipelined (0.4 percent). `SET` under `EVERY_SECOND`: 53.30 rps, p50 1014.783 ms.
+
+**Deviations:**
+- **The node runs with fsync `NEVER`, not `EVERY_SECOND` as the ticket says.** DynaCache answers
+  a write only once its WAL entry is durable (C14), so under `EVERY_SECOND` every write waits for
+  the next second's fsync and throughput is exactly clients per fsync interval: measured at 53.30
+  requests per second. A 100,000-request `SET` pass would take half an hour and the nine write
+  tests together most of a day. The `redis:7` container has no append-only file and never makes a
+  reply wait for the disk, so `NEVER` is the setting that compares like with like.
+  `EVERY_SECOND`'s cost is measured on its own in the script and is the report's first anomaly.
+  This is not a shortcut to repay; it is what the comparison requires.
+- **A fourth pass and two extra measurements beyond the ticket.** The spread pass (`-r 100000`)
+  was added because without it the plan's named fan-out ceiling is never exercised. A four-round
+  `LPUSH` growth pass was added to confirm the list anomaly's cause. Both run on both targets or
+  on DynaCache alone as appropriate and are in the script.
+- The node is not restarted between its passes, and neither is the container, so `mylist` is
+  about 200,000 elements long when the pipelined pass starts. Symmetric across the two engines,
+  so the side-by-side columns are fair, but DynaCache's own plain-to-pipelined ratio for a list
+  command compares two different list lengths, and the report says so.
+- DynaCache writes a WAL record per mutating command even under `NEVER`; the default `redis:7`
+  writes nothing per command. That asymmetry is against DynaCache and is not corrected for.
+- **Every table was taken under contention and no pass has a load reading behind it.** Another
+  orchestrator session was running Maven builds and test suites in the `kp-wt/t48` to `kp-wt/t51`
+  worktrees during all three runs. The ticket asked for the number of other Java processes and
+  the CPU idle percentage per pass; neither was recorded, which is the omission that makes the
+  factor-of-two spread unattributable at the time it happened. Sampled afterwards, the machine
+  was carrying three other Java processes at 25 percent CPU idle. The script now gates every pass
+  on ten consecutive seconds with no `java.exe` but its own node and at least 70 percent CPU
+  idle, and writes what it saw per pass to `load.txt`. The follow-up is a rerun in a quiet
+  window; the tables stand as provisional until then. The four anomalies are DynaCache-against-
+  Redis ratios measured on the same machine at the same moment and held in all three runs, so
+  contention is not expected to overturn them.
+
+**Nothing failed under load.** No crash, no hang, no error reply. Neither node log contains an
+exception. The only stderr in any DynaCache pass is `WARNING: Could not fetch server CONFIG`,
+because the parser has no `config` command; it changes no measurement.
+
+**For the next ticket:** four follow-ups, in the order the numbers rank them.
+
+1. **The `EVERY_SECOND` write path is unusable as it stands.** `Partition.execute` adds the log
+   hook's future to the task's `durable` and `Partition.task` completes the reply only after it;
+   under `EVERY_SECOND`, `WalWriter.writeBatch` parks the waiter on `awaitingFsync` and
+   `forceAwaiting` releases the set once per tick. Redis's own `appendfsync everysec` replies
+   immediately and fsyncs behind the reply. A ticket should measure group commit: keep
+   reply-after-durable, force on a one-to-five-millisecond deadline or as soon as a batch is
+   ready, and find the deadline that buys back most of `NEVER`'s throughput.
+2. **`Partition.account` recounts the whole aggregate after every keyed command**, including
+   reads, via `Value.approximateBytes()`, which for a list is `items.sumOf { it.size + 16 }`.
+   Push and pop on an `ArrayDeque` are O(1), so the recount is the only length-dependent work.
+   The four list tests run back to back on one growing key and their rates trace its length in a
+   U shape (2842.93, 1072.78, 1284.11, 3618.08), which separates length from the command. The
+   `ponytail:` comment on `approximateBytes` already names the repair: per-element size deltas
+   at the mutation sites, making `account` O(1). Measure `RPUSH` on a 200,000-element list
+   before and after.
+3. **Writes pipeline at about a third of Redis's gain and reads do not.** `GET` gained 14.1x
+   from `-P 16` against Redis's 13.2x; `SET` gained 5.5x against 13.2x, `HSET` 4.8x against
+   14.6x. The only difference between the two paths is the WAL append. A ticket should run the
+   pipelined pass against a node with no data directory and one with, and attribute the gap;
+   what is left over is DynaCache's own two thread handoffs per command, the executor hop into
+   the partition and the callback back onto the Netty event loop.
+4. **`ApEngine.fanOut`'s sequential chain is not the ceiling the plan expected.** With keys
+   spread, `MSET` reached 21584.29 against `SET`'s 26673.78 on the same pass, about 19 percent
+   for ten keys across partitions. Without `-r`, where all ten keys are one key on one
+   partition, `MSET` reached only 13877.33: spreading made it faster, because fifty clients on
+   one key put all the work on one of sixteen partition threads. Replace the `thenCompose` chain
+   with `allOf` and re-run the spread pass, and sweep `MGET` at 2, 8, 16 and 64 keys so the
+   chain's cost is a function of how many partitions a command spans.
+
+Absolute numbers moved by up to a factor of two between three runs of the script, on both
+engines. The shape did not: the list tests were slowest every time, the U shape appeared every
+time, the pipelined write gap stayed near a third every time, and `EVERY_SECOND` `SET` was
+50.47, 49.51 and 53.30. Read a single number as good to a factor of two and the ratios as the
+result.
+
+**Orchestrator note:** every table was taken while another session ran Maven builds on this
+machine, and no quiet window was available before landing, so the report carries a PROVISIONAL
+banner. The script now gates each pass on a quiet machine and records the other-Java count and
+CPU idle it saw per pass in `load.txt`. The quiet rerun is a follow-up ticket that reuses the
+script unchanged.
+
+---
+
+## T49 - A snapshot cuts state before it opens channels
+
+**Built:** `DistributedSnapshot.start` now runs spec 2.8 step 1 before step 2: it cuts and
+saves the node's state through the T32 `SnapshotEngine`, only then publishes the snapshot's
+channels into `open`, and only then sends the markers. T36 had opened the channels first, so an
+envelope the demux handled between the opening and the cut was appended to its channel log and
+applied to the engine before the views were taken, and a restore applied it twice (bug 3 of the
+P6 review). A `Mutex` (`cutting`) is held across the save and the opening, and the demux hook
+takes it for every non-marker envelope before deciding whether to record it, so the initiator's
+demux, which is another coroutine, waits out the cut: what it applied before the cut is in the
+state and on no log, and what it records is applied after the cut and not in the state. A
+receiver never contends for the lock, since it cuts on the demux's own coroutine
+(`Replication.replicate` awaits the engine before the next envelope is read). Nothing else
+moved: `receive`'s marker path, `complete`, `abort`, `restoreFrom`, the file layout and the
+marker envelope are as T36 left them. Main-code diff: 31 lines in `DistributedSnapshot.kt`.
+
+**Acceptance:**
+- `I12_write_during_the_cut_is_restored_once`: one node beside one peer's endpoint on an
+  `InMemoryTransport`, under `runTest`; `initiate` runs on `Dispatchers.Default`, as on a real
+  node where it runs on the node's scope while the router's inbound loop runs the demux, and a
+  `Gate` clock parks it at the state save's first clock reading, before any partition's view
+  is taken. An `INCRBY n 1` Replicate is handed to the demux (the router's shape: the snapshot
+  hook, then the command on the engine) while the initiator is parked, the gate is released,
+  and a fresh node restores the part: `n` reads 1. At T36's order the same run read `Bulk(2)`.
+- `C10_state_is_cut_before_any_channel_opens`: the same interleaving; while the initiator is
+  parked inside its save no `from-*.log` exists in its part, and afterwards the part read back
+  through the T36 `recorded` helper is `Part(state = {}, channels = {node-2: {1}})`: the
+  envelope handed over during the cut is on its channel and not in the state. At T36's order
+  the log existed while the state was still being cut, and the envelope was in both.
+- `chandy_lamport_consistent_cut`, `chandy_lamport_restorable`, `chandy_lamport_timeout_aborts`,
+  `C10_marker_on_every_channel` and `I12_reads_after_restore_return_snapshot_time_values`
+  unchanged and green.
+- Offline `test -pl dynacache-cluster -am`: engine 144, cluster 85 (83 + 2), all green.
+
+**Known limitations, not fixed here:**
+1. **gRPC channels are not FIFO under concurrent sends.** `GrpcTransport.send` is one unary
+   `deliver` call per envelope; sequential sends to one peer arrive in order (the call returns
+   when the peer accepted it), but two coroutines sending to the same peer at once, say the
+   write path's Replicate and `initiate`'s marker, are two independent calls that may land in
+   either order. So over gRPC a channel is not a true channel: a Replicate sent before the
+   marker can arrive after it, closed channel, not recorded, applied after the receiver's cut
+   and missing from the set; one sent after the marker can arrive before it and be recorded
+   without its send being in the cut. Either way C10 is broken. The `InMemoryTransport` orders
+   per sender-receiver pair, so no kit test can show it. A fix needs one ordered stream per
+   peer: a per-peer sender coroutine feeding a streaming RPC (or, cheaper, a per-peer send
+   `Mutex` in `GrpcTransport` so concurrent sends are serialized and the unary calls stay
+   sequential), plus a `GrpcTransportTest` that sends from two coroutines and checks arrival
+   order. That is a transport change, outside this ticket's seams.
+2. **The initiator's cut has a residual window on a real node.** The lock covers the demux's
+   record decision, not the engine apply the router does after `receive` returns. An envelope
+   whose `receive` returned just before the initiator took the lock, and whose `engine.submit`
+   reaches the partition executor after the view was taken, is in neither the state nor a log.
+   The window is the few instructions between those two calls; T36 had the same one. Closing it
+   needs the initiator's part to run on the demux's coroutine (the router delivering the
+   initiator's own marker through its inbound loop, or serializing `initiate` with `receive`),
+   which is a router change. A receiver has no such window.
+
+**Deviations:**
+1. **The ticket names "every node"; the test is one node.** The kit's cluster cannot produce
+   the interleaving: under `runTest` the initiator's `start` has no suspension point the
+   in-memory transport reaches, so the demux never runs inside it, and the bug does not exist
+   there. The window is a real-thread one, so the test runs the initiator on
+   `Dispatchers.Default` and parks it with a `Gate` clock (the bug hunter's shape), inside
+   `runTest` with the kit's transport and `backgroundScope`. One node is where the double
+   application happens; the other nodes' parts are untouched by the initiator's order.
+2. **The lone node's deadline is `Duration.INFINITE`.** Its peer never sends a marker back, so
+   the part waits forever, and that is the scenario. With the default 30 s, `runTest` skipped
+   virtual time the moment the test idled on the initiator's thread, the deadline fired,
+   `abort` deleted the set, and the restore read nil; found on the first red run and not a
+   product bug. `delay(Long.MAX_VALUE)` is never scheduled, so nothing waits on the scheduler.
+3. **The demux now waits out the initiator's save, not only a receiver's.** T36 deviation 4
+   accepted that a receiver's inbound handling stalls for the write time of `save()`, since it
+   runs on the demux. The lock gives the initiator the same stall: acks and gossip it receives
+   during its save wait for it. The write path itself never waits on the lock
+   (`timeout_aborts` still writes through a survivor while a snapshot is open). Debt as before:
+   `withContext(Dispatchers.IO)` around the save if a measurement shows it.
+4. **The mid-flight C10 assertion reads the directory, not the demux coroutine.** Whether the
+   delivery coroutine has completed is not the observable: at T36's order it suspended on the
+   engine's future during `runCurrent`, so `isCompleted` was false either way. The log file
+   is written synchronously by `record`, so its absence is the fact that no channel is open.
+5. Size: 133 insertions, 8 deletions in two files, inside the budget. No new seam, no change
+   to `Transport`, `Replication`, the engine, the file layout or the marker.
+
+**For the next ticket:** T55 moves the cluster's file I/O behind a persist adapter; the order
+inside `start` (directory, then under the lock the save and the opening, then markers) must
+survive that move, and `record` stays synchronous or the C10 assertion on the log file needs
+another observable. `cutting` is the only lock in the cluster module's snapshot path; it is
+taken once per inbound non-marker envelope and is uncontended except during an initiator's
+save. `Lone` and `Gate` in `DistributedSnapshotTest` are the shape for any test that needs the
+initiator interleaved with its own demux; T58's `MutableClock` does not replace `Gate`, which
+parks a thread rather than moving time.
+
+---
+
+## T52 - An invalid expiry answers -ERR, never drops the connection
+
+**Built:** `CommandParser` gained the one place it does time arithmetic, and every expiry-taking
+row now goes through it. `deadline(name) { ... }` runs the arithmetic an argument asks for and
+turns the two things `java.time` throws -- `ArithmeticException` from an overflowing sum,
+`DateTimeException` from an instant that does not exist -- into `Rejected`, so the client reads
+`-ERR invalid expire time in '<command>' command` and keeps its socket. `span(name, ttl)` adds
+the `SET` family's own rule on top: a zero or negative relative TTL is refused outright, and the
+sum the engine will later compute as `now + ttl` is checked here while it can still be a reply.
+`until(name) { ... }` is the old `EXAT`/`PXAT` helper with the same guard plus Redis's
+at-or-before-the-epoch refusal. Nothing else moved: `Command`, the engine, the dispatcher's
+routing and the RESP codec are untouched, and the connection handler needed no change because
+the parser is now total.
+
+**The rule, and which values are invalid.** The bound is the deadline as epoch milliseconds in a
+signed 64-bit. That is not `Instant`'s own range -- `Instant` reaches year ±1,000,000,000 -- but
+it is the bound Redis itself checks (`when > LLONG_MAX - basetime` in `expireGenericCommand`)
+and the one the engine's own WAL writes a deadline in (`WalCodec` calls
+`command.deadline.toEpochMilli()`, which throws past roughly year 292,278,994). Using the wider
+`Instant` range would have moved the crash from the parser into the WAL rather than removing it.
+
+Redis splits its expiry commands in two, and so does this:
+
+- `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` take **any** value they can hold. Zero and
+  negative are deadlines already past, which delete the key; Redis's own source says so in as
+  many words ("EXPIRE allows negative numbers"). Only an unrepresentable deadline is an error --
+  `EXPIRE k Long.MAX_VALUE`, `EXPIRE k Long.MIN_VALUE`, `PEXPIRE k Long.MAX_VALUE`,
+  `EXPIREAT k 99999999999999999`. `PEXPIREAT` cannot overflow at all: every `Long` is a
+  representable epoch-milli deadline, `Long.MAX_VALUE` exactly so, and a larger argument is
+  refused one step earlier as the integer it is too big to be.
+- `SET EX`/`PX`, `SETEX`, `PSETEX` refuse a **non-positive** span as well: zero, negative and
+  `Long.MIN_VALUE` are all `invalid expire time`, under the name the client typed (`'set'`,
+  `'setex'`, `'psetex'`).
+- `SET EXAT`/`PXAT` name an absolute time, so they refuse only at or before the epoch. A
+  deadline merely in the past is a deadline: the key is set and expires at once, as in Redis.
+
+**Acceptance:**
+- `C8_invalid_expire_answers_err_not_disconnect` (`DynaCacheServerTest`): thirteen bad expiry
+  arguments over one socket -- the four `EXPIRE` spellings out of range, and `SET EX`, `SET PX`
+  and `SETEX` at zero, negative and `Long.MAX_VALUE` -- each answer the exact Redis error, and
+  afterwards the same connection still answers `PING` and still holds the key untouched. It then
+  sends `EXPIRE k -1` and sees `:1` and a key that is gone, which is what the error must not
+  swallow.
+- `an unrepresentable expiry is Redis's error, not an exception` and `a non-positive TTL on the
+  SET family is Redis's error` (`CommandParserTest`): the two halves of the rule, message for
+  message.
+- `the EXPIRE family accepts zero and negative, as Redis does`: the boundary the ticket and
+  Redis disagree about, pinned to Redis.
+- `no expiry argument escapes the parser as an exception`: 2,000 random arguments -- uniform
+  `Long`, deep negatives, the four corners, small values -- across all ten expiry-taking shapes,
+  20,000 parses, none of which may throw.
+- `resp_fuzz_no_crash` extended: the fuzzer now emits well-formed expiry commands, and every
+  frame it decodes as a command is handed to a real `CommandParser`, so the decoder's fuzz is
+  the parser's fuzz too.
+- `mvn -o test -pl dynacache-server -am`: engine 147, cluster 83, cp 89, server 88 (was 83).
+  Every earlier test green.
+- This entry.
+
+**Deviations:** Four.
+1. **The ticket's first criterion is wrong about `EXPIRE`, and the spec wins.** It asks for the
+   error on zero and negative for all seven commands. Redis answers `:1` and deletes the key for
+   `EXPIRE k 0` and `EXPIRE k -1`; C8 is "byte-identical to what Redis returns", and the
+   ticket's own note already says a past absolute time is not invalid. Refusing them would also
+   have thrown away behaviour the engine has today and the ticket asks to keep. Implemented
+   Redis's split instead, and pinned it with a named test so the disagreement is visible rather
+   than silent.
+2. **`PEXPIREAT` has no error case**, for the same reason: its argument is already the unit the
+   bound is measured in. The socket test asserts the reply it does give, the not-an-integer
+   error, rather than pretending there is an expire-time error there.
+3. **One test-helper fix outside the parser.** `DynaCacheServerTest.withServer` built its engine
+   on a fixed clock but let `DynaCacheServer` default to `Clock.systemUTC()`, so the parser's
+   "now" and the engine's "now" were fifty-six years apart. No test had noticed, because none
+   had asserted anything about a deadline over the socket. It now passes the one clock, which is
+   what `main` does in production. No main-source change; every server test still green.
+4. **Size:** 270 lines added across four files, within the 200-to-600 budget.
+
+**For the next ticket:** two things this deliberately left alone. `cp.lock.try` and
+`cp.lock.renew` still take their lease through the bare `millis()` helper, so a zero or negative
+lease is accepted; that is CP lease semantics, not key expiry, and belongs with the CP verbs.
+And ticket 62 may delete `EXAT`/`PXAT` -- they are validated here on the same code path as the
+rest, so removing them removes two `until` call sites and nothing else.
+
+---
+
+## T53 - A connection's session cache clears on CLOSE
+
+**Built:** `CommandHandler` now forgets its memoised CP session once the group no longer has it,
+so a connection that closes its session and creates another gets a fresh one instead of the
+closed id (CP spec 4, bug 4 of the P6 review). Two places drop the cache, and only those two:
+`CP.SESSION.CLOSE sid` when `sid` is this connection's own session and the close answered `+OK`
+or `-NOSESSION` (`closeSession`, a new branch of `submit` ahead of the `Sessioned` one, since
+`SessionClose` is a `Command.Cp.Session` and used to fall straight through to the engine), and a
+session-bearing verb whose reply is `-NOSESSION`, meaning the session lapsed at a TTL tick
+between its creation and this verb (`onSession`). Both forget through `forgetSession`, which
+hops to the connection's event loop (`loop`, taken from `ctx.executor()` in `handlerAdded`) and
+compares the cached future by identity, so the field keeps its invariant -- only the event loop
+reads or writes it -- and a session created in between is left alone. The hop is enqueued from
+the `whenComplete` that wraps each reply, which is registered before `channelRead`'s drain hop,
+so the cache is cleared before the reply reaches the client and therefore before the client's
+next command is read. `session()`'s `usable` check is untouched: it still refuses to remember a
+create that failed. Nothing in the CP engine, the session registry, the dispatcher, the wire or
+the parser moved. Main-code diff: 51 lines in `DynaCacheServer.kt`.
+
+**Acceptance** (`CpSessionLifecycleTest`, the `CpRoutingTest` arrangement: a real `ApEngine`, a
+real three-member `CpTestKit` group, the socket in front of both, raw `RespClient`):
+- `session_create_after_close_returns_a_new_session`: CREATE, CLOSE, CREATE on one connection
+  gives two different ids and `CP.LOCK.TRY` on the second is granted. Red before the fix:
+  `CREATE after CLOSE handed back the closed session ==> expected: not equal but was: <1>`.
+- `session_verbs_after_close_use_the_new_session`: after the second CREATE, `CP.LOCK.TRY` is
+  taken and `CP.LOCK.STATE` reports the second session as the owner. Red before: the lock verb
+  answered `Reply.Error` (`-NOSESSION`) instead of the granted array.
+- `session_lapse_clears_the_cache`: the leader's `MutableClock` is advanced past the 15 s default
+  session timeout and `leader.tick()` is driven once, so the session lapses in log time (CP spec
+  5); the next `CP.LOCK.TRY` answers `-NOSESSION` once, the next CREATE gives a new id, and the
+  lock is then granted. No sleeps; the kit's injected clock does the waiting.
+- Offline `test -pl dynacache-server -am`: engine, cluster, cp 89, server 86 (83 + 3), all green.
+
+**Deviations:**
+1. **The lapse test runs at the socket, not at a stubbed seam.** The ticket allowed a
+   dispatcher-level stub if a server-level test could not reach a member's clock. It can:
+   `CpTestKit.clock(kit.leader().config.nodeId)` and `RaftRuntime.tick()` are both public and the
+   server under test is built on `kit.leaderEngine()`, so the real lapse path is exercised end to
+   end. No stub was needed.
+2. **`BugHuntCpCompatTest` was not copied over.** Its `session_create_after_close_...` case is
+   reproduced as the first named test above; the `cp:ref:` TTL case in the same file belongs to
+   T54 and was left where it is.
+3. **A CLOSE that answers something else leaves the cache standing.** `-NOTLEADER` (a leader that
+   moved mid-close) does not end the session, so forgetting it there would orphan a live session
+   holding locks until it lapsed. The client retries the close against the new leader, which then
+   answers `+OK` and clears the cache.
+
+**Known limitation, not fixed here:** a `CP.SESSION.CLOSE` inside `MULTI` does not clear the
+cache. Buffered commands run through `atomically` and never pass `submit`, so the handler never
+sees the close. The repair is to check the buffer for a `SessionClose` on the way out of `exec`,
+and it is worth doing only if CP verbs inside transactions become a supported combination.
+
+**For the next ticket:** T44's debt is still open and this ticket does not touch it -- a
+connection's CP session is still never closed when the socket closes, only left to expire by
+heartbeat timeout. Closing it on `channelInactive` would make `sem_session_death_releases`
+deterministic (T44) and would let P5 kill the holder's connection and watch the lock fall free
+(T46 deviation 2). It is a separate concern from this one: T53 is about the handler's cache while
+the connection lives, `channelInactive` is about the session outliving the connection. The two
+would meet in the same field, so whoever takes it should reuse `forgetSession` for the clearing
+half. The README's known-debts list still carries the `channelInactive` entry and should keep it.
+
+---
+
+## T56 - Settle the batch cross-partition error
+
+**Decision, and why the kind stays.** A batch whose keys span partitions now answers
+`-CROSSSLOT keys of a batch must share a partition (use a hash tag)`. The error KIND is
+unchanged and deliberately so: `CROSSSLOT` is what Redis client libraries switch on, and the
+"considered and rejected" line in ADR 0002 rejected `-CROSSSLOT` for fan-out commands like
+`MGET`, which DynaCache serves by fanning out to the partitions involved. A batch is the
+opposite case: it declares its keys, it must run on one executor with nothing interleaved
+(C12), and when the keys span partitions there is genuinely nothing to fan out, so the refusal
+is real. Only the message text was wrong. It spoke Redis Cluster's vocabulary ("hash to the
+same slot") in a project whose glossary bans "slot" and whose remedy is a hash tag, so it named
+neither the real constraint nor the fix. The new wording is the glossary's own: partition, and
+hash tag.
+
+**What changed.** One source of truth, so one edit reached all three paths. The message lives
+in `CrossPartitionBatch.error` in
+`DynaCache/dynacache-engine/src/main/kotlin/dynacache/engine/CommandEngine.kt`; the engine fails
+the batch future with that exception, and `orBatchError()` in `DynaCacheServer.kt` unwraps it
+for both the MULTI/EXEC path and the EVAL path (`Lua.kt` calls the same helper). No Lua bridge
+line re-renders the text: an EVAL that spans partitions is refused before the script starts, so
+the reply never round-trips through a Lua table. The round-trip was checked anyway for the
+`redis.call` path, where `Reply.Error` becomes `err = "$kind $message"` and is split back at the
+first space -- the new message has no leading space and no format character, so kind and message
+survive intact. Three comment lines above the error record why the kind stays. ADR 0002 gained a
+paragraph saying the rejection covers fan-out commands only and that a batch still answers the
+kind. Three pinned tests updated: `CommandEngineTest` (the constant, renamed `CROSS_SLOT` to
+`CROSS_PARTITION`, plus its one use), `DynaCacheServerTest.multi_exec_cross_partition_rejected`,
+`LuaTest.lua_cross_partition_rejected`.
+
+**Grep proof, with one honest deviation.** `grep -rni slot` under `DynaCache/` for `.kt`, `.md`,
+`.lua`, `.java` and `.xml`, excluding `CROSSSLOT`, leaves no use of "slot" in the partition
+sense. What remains is three unrelated senses, and the ticket's box as literally worded ("the
+word slot appears nowhere") cannot be met without changes the seams forbid:
+
+- `CONTEXT.md` lines 35 and 198: `_Avoid_: shard, slot, bucket`. This is the glossary declaring
+  the ban; deleting the word would delete the rule.
+- `ds/TimerWheel.kt` and `ds/CountMinSketch.kt`: a timer-wheel bucket and a sketch counter cell.
+  "Slot" is the standard name in both data structures and has nothing to do with partitions.
+  Renaming a `slots` constructor parameter is a code change outside this ticket's seams.
+- `CommandParserTest.kt:467` and `RespFuzzTest.kt:11`: "the slot a random expiry argument goes
+  in", meaning an argument position.
+
+Since the literal box is unreachable while `TimerWheel` keeps its slots, partially chasing it
+would add diff without satisfying it, so nothing outside the partition sense was touched. Read
+as the glossary means it, the box is met: "slot" now names a partition nowhere in DynaCache.
+
+**Tests.** Red first: the `CommandEngineTest` pin was updated ahead of the engine and failed on
+the old text (`Tests run: 63, Failures: 1`), then passed once `CrossPartitionBatch.error` was
+reworded. Full run `-pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 91, all
+green, counts unchanged as required -- this was wording only, so no test was added or removed.
+Diff is 4 files, well inside the size budget.
+
+---
+
+## T54 - TTL verbs on cp:ref: keys reach the reference
+
+**Built:** the compat re-target in `CommandDispatcher.compat` now reads the key's kind for
+`EXPIRE`, `PEXPIRE`, `TTL`, `PTTL` and `PERSIST` the way it already did for `GET` and `SET`, so a
+`cp:ref:` key goes to the AtomicReference and every other `cp:` key still goes to the counter. The
+reference had the expiry field and the tick's sweep since T42 but no verbs to reach them, so three
+commands were added beside the counter's: `RefExpire(key, ttl)`, `RefTtl(key, precision)` and
+`RefPersist(key)`, each a data class under `Command.Cp.AtomicReference`, with wire tags 31, 32 and
+33 in `CpWire` written and read exactly as `CMD_EXPIRE`, `CMD_TTL` and `CMD_PERSIST` are (a span in
+millis, a precision boolean, nothing). `AtomicReferenceStateMachine.apply` answers them from the
+same `now` its other verbs use, through a private `retime` that mirrors the counter's: `EXPIRE`
+gives a live reference the deadline `now + ttl` and answers 1, 0 when there is no live reference to
+give it to; `PERSIST` clears the deadline and answers 1, or 0 when there was none; `TTL` answers -2
+for a missing reference, -1 for one without a lease, the remaining millis for `PTTL` and Redis's
+`(remaining + 500) / 1000` rounding for `TTL`. Nothing reads a clock in the state machine, so the
+lease runs on log time (CP spec 5, 9.4) exactly as the counter's does. Main-code diff: 6 lines in
+`CommandDispatcher.kt`, 20 in `AtomicReferenceStateMachine.kt`, 14 in `CpWire.kt`, 15 in
+`Command.kt`; 93 lines of tests.
+
+**Repays the T42 deviation:** T42's deviation 2, "No `EXPIRE`, `TTL` or `PERSIST` on a reference" —
+CP spec 9.4 names AtomicReference among the state machines those verbs operate on, but 6.5's command
+table has no row for them, and T42 resolved the disagreement towards 6.5, leaving "T44 adds the
+three commands if the dispatcher needs to route `EXPIRE cp:ref:K`". It did need to, and this ticket
+adds them. Spec 9.4 wins over the empty 6.5 row, which is what the ticket and the P6 review (bug 6)
+asked for.
+
+**Acceptance:**
+- `ref_ttl_via_compat_reports_reference_ttl` (`CpRoutingTest`, a real three-member CP group behind
+  the RESP socket): `SET cp:ref:x v EX 100` then `TTL` reads 100 and `PTTL` reads the lease in
+  millis; advancing the leader's `MutableClock` 40 s makes `TTL` read 60, so the lease is on log
+  time; `TTL` of a reference nobody set is -2 and of one set without `EX` is -1. Before the fix the
+  first `TTL` read -2, which is the parked `BugHuntCpCompatTest` red.
+- `ref_expire_and_persist_via_compat` (same class): `EXPIRE` on a missing reference is 0, on a live
+  one 1; a second `EXPIRE` shortens the lease and `TTL` reads the shorter one; `PERSIST` answers 1
+  then 0 and the reference outlives its old deadline; `PEXPIRE 1000`, the clock two seconds on and
+  one `tick()` past the deadline, and `GET` is nil with `TTL` back to -2.
+- `the compat set reaches the CP engine as the verb it means` (`CommandDispatcherTest`) gains four
+  rows: the same five verbs on `cp:ref:r` re-target to `RefExpire`, `RefTtl` (both precisions) and
+  `RefPersist`, while every counter row in the table is unchanged, which is the "counter path
+  untouched" criterion at the seam.
+- `reference_commands_round_trip` (`CpWireTest`) gains the three new commands, both `RefTtl`
+  precisions among them, so a follower decodes what a leader replicated.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 90 (88 + 2), all
+  green. The cp count is unchanged because the new wire and dispatcher coverage went into existing
+  test methods rather than new ones.
+
+**Deviations:**
+1. **One assertion is a range, not an equality.** `PTTL` right after `SET ... EX 100` is not
+   100000: `RaftRuntime.stamp` is `max(clock, lastApplied + 1, lastStamped + 1)`, so with a frozen
+   test clock every appended entry moves log time on by a millisecond, and the three entries between
+   the `SET` and the `PTTL` cost three of them. The test asserts `99_900..100_000` and says why. The
+   counter's own TTL tests never saw this because seconds rounding hides it.
+2. **No `CP.REF.EXPIRE` spelling on the wire.** The new commands are reachable only through the
+   Redis-compat verbs, exactly as the counter's `LongExpire`, `LongTtl` and `LongPersist` are: the
+   parser has `cp.long.set/get/incr/decr/add/cas` and no `cp.long.expire`. CP spec 3.5 and 6.5 name
+   no `REF_EXPIRE` log op either, so adding a parser row would have invented a verb; the ticket's
+   seams also put the parser's command rows out of bounds.
+3. **The namespace rule is still read from the key prefix in two places.** `compat` now branches on
+   `reference` in four arms instead of two. That is the smallest fix the ticket asked for; folding
+   it is ticket 71.
+
+**For the next ticket:**
+- **Ticket 71** should fold `CommandDispatcher.REFERENCE_PREFIX` and the four `if (reference)`
+  branches into one key-to-kind decision, and with it the `ponytail:` note still standing above
+  `compat`: `GET cp:lock:x` reads an empty counter instead of `-WRONGTYPE`, and `EXPIRE cp:lock:x`
+  answers 0 where CP spec 9.4 says a lock's lease is `CP.LOCK.RENEW`'s alone and the verb is
+  rejected. Both want the same thing: the kind of a `cp:` key named once, mapping a compat verb onto
+  the owning primitive's command, with `-WRONGTYPE` and the lock's refusal falling out of it. The
+  five TTL verbs and `GET`/`SET` are then one table, not seven branches.
+- The reference is now the second primitive with a full TTL surface; the latch and the semaphore
+  still have none, and CP spec 9.4 names them too. Whoever gives them one has this shape to copy:
+  three commands, three wire tags, a `retime` in the state machine, and the dispatcher branch.

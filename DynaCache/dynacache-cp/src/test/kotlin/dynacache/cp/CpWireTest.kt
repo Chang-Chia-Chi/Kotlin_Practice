@@ -124,6 +124,10 @@ class CpWireTest {
             Command.Cp.RefSet(key, "hello".toByteArray(), ttl = Duration.ofMillis(1500)),
             Command.Cp.RefGet(key),
             Command.Cp.RefCas(key, "hello".toByteArray(), byteArrayOf(0, -128)),
+            Command.Cp.RefExpire(key, Duration.ofMillis(1500)),
+            Command.Cp.RefTtl(key),
+            Command.Cp.RefTtl(key, Command.Ttl.Precision.MILLIS),
+            Command.Cp.RefPersist(key),
         ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
     }
 

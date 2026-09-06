@@ -40,9 +40,12 @@ class DynaCacheServerTest {
         val clock = Clock.fixed(Instant.ofEpochSecond(1_000_000), ZoneOffset.UTC)
         val engine = ApEngine(partitionCount, clock, tickMillis = tickMillis)
         running = engine
+        // The server reads the same clock as the engine under it, as `main` gives it in production:
+        // a deadline the parser works out is otherwise measured from a different "now" than the
+        // one the engine compares it against.
         val server =
-            if (onTick == null) DynaCacheServer(port = 0, engine = engine)
-            else DynaCacheServer(port = 0, engine = engine, tick = onTick)
+            if (onTick == null) DynaCacheServer(port = 0, engine = engine, clock = clock)
+            else DynaCacheServer(port = 0, engine = engine, clock = clock, tick = onTick)
         try {
             server.start()
             body(server)
@@ -100,7 +103,7 @@ class DynaCacheServerTest {
 
                 client.send("EXEC")
                 assertEquals(
-                    Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot"),
+                    Reply.Error("CROSSSLOT", "keys of a batch must share a partition (use a hash tag)"),
                     client.read(),
                 )
                 client.send("GET", here)
@@ -237,6 +240,61 @@ class DynaCacheServerTest {
                 assertEquals(Reply.Error("ERR", "wrong number of arguments for 'set' command"), client.read())
                 client.send("PING")
                 assertEquals(Reply.Simple("PONG"), client.read())
+            }
+        }
+    }
+
+    /**
+     * C8: an expiry the server cannot honour is the error Redis writes, on a connection that is
+     * still there afterwards. The `SET` family refuses a zero or negative span; every family
+     * refuses a deadline past what epoch milliseconds can count. What Redis does *not* refuse is
+     * a deadline already gone: `EXPIRE k -1` deletes the key, so it stays a command here.
+     */
+    @Test
+    fun C8_invalid_expire_answers_err_not_disconnect() {
+        withServer { server ->
+            RespClient(server.boundPort).use { client ->
+                client.send("SET", "k", "v")
+                assertEquals(Reply.Simple("OK"), client.read())
+
+                val far = "${Long.MAX_VALUE}"
+                for (wire in listOf(
+                    listOf("EXPIRE", "k", far),
+                    listOf("PEXPIRE", "k", far),
+                    listOf("EXPIREAT", "k", "99999999999999999"),
+                    listOf("PEXPIREAT", "k", "99999999999999999999"),
+                    listOf("SET", "k", "v", "EX", "0"),
+                    listOf("SET", "k", "v", "EX", "-1"),
+                    listOf("SET", "k", "v", "EX", far),
+                    listOf("SET", "k", "v", "PX", "0"),
+                    listOf("SET", "k", "v", "PX", "-1"),
+                    listOf("SET", "k", "v", "PX", far),
+                    listOf("SETEX", "k", "0", "v"),
+                    listOf("SETEX", "k", "-1", "v"),
+                    listOf("SETEX", "k", far, "v"),
+                )) {
+                    client.send(*wire.toTypedArray())
+                    val reply = client.read()
+                    assertTrue(reply is Reply.Error, "${wire.joinToString(" ")} answered $reply")
+                    // PEXPIREAT cannot overflow -- every Long is a deadline -- so its argument is
+                    // refused one step earlier, as the integer it is too big to be.
+                    val expected =
+                        if (wire[0] == "PEXPIREAT") "value is not an integer or out of range"
+                        else "invalid expire time in '${wire[0].lowercase()}' command"
+                    assertEquals(Reply.Error("ERR", expected), reply, wire.joinToString(" "))
+                }
+
+                // Thirteen bad arguments later, the connection is the same connection.
+                client.send("PING")
+                assertEquals(Reply.Simple("PONG"), client.read())
+                client.send("GET", "k")
+                assertEquals(bulk("v"), client.read(), "no invalid expiry touched the key")
+
+                // And the deadline already past is honoured rather than refused, as in Redis.
+                client.send("EXPIRE", "k", "-1")
+                assertEquals(Reply.Integer(1), client.read())
+                client.send("GET", "k")
+                assertEquals(Reply.Bulk(null), client.read(), "a past deadline deletes the key")
             }
         }
     }
