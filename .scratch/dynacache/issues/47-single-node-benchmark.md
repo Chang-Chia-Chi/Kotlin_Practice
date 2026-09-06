@@ -12,13 +12,13 @@ No production code changes in this ticket; a hot spot found here becomes its own
 
 **Nature:** measurement (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (8509c654, merged; numbers provisional, quiet rerun is a follow-up)
 
-- [ ] `DynaCache/bench/single-node.sh` (Git Bash) starts a node on an ephemeral or fixed port with a data dir under `%TEMP%`, waits for `PING`, runs `redis-benchmark` for the commands DynaCache supports (`PING_INLINE`, `PING_MBULK`, `SET`, `GET`, `INCR`, `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LRANGE_100`, `HSET`, `ZADD`, `MSET`) at `-c 50 -n 100000 -d 3`, then again with `-P 16` (pipelined) and once with `-d 1024`, and stops the node
-- [ ] The same run against a real `redis:7` container on this machine, same flags, so every DynaCache number sits next to a Redis number in the same table
-- [ ] `docs/dynamiccache/benchmarks/<date>-single-node.md`: the tables, the environment, and one paragraph per anomaly (any command below 20 percent of Redis, any command whose pipelined gain is far below Redis's) naming the code path
-- [ ] Every unsupported `redis-benchmark` test (`SADD`, `SPOP`, `LPUSH` variants DynaCache lacks) is listed as skipped with the reason, not silently absent
-- [ ] Progress entry written
+- [x] `DynaCache/bench/single-node.sh` (Git Bash) starts a node on an ephemeral or fixed port with a data dir under `%TEMP%`, waits for `PING`, runs `redis-benchmark` for the commands DynaCache supports (`PING_INLINE`, `PING_MBULK`, `SET`, `GET`, `INCR`, `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LRANGE_100`, `HSET`, `ZADD`, `MSET`) at `-c 50 -n 100000 -d 3`, then again with `-P 16` (pipelined) and once with `-d 1024`, and stops the node
+- [x] The same run against a real `redis:7` container on this machine, same flags, so every DynaCache number sits next to a Redis number in the same table
+- [x] `docs/dynamiccache/benchmarks/<date>-single-node.md`: the tables, the environment, and one paragraph per anomaly (any command below 20 percent of Redis, any command whose pipelined gain is far below Redis's) naming the code path
+- [x] Every unsupported `redis-benchmark` test (`SADD`, `SPOP`, `LPUSH` variants DynaCache lacks) is listed as skipped with the reason, not silently absent
+- [x] Progress entry written
 
 Ground rules for this ticket: measurement only; no change under `DynaCache/*/src/main`; if a
 run needs a code change to be fair (a missing command, a crash under load), stop, record it as

@@ -4615,3 +4615,206 @@ the targeted runs never saw it -- only a run with the rest of the suite ahead of
 - The README now carries the running instructions, the test tiers and their timings, and the five
   known debts of the last five progress entries. It is the first document a reader meets, so a
   ticket that repays one of those debts should strike it from there as well as recording it here.
+
+---
+
+## T48: WAL logs nothing for a refused conditional ZADD
+
+**Built:** a `ZADD` carries its `NX`/`XX` condition into its WAL entry and is replayed under it,
+so a warm restart reproduces exactly the effect the live command had (C14, spec 2.8). Before
+this ticket `WalCodec.encode` dropped `ZAdd.condition`: a `ZADD NX` on a member already there
+and a `ZADD XX` on one that was not both answered `:0`, were logged as plain `ZADD`s, and moved
+or created the member on the next boot.
+
+`WalCodec` gains one symmetrical pair, `DataOutputStream.condition` and
+`DataInputStream.condition`, alongside the `end` pair it already had and fixed by the format the
+same way: `0` none, `1` `NX`, `2` `XX`, so reordering `Command.Set.Condition` cannot change a
+file's meaning. The `ZADD` payload is now `key, pairs, condition`; `decode` rebuilds
+`Command.ZAdd(key, entries, condition)`. `CH` is not logged -- it changes only the reply's count,
+never the store. Nothing else moved: the entry header, the op codes, the RDB, `Partition`'s
+command semantics and the engine hook are all untouched.
+
+**The mixed case.** `ZADD NX 5 a 2 b` with `a` present and `b` missing takes `b` only. The
+ticket offered two ways to log that: the taken subset as a plain `ZADD b 2`, or the condition
+carried and replayed. Carried, because the taken subset is not derivable inside the seam this
+ticket owns -- `encode` sees `(command, reply, now)` and nothing of the store, and which members
+a condition admitted depends on the state *before* the command, which only `Partition` holds.
+Logging the subset would have meant returning it out of `Partition.run`, i.e. changing the hook
+and the command path for one command's benefit. Carrying the condition is one byte in the `ZADD`
+payload, no new op code, no header change, and replay is exact because replay reaches that entry
+in the same state the live command saw.
+
+**Correcting T35's wording.** T35's entry says: "What is logged is what changed: an error reply,
+a refused conditional `SET` and an empty `POP` (both nil) log nothing, and a conditional `SET`
+that took is logged as a plain one." That is true as written, of `SET`. What is not true, and
+what the codec's file comment did imply by closing on "what is logged is what changed, not what
+was asked", is that the *reply's shape* settles every conditional command. It settles `SET`
+only: a refused `SET` answers nil, which no successful `SET` answers, so the entry is dropped by
+shape. A `ZADD` answers an integer, and `:0` is what both a full refusal and a score moved
+without `CH` answer -- and one call can be part refused and part taken, which no single count can
+express. The old entry is left as it stands; the codec's comment is rewritten to say which
+commands the reply shape settles and why `ZADD` is settled by its condition instead.
+
+**Tests** (`WalRecoveryTest`, the engine's own recovery seam; nothing here reads the log's
+layout, which stays `WalTest`'s):
+
+- `C14_refused_conditional_zadd_replays_nothing`: `ZADD NX` on a present member and `ZADD XX` on
+  a missing one, then a crash (no save, no close) and recovery from the log alone -- the score is
+  where it was and the refused member is still absent. Red before the fix on the score.
+- `C14_taken_conditional_zadd_replays_as_taken`: an `XX` that moved one of two members replays
+  with that one change only.
+- `C14_partly_refused_conditional_zadd_replays_only_the_taken_members`: `ZADD NX 5 a 2 b` with
+  `a` present replays as `a=1, b=2`. Red before the fix on `a`.
+
+The parked red test from the review worktree (`BugHuntWalTest`) is folded into the first of these
+and is not carried over under its own name. Engine module: 144 tests before, 147 after, all green
+offline; `WalRecoveryTest` 9 of 9.
+
+**Deviations:**
+
+- A refused conditional `ZADD` still *appends* an entry; what it no longer does is change
+  anything on replay. The ticket's title reads "logs nothing", and that literal form is not
+  reachable from the encode seam: `:0` does not distinguish a refusal from a move without `CH`,
+  so dropping on `:0` would silently lose a real score change, and a part-refused call must log
+  its taken half regardless. The ticket names carrying the condition as an accepted answer.
+- `CH` is deliberately not logged. It is a reply-shape flag; a replay ignores replies.
+- The `ZADD` payload grew a trailing byte, so a log file written before this ticket ends its
+  `ZADD` entries one byte short and its recovery now fails loudly (`EOFException`) instead of
+  replaying the wrong thing. The entry header and op codes are unchanged and the format carries
+  no version field to bump (T35 did not give it one), so there was nothing to version; a pre-1.0
+  log is not a compatibility contract, and a loud failure is the right shape of one anyway.
+
+**For the next ticket:** `SET` and `ZADD` are the only commands in `Command.kt` carrying a
+condition today (grep `condition`), and both are now correct, so the WAL's rule holds across the
+whole command set. If `EXPIRE` ever gains Redis's `NX`/`XX`/`GT`/`LT` flags it joins `ZADD`'s
+class, not `SET`'s -- its refusal answers `:0` -- and must carry them into the log the same way.
+More generally: `encode` sees only `(command, reply, now)`. Any future rule that needs the state
+*before* the command has to move the decision into `Partition`, where the condition is evaluated;
+that is a hook change, and worth doing once rather than per command.
+
+## T47: Single-node benchmark with redis-benchmark
+
+**Built:** `DynaCache/bench/single-node.sh`, a Git Bash script that builds the jars if they are
+missing, starts one DynaCache node in single-node mode (`dynacache 6390 16 %TEMP%\dynacache-bench\data`),
+waits for `PING` through a `redis:7` container, runs four `redis-benchmark` passes against it,
+then starts a `redis:7` container on 6391 and runs the identical four passes against that. It
+starts and stops both itself, writes every CSV under `%TEMP%\dynacache-bench\`, times out each
+pass and exits non-zero on any failure. `DynaCache/bench/.gitattributes` pins `*.sh` to LF,
+because the repository has `core.autocrlf=true` and a CRLF checkout breaks the shebang.
+`docs/dynamiccache/benchmarks/2026-09-06-single-node.md` holds the environment, the node's
+arguments, four tables with a DynaCache column and a Redis column, the skipped list and four
+anomaly paragraphs. Nothing under `src/main` or `src/test` changed. The server is launched with
+`java -cp` over the module jars plus a runtime classpath emitted by `dependency:build-classpath`
+in the same reactor invocation as `package`, which is the only way the sibling modules resolve
+offline; the script does that itself.
+
+**Concepts named:** No new domain vocabulary. Two operational terms the report uses: the
+**plain pass** (`-c 50 -n 100000 -d 3`), which on this machine measures the Docker round trip
+rather than either engine, since Redis answers every command in it at 19 to 24 thousand
+requests per second regardless of which command it is; and the **spread pass** (`-r 100000`),
+which exists because `redis-benchmark` leaves `__rand_int__` in the command literally unless
+`-r` is given, so without it every `SET`, `GET` and `INCR` names one key and `MSET (10 keys)`
+names that same key ten times, and no multi-key fan-out is exercised at all.
+
+**Acceptance:**
+- Script starts a node, waits for `PING`, runs the ticket's thirteen tests at `-c 50 -n 100000
+  -d 3`, again with `-P 16`, once with `-d 1024`, and stops the node: done, plus a fourth pass
+  with `-r 100000` and a short `EVERY_SECOND` pass.
+- The same passes against a `redis:7` container, same flags, so every DynaCache number sits
+  next to a Redis number: done, `redis-plain`, `redis-pipelined`, `redis-1024b`, `redis-spread`.
+- Report with tables, environment and one paragraph per anomaly naming the code path: done,
+  four anomalies.
+- Every unsupported test listed as skipped with the reason: `SADD`, `SPOP` (no Set type),
+  `ZPOPMIN` (no `zpopmin` in the parser), `XADD` (no Stream type), and `LRANGE_300/500/600`
+  (supported, left out by the ticket's list).
+- Progress entry: this.
+
+**Headline numbers** (requests per second, DynaCache then redis:7):
+
+| | plain | pipelined `-P 16` |
+|---|---|---|
+| SET | 26483.05 / 23702.30 | 145348.83 / 313479.62 |
+| GET | 27654.87 / 24189.65 | 389105.06 / 320512.81 |
+| INCR | 27225.70 / 23917.72 | 139275.77 / 294117.66 |
+| MSET (10 keys) | 13877.33 / 20559.21 | 17540.78 / 176991.16 |
+
+Worst cases: `RPUSH` 1072.78 against 22841.48 plain (5 percent) and 1351.39 against 362318.84
+pipelined (0.4 percent). `SET` under `EVERY_SECOND`: 53.30 rps, p50 1014.783 ms.
+
+**Deviations:**
+- **The node runs with fsync `NEVER`, not `EVERY_SECOND` as the ticket says.** DynaCache answers
+  a write only once its WAL entry is durable (C14), so under `EVERY_SECOND` every write waits for
+  the next second's fsync and throughput is exactly clients per fsync interval: measured at 53.30
+  requests per second. A 100,000-request `SET` pass would take half an hour and the nine write
+  tests together most of a day. The `redis:7` container has no append-only file and never makes a
+  reply wait for the disk, so `NEVER` is the setting that compares like with like.
+  `EVERY_SECOND`'s cost is measured on its own in the script and is the report's first anomaly.
+  This is not a shortcut to repay; it is what the comparison requires.
+- **A fourth pass and two extra measurements beyond the ticket.** The spread pass (`-r 100000`)
+  was added because without it the plan's named fan-out ceiling is never exercised. A four-round
+  `LPUSH` growth pass was added to confirm the list anomaly's cause. Both run on both targets or
+  on DynaCache alone as appropriate and are in the script.
+- The node is not restarted between its passes, and neither is the container, so `mylist` is
+  about 200,000 elements long when the pipelined pass starts. Symmetric across the two engines,
+  so the side-by-side columns are fair, but DynaCache's own plain-to-pipelined ratio for a list
+  command compares two different list lengths, and the report says so.
+- DynaCache writes a WAL record per mutating command even under `NEVER`; the default `redis:7`
+  writes nothing per command. That asymmetry is against DynaCache and is not corrected for.
+- **Every table was taken under contention and no pass has a load reading behind it.** Another
+  orchestrator session was running Maven builds and test suites in the `kp-wt/t48` to `kp-wt/t51`
+  worktrees during all three runs. The ticket asked for the number of other Java processes and
+  the CPU idle percentage per pass; neither was recorded, which is the omission that makes the
+  factor-of-two spread unattributable at the time it happened. Sampled afterwards, the machine
+  was carrying three other Java processes at 25 percent CPU idle. The script now gates every pass
+  on ten consecutive seconds with no `java.exe` but its own node and at least 70 percent CPU
+  idle, and writes what it saw per pass to `load.txt`. The follow-up is a rerun in a quiet
+  window; the tables stand as provisional until then. The four anomalies are DynaCache-against-
+  Redis ratios measured on the same machine at the same moment and held in all three runs, so
+  contention is not expected to overturn them.
+
+**Nothing failed under load.** No crash, no hang, no error reply. Neither node log contains an
+exception. The only stderr in any DynaCache pass is `WARNING: Could not fetch server CONFIG`,
+because the parser has no `config` command; it changes no measurement.
+
+**For the next ticket:** four follow-ups, in the order the numbers rank them.
+
+1. **The `EVERY_SECOND` write path is unusable as it stands.** `Partition.execute` adds the log
+   hook's future to the task's `durable` and `Partition.task` completes the reply only after it;
+   under `EVERY_SECOND`, `WalWriter.writeBatch` parks the waiter on `awaitingFsync` and
+   `forceAwaiting` releases the set once per tick. Redis's own `appendfsync everysec` replies
+   immediately and fsyncs behind the reply. A ticket should measure group commit: keep
+   reply-after-durable, force on a one-to-five-millisecond deadline or as soon as a batch is
+   ready, and find the deadline that buys back most of `NEVER`'s throughput.
+2. **`Partition.account` recounts the whole aggregate after every keyed command**, including
+   reads, via `Value.approximateBytes()`, which for a list is `items.sumOf { it.size + 16 }`.
+   Push and pop on an `ArrayDeque` are O(1), so the recount is the only length-dependent work.
+   The four list tests run back to back on one growing key and their rates trace its length in a
+   U shape (2842.93, 1072.78, 1284.11, 3618.08), which separates length from the command. The
+   `ponytail:` comment on `approximateBytes` already names the repair: per-element size deltas
+   at the mutation sites, making `account` O(1). Measure `RPUSH` on a 200,000-element list
+   before and after.
+3. **Writes pipeline at about a third of Redis's gain and reads do not.** `GET` gained 14.1x
+   from `-P 16` against Redis's 13.2x; `SET` gained 5.5x against 13.2x, `HSET` 4.8x against
+   14.6x. The only difference between the two paths is the WAL append. A ticket should run the
+   pipelined pass against a node with no data directory and one with, and attribute the gap;
+   what is left over is DynaCache's own two thread handoffs per command, the executor hop into
+   the partition and the callback back onto the Netty event loop.
+4. **`ApEngine.fanOut`'s sequential chain is not the ceiling the plan expected.** With keys
+   spread, `MSET` reached 21584.29 against `SET`'s 26673.78 on the same pass, about 19 percent
+   for ten keys across partitions. Without `-r`, where all ten keys are one key on one
+   partition, `MSET` reached only 13877.33: spreading made it faster, because fifty clients on
+   one key put all the work on one of sixteen partition threads. Replace the `thenCompose` chain
+   with `allOf` and re-run the spread pass, and sweep `MGET` at 2, 8, 16 and 64 keys so the
+   chain's cost is a function of how many partitions a command spans.
+
+Absolute numbers moved by up to a factor of two between three runs of the script, on both
+engines. The shape did not: the list tests were slowest every time, the U shape appeared every
+time, the pipelined write gap stayed near a third every time, and `EVERY_SECOND` `SET` was
+50.47, 49.51 and 53.30. Read a single number as good to a factor of two and the ratios as the
+result.
+
+**Orchestrator note:** every table was taken while another session ran Maven builds on this
+machine, and no quiet window was available before landing, so the report carries a PROVISIONAL
+banner. The script now gates each pass on a quiet machine and records the other-Java count and
+CPU idle it saw per pass in `load.txt`. The quiet rerun is a follow-up ticket that reuses the
+script unchanged.

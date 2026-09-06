@@ -12,16 +12,16 @@ where it claims the rule already covers every conditional command.
 
 **Nature:** write-ahead rule, C14 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache f3a65a54, merged into misc/ai_gen)
 
-- [ ] `C14_refused_conditional_zadd_replays_nothing`: `ZADD NX` on an existing member and
+- [x] `C14_refused_conditional_zadd_replays_nothing`: `ZADD NX` on an existing member and
       `ZADD XX` on a missing member, then recover from the WAL; every score is where it was
-- [ ] `C14_taken_conditional_zadd_replays_as_taken`: a conditional `ZADD` that changed one of
+- [x] `C14_taken_conditional_zadd_replays_as_taken`: a conditional `ZADD` that changed one of
       two members replays with that one change only
-- [ ] A `ZADD` mixing taken and refused members in one call replays with only the taken ones
-- [ ] The WAL codec's comment and the T35 progress wording no longer claim the rule covers
+- [x] A `ZADD` mixing taken and refused members in one call replays with only the taken ones
+- [x] The WAL codec's comment and the T35 progress wording no longer claim the rule covers
       every conditional command by reply shape alone
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the engine module's
 persist test tree (`BugHuntWalTest`); reuse it if the worktree is still present, otherwise
