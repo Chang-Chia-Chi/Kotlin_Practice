@@ -67,14 +67,6 @@ class FencedLockTest {
     }
 
     /**
-     * I13 under its own name: at any committed log index at most one session holds a lock key.
-     * The assertion is [lock_mutual_exclusion]'s -- exactly one of two racing sessions is granted
-     * and the other denied -- so this delegates rather than restating it.
-     */
-    @Test
-    fun I13_at_most_one_session_holds_a_lock() = lock_mutual_exclusion()
-
-    /**
      * I14 under its own name: for one lock key, a later acquire's token is greater than an
      * earlier one's. [lock_fencing_token_monotonic] is that assertion over a hundred cycles.
      */

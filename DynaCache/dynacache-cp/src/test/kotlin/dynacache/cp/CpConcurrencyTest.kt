@@ -50,6 +50,14 @@ class CpConcurrencyTest {
         assertEquals(1, replies.count { it == denied }, "the other denied: $replies")
     }
 
+    /**
+     * I13 under its own name: at any committed log index at most one session holds a lock key.
+     * The assertion is [lock_mutual_exclusion]'s -- exactly one of two racing sessions is granted
+     * and the other denied -- so this delegates rather than restating it.
+     */
+    @Test
+    fun I13_at_most_one_session_holds_a_lock() = lock_mutual_exclusion()
+
     /** The log serializes the ten attempts, so exactly the three permits that exist are handed out. */
     @Test
     fun sem_concurrent_acquire_exactly_permits_succeed() {
