@@ -80,6 +80,18 @@ _Avoid_: cluster state, topology, peer list
 A split in the transport where two sets of nodes cannot reach each other. Always say
 "network partition" in full; a bare "partition" is the execution unit above.
 
+**Contact node**:
+The node a client happened to connect to. It is the **coordinator** of the keys it owns and
+forwards the rest; the client never learns the difference.
+_Avoid_: entry node, proxy, front node
+
+**Router**:
+The thing on each node that presents the command engine's shape and decides only whether this
+node coordinates the key: it runs the command locally or forwards it and waits for the reply.
+It is not the **dispatcher**, which chooses between the AP and the CP engine by namespace and
+sits above it.
+_Avoid_: proxy, forwarder, gateway
+
 ### CP
 
 **Log time**:

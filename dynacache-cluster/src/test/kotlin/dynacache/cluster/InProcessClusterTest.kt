@@ -13,7 +13,7 @@ class InProcessClusterTest {
 
     @Test
     fun cluster_boots_three_nodes_sharing_one_ring() = runTest {
-        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2)
+        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope)
         val key = Key("orders:4711")
         val (first, second) = cluster.nodes
 
@@ -27,7 +27,7 @@ class InProcessClusterTest {
         val ping = Envelope.newBuilder().setFrom(first.name).setTo(second.name).setPing(Ping.newBuilder().setSeq(1)).build()
         cluster.transport(first).send(second, ping)
         cluster.drainMessages()
-        assertEquals(ping, cluster.transport(second).inbound.tryReceive().getOrNull())
+        assertEquals(listOf(ping), cluster.gossipOn(second))
 
         cluster.close()
     }

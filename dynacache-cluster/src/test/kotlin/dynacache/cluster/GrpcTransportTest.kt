@@ -2,8 +2,12 @@ package dynacache.cluster
 
 import dynacache.cluster.proto.Ack
 import dynacache.cluster.proto.Envelope
+import dynacache.cluster.proto.Forward
+import dynacache.cluster.proto.ForwardReply
 import dynacache.cluster.proto.Ping
+import dynacache.cluster.proto.ReplyMsg
 import dynacache.cluster.proto.PingReq
+import com.google.protobuf.ByteString
 import io.grpc.StatusException
 import java.net.ServerSocket
 import kotlin.time.Duration.Companion.seconds
@@ -74,6 +78,12 @@ class GrpcTransportTest {
             Envelope.BodyCase.PING -> envelope.setPing(Ping.newBuilder().setSeq(7))
             Envelope.BodyCase.ACK -> envelope.setAck(Ack.newBuilder().setSeq(7))
             Envelope.BodyCase.PING_REQ -> envelope.setPingReq(PingReq.newBuilder().setSeq(7).setTarget("charlie"))
+            Envelope.BodyCase.FORWARD -> envelope.setForward(
+                Forward.newBuilder().setId(7).addAllToken(listOf("GET", "k").map(ByteString::copyFromUtf8))
+            )
+            Envelope.BodyCase.FORWARD_REPLY -> envelope.setForwardReply(
+                ForwardReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK"))
+            )
             Envelope.BodyCase.BODY_NOT_SET -> throw AssertionError("BODY_NOT_SET is not a message type")
         }
         return withBody.build()

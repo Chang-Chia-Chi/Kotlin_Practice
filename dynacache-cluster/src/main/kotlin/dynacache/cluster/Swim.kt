@@ -89,6 +89,13 @@ class Swim(
         send(target, ping(seq))
     }
 
+    /**
+     * Merges [envelope]'s piggybacked table and answers its gossip body. [tick] calls this for
+     * whatever it finds on the transport; a node that puts a second consumer on one inbound
+     * (T19's [Router]) calls it from its demux instead: gossip here, the rest to the router.
+     */
+    suspend fun deliver(envelope: Envelope) = handle(envelope)
+
     private suspend fun handle(envelope: Envelope) {
         envelope.membershipList.forEach {
             merge(Member(NodeId(it.node), MemberState.valueOf(it.state.name), it.incarnation))
