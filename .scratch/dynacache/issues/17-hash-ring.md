@@ -10,13 +10,13 @@ placement only; the engine's partition is a separate layer it never touches (CON
 
 **Nature:** deterministic structure, C3 and I5 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 8082a2e, merged c420b51)
 
-- [ ] `ring_determinism`: three independently built rings, identical preference lists for 10,000 keys
-- [ ] `I5_same_inputs_same_ring`, `C3_preference_list_has_n_distinct_nodes`
-- [ ] `ring_load_is_even`: 100,000 keys, max over min node load below 1.25
-- [ ] `ring_hash_tag_places_keys_together`
-- [ ] Progress entry appended
+- [x] `ring_determinism`: three independently built rings, identical preference lists for 10,000 keys
+- [x] `I5_same_inputs_same_ring`, `C3_preference_list_has_n_distinct_nodes`
+- [x] `ring_load_is_even`: 100,000 keys, max over min node load below 1.25
+- [x] `ring_hash_tag_places_keys_together`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

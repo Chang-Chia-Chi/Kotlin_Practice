@@ -70,3 +70,63 @@ variant per ticket. `Key` holds the array it is given rather than copying it, so
 mutate a key's bytes after construction; `hashedBytes` copies on each read, which is fine at
 today's call rate and worth caching if a profile ever says otherwise. Partition selection should
 be `key.hash % partitionCount` directly, since `hash` is already non-negative.
+
+## T17: Hash ring and preference lists
+
+**Built:** `dynacache-cluster` gains its first code, `dynacache.cluster.Ring`. `NodeId` is a
+value class over a node's name, comparable by that name. `Ring.of(nodes, vnodesPerNode = 128)`
+builds the ring from a node set and a vnode count and nothing else: each node contributes
+`vnodesPerNode` vnodes at 63 bits of SHA-256 over `"<node>#<vnode index>"`, sorted clockwise
+with ties broken by owner then index. `positionOf(key)` is 63 bits of SHA-256 over
+`Key.hashedBytes`. `preferenceList(key, n)` binary-searches the key's successor vnode and walks
+clockwise collecting distinct owners; `vnodeOf(key)` returns that successor vnode. `Vnode` is
+`(owner, index, position, rangeStart)` with `holds(position)` for the half-open range
+`(rangeStart, position]`, wrapping at the top of the ring.
+
+**Concepts named:** The ticket's words are the code's words. **Vnode**, **preference list** and
+**coordinator** (the first entry of the list) come straight from CONTEXT.md, and no method or
+field mentions a partition: the ring decides placement and the engine's partition executor is a
+separate layer it never reaches (ADR 0001). The hash-tag rule lives once, in the engine:
+the ring hashes `Key.hashedBytes`, so `{user1}.a` and `{user1}.b` share a position, a vnode and
+a preference list without the cluster module knowing the brace rule at all. `Vnode` carries its
+range because the range, not the position, is what T27's Merkle trees and T28's anti-entropy
+compare; `Ring.vnodes` is public for the same reason. Ring positions are 63-bit non-negative
+`Long`s, the same masking trick `Key.hash` uses, so ordering is plain signed comparison and no
+unsigned arithmetic appears anywhere.
+
+**Acceptance:**
+- `C3_preference_list_has_n_distinct_nodes`: three nodes, a preference list of 3 has 3 entries,
+  3 distinct entries, and is exactly the node set.
+- `a preference list longer than the node set is refused`: `preferenceList(key, 4)` on a
+  three-node ring throws `IllegalArgumentException`.
+- `I5_same_inputs_same_ring`: a ring built from the node set and one built from the same set in
+  reverse iteration order have the same node list and the same preference lists for 200 keys.
+- `ring_determinism`: three independently built rings give identical preference lists for
+  10,000 seeded keys.
+- `ring_hash_tag_places_keys_together`: `{user1}.a` and `{user1}.b` share both a position and a
+  preference list.
+- `ring_load_is_even`: 100,000 seeded keys over three nodes, coordinator load max over min below
+  1.25 at the default 128 vnodes per node, with no bump needed.
+- `a key belongs to the vnode whose range holds its position` and `the vnode ranges tile the
+  ring end to end`: 1,000 keys land in a vnode that holds them and whose owner is the
+  coordinator; consecutive ranges abut and the first wraps onto the last.
+- `mvn clean package` green: engine 14, cluster 9, server 1.
+- This entry.
+
+**Deviations:** None against the ticket, the plan entry or spec 2.4. Three judgement calls worth
+recording. `Ring.of` takes a plain `Set<NodeId>` and sorts it itself rather than requiring a
+`SortedSet`, so I5 holds no matter what order a caller's set iterates in, which the test asserts
+directly. A position is the first 8 bytes of the SHA-256 digest masked to 63 bits rather than the
+full 256-bit digest as a `BigInteger`; 384 points in a 2^63 space collide with negligible
+probability, and the sort's owner-then-index tie-break keeps the ring deterministic even if two
+ever did. `Ring.of` rejects a vnode count below 128 rather than silently raising it, because spec
+2.4's floor is a contract and a caller asking for 16 has misread it.
+
+**For the next ticket:** T18 wires one `Ring` per node in `InProcessCluster` and can share a
+single instance across all three, since the ring is immutable and a pure function of its inputs.
+`preferenceList` is the coordinator lookup T19's router needs: element 0 is the coordinator, and
+the full list of N is what T22's quorum writes to. `vnodeOf(key)` and the public `Ring.vnodes`
+are the ranges T27 and T28 build Merkle trees over; `Vnode.holds(position)` already handles the
+wrapping range, so anti-entropy does not need to special-case the top of the ring. Membership
+changes are out of scope here and stay so: a new node set means a new `Ring`, and dynamic
+rebalancing is on the do-not-build list.
