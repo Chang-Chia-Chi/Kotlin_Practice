@@ -938,3 +938,108 @@ Suspect and dead rows stay in the table (dead ones are never pinged), so a recov
 detected by the incarnation, not by re-adding; dynamic membership stays on the do-not-build
 list. `Swim.members` includes `self`. Value classes cannot be varargs, which is why the fake
 takes a `Collection<NodeId>`.
+
+## T04: List and key management, WRONGTYPE
+
+**Built:** The List type and the Server command set of spec 2.1. `Value` gains `List(items:
+ArrayDeque<ByteArray>)` and `Value.Kind.LIST`, so `TYPE` reports `list`. Kotlin's own
+`ArrayDeque` is the deque: a circular buffer, so both ends push and pop in O(1) *and* `LINDEX`,
+`LSET` and `LRANGE` still index in O(1), which `java.util.ArrayDeque` cannot do. `Command` gains
+`Push(key, values, end)` and `Pop(key, end)` over `enum End { HEAD, TAIL }` (one variant per
+Redis pair, the way `IncrBy` covers four String verbs), plus `LRange`, `LLen`, `LIndex`, `LSet`
+and `LRem`. An emptied list is deleted, as Redis does; `LSET` errors `no such key` and `index out
+of range` rather than growing the list.
+
+`Command.EveryPartition` is the keyless shape T03 asked for: one abstract `join(replies,
+random)`, and `ApEngine.everyPartition` runs the command on every partition, one after the
+previous one finished, then joins in partition order. `DbSize`, `FlushDb`, `Keys(pattern)`,
+`RandomKey` and `Info` are its five variants; `CommandTable` (`COMMAND`) runs on partition 0
+beside `Ping`, since it needs nobody's share. `ApEngine` takes an injected
+`java.util.Random` (defaulted), seeds one stream per partition from it, and keeps its own for
+the `RANDOMKEY` join. `Glob.kt` is a byte-level port of Redis's `stringmatchlen`, which `KEYS`
+uses now and T05's `SCAN MATCH` will use next.
+
+C13 needed no new mechanism. The List variants declare `needs = Value.Kind.LIST` and T03's kind
+check above `Partition.execute`'s `when` refuses them before any branch reaches the entry; this
+ticket's job was to prove it for List and pin it, which the two named tests do.
+
+**Concepts named:** `EveryPartition` is the third command shape, beside `Keyed` (one key, one
+partition) and `Fanned` (several keys, grouped by partition). It is the one with *no* key: the
+engine cannot route it, so every partition answers and the join makes one reply out of the
+several. Unlike `Fanned` it needs no `single(index)`, because the partition runs the very
+command the client sent; a partition therefore still never unpacks a multi-key argument list.
+`join` takes the engine's `Random` because exactly one command, `RANDOMKEY`, has to choose
+between the partitions' offers; the other four ignore it. `End` is the word for the two ends of
+a list, so `LPUSH`/`RPUSH` and `LPOP`/`RPOP` are one variant each rather than four. `Entry.expired(now)`
+is now the one expiry predicate, shared by `live()` (one key, on access) and `purgeExpired()`
+(the whole store, in front of a keyspace-wide command), so spec 5.4's rule still lives in one
+place. Seams unchanged: `CommandEngine`, `PartitionContext`, `Reply`, `Key`, `PartitionId` are
+exactly T01's.
+
+**Acceptance:**
+- `list_push_pop_order`: `LPUSH a b c` then `RPOP` is `a` and `LPOP` is `c`; `TYPE` is `list`
+  while the list lives, `none` after the last pop takes the key with it.
+- `list_lrange_bounds`: `0 -1`, `-100 100`, `1 5`, `-1 -1` all clamp and none errors; start past
+  stop and start past the end are both empty arrays, and so is a missing key.
+- `wrongtype_rejected`: `LPUSH` on a String key is `-WRONGTYPE ...` and the key is still a
+  String; the refusal runs both ways (`GET`, `HGET`, `LLEN` across the three kinds), while
+  `EXISTS`, `TYPE` and `DEL` work on any kind.
+- `C13_wrongtype_leaves_value_intact`: `LPUSH`, `RPOP`, `LSET`, `LREM`, `LRANGE` and `LINDEX` on
+  a String key all answer `-WRONGTYPE ...`, and `GET` afterwards returns the original value.
+- `keys_glob_patterns`: seven keys spanning partitions matched against `*`, `user:?`, `user:*`,
+  `[ab]`, `[a-c]*`, `[^c]`, `c\[x]` and a pattern that matches nothing; an expired key is absent,
+  and each key is reported once.
+- `dbsize_and_flushdb_span_partitions`: two keys placed on different partitions via
+  `partitionOf`; `DBSIZE` is 2, drops to 1 when one expires, `FLUSHDB` replies `+OK` and
+  `DBSIZE` is 0 with both keys gone.
+- `randomkey_nil_when_empty`: nil on an empty keyspace, the only key when there is one, nil
+  again once it is deleted. Its companion seeds 20 keys plus one that expires and shows 200
+  draws are all live keys from more than one partition.
+- `lrem_count_semantics`: positive from the head, negative from the tail, zero and any count
+  past the matches take them all; a value that is not there counts 0, so does a missing key,
+  and an emptied list takes its key with it.
+- `LLEN and LINDEX read the list without changing it`; `LSET replaces an element and errors
+  outside the list`; `COMMAND and INFO answer in Redis shapes` (`COMMAND` an empty array, `INFO`
+  a bulk carrying `dynacache_version:` and `db0:keys=<n>` counted across partitions).
+- Every T01 to T03 test still green. `mvn -o clean package`: engine 66, cluster 31, server 16.
+- This entry.
+
+**Deviations:** None against the spec, the ticket, ADR 0002 or the frozen types. Six judgement
+calls.
+1. **`ApEngine` gains a third constructor parameter**, `random: java.util.Random = Random()`.
+   The ticket asked for a seeded `Random` injected into the engine and `ApEngine`'s constructor
+   is not on the frozen list; the default keeps every existing call site compiling, and
+   `CommandEngine` itself is untouched. Each partition draws from its own stream seeded from
+   that one, so a single seed makes the whole engine reproducible even though the partitions run
+   on their own threads.
+2. **`EveryPartition.join` takes the `Random`**, which four of its five variants ignore. The
+   alternative was to special-case `RANDOMKEY` inside `ApEngine`, which puts one command's
+   semantics in the router. One honest parameter beat that.
+3. **`RANDOMKEY` is biased toward small partitions**: each partition offers one of its own keys
+   and the join picks uniformly among the offers, so a partition holding two keys is as likely
+   to win as one holding two hundred. Redis's own `RANDOMKEY` is approximate too. Named with a
+   `ponytail:` comment; weighting the choice by each partition's key count is the repair.
+4. **`COMMAND` is `Command.CommandTable`, a keyless variant beside `Ping`**, not an
+   `EveryPartition`. It has nothing to gather, and asking four executors to each return an empty
+   array to be concatenated would have been a shape lying about what the command does.
+5. **A keyspace-wide command sweeps the store first** (`purgeExpired`) rather than filtering a
+   copy of the key set, so `DBSIZE`, `KEYS` and `RANDOMKEY` all see exactly the live keys and
+   `DBSIZE` is a walk rather than Redis's O(1). Named with a `ponytail:` comment: T09's wheel
+   removes expired keys as they fall due, and the sweep can go then.
+6. **`Glob.kt` is a port of Redis's `stringmatchlen`, not a translation to `Regex`.** The two
+   disagree on the edges an unlucky client will find (an unclosed class, a reversed range, a
+   trailing backslash, a `]` outside a class) and Redis's answer is the one clients were written
+   against; the port is the same size as a correct translation would have been.
+
+**For the next ticket:** T05 owns the hand-built table and `SCAN`. Notes it will want.
+`globMatches(pattern, string)` in `Glob.kt` is `MATCH` already written, byte-level and
+package-internal. `Partition.store` is still `HashMap<Key, Entry>` and is read directly by three
+branches now (`DbSize`/`Info`, `Keys`, `RandomKey`), each after `purgeExpired(now)`; those are
+the call sites the new table has to satisfy, plus `live()`, `store.remove`, `store.clear` and
+`store[key] =`. `RandomKey` uses `store.keys.elementAt(random.nextInt(store.size))`, which is
+O(n) on a `HashMap` and is the one place a bucket-sampling table would pay off. `SCAN`'s cursor
+encodes partition plus inner cursor, so it is a fourth shape again: not `Keyed`, not `Fanned`,
+and not `EveryPartition` either, since it visits one partition per call rather than all of them;
+`EveryPartition` is the wrong parent for it. `Value.List.items` is a `kotlin.collections.ArrayDeque`
+and T05's table replaces the key map, not the list backing. `atomically` is still
+`TODO("T14: batches")`.

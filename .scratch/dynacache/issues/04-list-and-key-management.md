@@ -9,12 +9,12 @@ type check that makes a wrong-type command fail with `-WRONGTYPE` before touchin
 
 **Nature:** command semantics and C13 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 950a1a1, merged into misc/ai_gen)
 
-- [ ] `list_push_pop_order`, `list_lrange_bounds`
-- [ ] `wrongtype_rejected`, `C13_wrongtype_leaves_value_intact`
-- [ ] `KEYS` glob matches `*`, `?` and `[...]`; `DBSIZE` and `FLUSHDB` cover every partition
-- [ ] Progress entry appended
+- [x] `list_push_pop_order`, `list_lrange_bounds`
+- [x] `wrongtype_rejected`, `C13_wrongtype_leaves_value_intact`
+- [x] `KEYS` glob matches `*`, `?` and `[...]`; `DBSIZE` and `FLUSHDB` cover every partition
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
