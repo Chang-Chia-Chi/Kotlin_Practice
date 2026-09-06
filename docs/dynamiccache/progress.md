@@ -5188,3 +5188,106 @@ asked for.
 - The reference is now the second primitive with a full TTL surface; the latch and the semaphore
   still have none, and CP spec 9.4 names them too. Whoever gives them one has this shape to copy:
   three commands, three wire tags, a `retime` in the state machine, and the dispatcher branch.
+
+---
+
+## T50 - The idle TTL tick runs on log time
+
+**Built:** Leases and sessions keep running out after a failover to a leader whose wall clock
+trails log time. `RaftRuntime` gains one field and one function: `skew`, how far log time ran
+ahead of this member's clock when its term's first entry applied (`max(0, lastAppliedTs -
+clock.millis())`, set in `termApplied` before `appliedTerm` so a tick never reads a leader's
+term with the previous term's skew), and `logClock()`, the wall clock plus that skew. The
+**log clock** is log time at the election plus whatever the leader's own clock has measured
+since, so it moves at the real rate however far the wall clock is behind. `tick()` now gates on
+the log clock (`logClock() >= lastStampedTs + tickInterval`) and stamps the tick with it
+(`stamp(now = logClock())`); `stamp()` took a `now` parameter that defaults to the wall clock,
+so a user entry is stamped exactly as before. `CONTEXT.md`'s **TTL tick** entry names the log
+clock. Nothing in the state machines, the session registry, the wire format or the stores
+changed. Size: 126 insertions, 13 deletions across five files, 42 lines of them in
+`RaftRuntime` (mostly doc comments) and 90 in tests.
+
+**The gate and the stamping choice.** The old gate compared the wall clock with the last stamp.
+After a failover to a trailing clock the first tick stamped `lastAppliedTs + 1` (C19), which put
+`lastStampedTs` seconds past the wall clock, and the gate stayed shut until the clock caught up:
+no tick, no expiry, no lapse for the whole skew. The ticket's phrase "due when log time has not
+advanced for one interval of the leader's own elapsed time" is the log clock compared with the
+last stamp: when the clock leads or matches log time the skew is zero and the gate reads exactly
+as it did before, and when it trails the gate keeps opening every interval of the leader's own
+elapsed time whatever user entries stamped in between. The tick's stamp is the choice the ticket
+asked to be recorded. CP spec 5 fixes `ts = max(clock_now, last_committed_ts + 1)` for every
+entry and asks for a tick every interval "to advance time in idle periods"; with the literal rule
+an idle tick on a trailing clock advances log time by 1 ms, so a 1 s lease would take 1000 ticks,
+100 s of the new leader's time, to run out, which breaks I19's "at most T plus the election".
+So a tick stamps `max(logClock, lastAppliedTs + 1, lastStampedTs + 1)`: the C19 rule with the
+log clock in place of the wall clock, which is the wall clock itself whenever the skew is zero.
+Log time therefore advances by exactly one tick interval per idle tick when the clock trails
+(`I19_idle_ticks_continue_after_failover_to_a_trailing_clock` pins the ten stamps to
+`lastByOld + k * interval`), and by the wall clock's own reading otherwise. User entries do not
+read the log clock: the brief fixed the stamping rule, and between ticks they crawl at one
+millisecond per entry under skew as T39 recorded; the next tick, at most one interval later,
+brings log time back to the log clock. The log clock is never ahead of real elapsed time: it
+equals the old leader's last stamp plus what the new leader measured since its term applied,
+so a lease can expire late by the election window but never early (the existing
+`I19_lease_expires_late_never_early_across_failover` still passes unchanged).
+
+**Acceptance:** `dynacache-cp` 92 tests, all green (89 before this ticket); full offline
+`-pl dynacache-cp -am test` green with engine 144, cluster 83, cp 92. Red before green in
+every case: the I19 test failed on the second tick (`tick 2 was not appended`) before the
+change; C17 and C18 were re-run against the old wall-clock gate after the fix and both failed
+at "every idle interval appends a tick" with 0, then the gate was restored.
+
+- `CpEngineTest.I19_idle_ticks_continue_after_failover_to_a_trailing_clock`: the leader's clock
+  is advanced 30 s and a SET carries that into the log; the leader is killed; the successor's
+  clock (30 s behind log time) is advanced ten intervals, each followed by `tick()`; all ten
+  ticks commit, the stamps climb strictly past the old leader's last stamp, and each is exactly
+  one interval past the previous.
+- `FencedLockTest.C17_lease_expires_after_skewed_failover`: a 1 s lease taken under a 30 s skew;
+  nine idle ticks on the successor leave the lock held (read straight from the leader's state
+  machine at its applied index, no entry appended), the tenth releases it, and the next holder
+  gets the next token.
+- `SessionTest.C18_session_lapses_after_skewed_failover`: a session with a 1 s timeout holds a
+  30 s lease under a 30 s skew and stops heartbeating; nine idle ticks leave it held, the tenth
+  tick's `SESSION_CLOSED` releases the lock, and a heartbeat answers `-NOSESSION`.
+- Every existing CP test passes unchanged, including `C19_log_timestamps_monotonic_across_leader_change`,
+  `C23_every_member_agrees_on_expiry_at_same_index` and `I19_lease_expires_late_never_early_across_failover`.
+
+**T39 deviation 4, corrected.** T39 recorded: "Lease time after a failover to a slow clock
+stands still. If the new leader's clock is behind log time, stamps advance by 1 ms per entry
+until the clock catches up; that is the spec's own rule (time never turns back) and not
+something this ticket changed." That described the stamping rule but missed the consequence:
+the idle tick was gated on the wall clock against that 1 ms stamp, so with no user entries
+nothing was appended at all for the whole skew and no lease or session could run out. Read it
+now as: "User entries under a trailing clock stamp 1 ms apart (the C19 rule). The idle tick is
+gated and stamped on the leader's log clock, log time at its election plus its own elapsed
+time, so it keeps appending every interval and carries log time forward at the real rate
+whatever the wall clock says (T50)."
+
+**Deviations:**
+
+1. **The tick's stamp is `max(C19 rule, log clock)`, not the literal spec 5 formula.** Recorded
+   above; the literal formula cannot satisfy I19 on a trailing clock. The user entries' rule is
+   untouched.
+2. **`skew` is computed on every member at every term, not only on the leader.** It is one
+   volatile long written by the Raft thread when the term's first entry applies; a follower
+   never reads it. Computing it before `appliedTerm` is what keeps a leader from ticking with a
+   stale skew, and doing it unconditionally is one line shorter than gating on leadership.
+3. **A clock that steps backwards during a leadership is not repaired.** The skew is measured
+   once per term. If the leader's own clock later jumps back, the log clock jumps back with it
+   and the gate shuts until it catches up, the same failure this ticket fixes but for a clock
+   step rather than a failover; a monotonic source for elapsed time (`System.nanoTime()` since
+   the election) would close it. Not in the ticket; noted as the ceiling.
+4. **A burst of user entries faster than one per millisecond pushes log time ahead of the log
+   clock**, by the size of the burst (the C19 rule's `last + 1`), and no tick is due until the
+   log clock passes it. That is T39's rule, bounded by the burst, and unchanged here.
+
+**For the next ticket:**
+
+- The `stateOnLeader` helper in `FencedLockTest` and `stateOn` in `SessionTest` read a member's
+  state machine at its own applied index without appending an entry; any test that must show
+  "no user command in between" wants one of them.
+- The kit's members all start at the same epoch, so a skew is one `clock(leader).advance` before
+  the entries that should carry it, and the successor's clock is then behind log time by that
+  much; `SKEW` in the two test classes is the constant to reuse.
+- The production tick loop (`ClusterNode`, `DynaCacheServer`) is unchanged: it calls `tick()`
+  every interval on the system clock, and with a zero skew the gate reads as it always did.
