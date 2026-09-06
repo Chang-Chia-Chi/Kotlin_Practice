@@ -4501,3 +4501,117 @@ against. `submitOn` stands in for coordinator failover; when spec 5.1 step 7 lan
 node. The tombstone gap (deviation 1) is the one convergence finding: `AntiEntropy.held` is the
 place, and a checker that compares versions of absent keys too is one `?.let` away in
 `assertConverged`. `AntiEntropy.run()` is still not launched by any node assembly.
+
+## T46: P5 acceptance
+
+**Built:** the CP subsystem on a cluster node, and the demo that drives both engines through one
+socket.
+
+`ClusterNode` gains four constructor arguments -- `cpMembers`, `cpAddresses`, `cpPort`, `cpRaft` --
+and one field. When a group is named it builds its Raft store (a `FileRaftStore` under
+`<dataDir>/cp`, in memory when the node persists nothing), the runtime on top of it, a `CpEngine`
+and a `CpGrpcServer`, hands the CP engine to `DynaCacheServer` so the dispatcher has both sides,
+starts the Raft member before the RESP port opens, adds the leader's `RaftRuntime.tick()` to the
+server's tick lambda, and closes the lot between cancelling the scope and closing the transport.
+A node the group leaves out takes a `ForwardingCpEngine` instead -- the same call, one branch
+inside it (CP spec 2.2, 2.4).
+
+`cpNode(self, members, addresses, port, storeDir, clock, raft)` in `DynaCacheServer.kt` is now the
+one place a member is assembled, in the order T43 named: store, runtime, engine, gRPC server. It
+was `main`'s private helper over two command-line strings; the string parsing moved out to
+`cpNodeFromArgs` and `cpAddressBook`, so single-node `main` and `clusterMain` build a member the
+same way. Two things followed from that:
+
+- **The single node's Raft log is now durable.** `main` passes `dir?.resolve("cp")`, where before
+  it passed no store at all and a member forgot its term, vote and log on restart (the T45 note).
+- **Cluster mode can run CP at all.** `main` returned into `clusterMain` before it read positional
+  arguments 4 and 5, so `--peers` swallowed the CP group. `clusterMain` now takes `cp-members` and
+  passes it through; `--node` already says which entry this node is, so the `cp-self` positional
+  has nothing to add there and is ignored, which the README says.
+
+`cpRaft` is a calibration knob, not a constant: a failover takes as long as a heartbeat timeout,
+and what that should be is an operator's call about a real network. Production keeps MicroRaft's
+defaults; the acceptance test passes T45's kit timings (200 ms election, 1 s heartbeat period, 2 s
+heartbeat timeout) so a failover it waits on resolves in seconds.
+
+**Concepts named:** none new. The vocabulary is CP spec 2.2's (**CP member**, **AP-only node**) and
+T43's (**address book**), and the only idea this ticket adds is where they attach to the assembly
+T24 named: a node is still an assembly, and the CP subsystem is one more field, one more thing the
+tick does, and one more argument to the server it already builds. The **store** (T45) is the seam
+that made this a wiring change rather than a design one.
+
+**Acceptance:**
+- `P5_acceptance_two_engines_one_cluster` (server), one method on the P2/P4 harness -- three nodes
+  in one JVM, ephemeral RESP, cluster-gRPC and CP-gRPC ports, real gossip and a real three-member
+  Raft group over sockets, N=3 W=2 R=2, Jedis unmodified -- in about 3.5 seconds:
+  - **the counter, through unmodified Jedis.** `SET cp:counter:x 5 EX 10`, `INCR` returns 6, and
+    `GET` returns the *integer* 6. The `GET` is what says which engine answered: a CP counter
+    replies `:6` where the AP engine would have replied with the bulk string `6` (CP spec 6.2), so
+    a value that came back as a Long came through the Raft log and not the ring.
+  - **the lock, through `RespClient`.** `CP.LOCK.TRY cp:lock:demo 30000` is granted with a token;
+    a second connection, which is a second session, is refused with `[0, 0]` (I13).
+  - **the leader killed.** The leader is found through `CP.INFO`, that whole `ClusterNode` is
+    closed, and a surviving member's `CP.LOCK.STATE` reports the same owner and the same fencing
+    token (I14). The connection that took the lock died with the node; the lock did not.
+  - **the session closed.** `CP.SESSION.CLOSE <sid>` from a surviving member releases everything
+    the session held (C18, I15) and the waiting client then takes the lock with a strictly greater
+    token (C17).
+- Mutation-checked twice, each reverted and the build re-run:
+  1. `cp?.runtime?.start()` removed from `ClusterNode.start()`: no member ever leads and the test
+     fails on its 20-second deadline.
+  2. `cp?.close()` removed from `ClusterNode.close()`: the killed leader keeps leading from beyond
+     the grave, no survivor names a leader that is still in the test's node list, and the failover
+     assertion times out.
+- The spec 9 AP demo (`P4AcceptanceTest`) passes in the same run, as do P1 and P2.
+- Full offline `mvn -B -o clean package`, BUILD SUCCESS: engine 144, cluster 83, cp 89, server 83.
+- `git merge misc/ai_gen` brought in T30's cluster test kit (`ChaosDriver`, `ConvergenceTest`,
+  `InProcessCluster`, `TokenCodec`), no conflicts; the full build was re-run after it.
+- Re-run five times before the merge: 3.88 to 4.16 seconds, green every time.
+- Size: 207 insertions across three files -- 199 lines of test, 47 in `ClusterNode`, 71 in
+  `DynaCacheServer` (of which about half is the doc comment on the two extracted functions).
+  Inside the budget. The README is excluded per the ticket.
+
+**One race found and fixed during the work.** The first full-build run failed where five targeted
+runs had passed: `cpLeader()` found the node `CP.INFO` named and Jedis was told `-NOTLEADER leader
+is node-1` by node-1 itself. That is C19 at the socket. `RaftRuntime.isLeader` is
+`endpoint == leaderEndpoint && appliedTerm == term`, so a fresh leader names itself for the window
+between winning the election and applying its own term's first entry, and refuses work in it. The
+harness now polls for a member that both names itself and answers a replicated read
+(`CP.LONG.GET cp:counter:probe`), which is what a real client's retry does. Worth recording that
+the targeted runs never saw it -- only a run with the rest of the suite ahead of it did.
+
+**Deviations:** four.
+
+1. **`GET cp:counter:x` is sent as itself rather than through `Jedis.get`.** CP spec 6.2 fixes the
+   reply at `:long`, and `Jedis.get` casts an integer reply to `byte[]` and throws. The test uses
+   `redis.sendCommand(Protocol.Command.GET, ...)`, which is still an unmodified client and no
+   custom-verb API, and the Long that comes back is the assertion that the CP engine answered.
+   Not debt as such -- it is the spec's own shape -- but a caller who wants `Jedis.get` to work on
+   a `cp:counter:` key needs the compat path to answer a bulk string, which would contradict 6.2.
+2. **The session is released by an explicit `CP.SESSION.CLOSE`, not by a heartbeat timeout.** The
+   ticket allowed either. The connection that held the lock died with its node and T44's debt means
+   nothing closed its session, so the close is sent by session id from a surviving member (CP spec
+   6.6) -- which is exactly what the timeout would do a session lifetime later, only on demand and
+   without a wait. The default session timeout is 15 s and the whole test runs in 3.5 s, so the
+   lock is genuinely still held when the failover assertion reads it.
+3. **The CP verbs are sent to the leader, and the harness finds it.** `CpEngine` does not forward;
+   a follower answers `-NOTLEADER <hint>` and CP spec 9.1 step 3 leaves the retry to the client.
+   The test is that client. An AP-only node would forward, but a three-member group in a three-node
+   cluster has no AP-only node, so `ForwardingCpEngine` is wired here and covered by T43's tests
+   rather than by this one.
+4. **The acceptance node uses T45's kit timings, not MicroRaft's defaults.** The default heartbeat
+   timeout is 10 s, so a failover the test waits on would dominate its runtime. `cpRaft` is a
+   constructor argument with MicroRaft's own defaults; only the test passes anything else.
+
+**For the next ticket:**
+- The `cp-self` positional is dead in cluster mode (`--node` says the same thing) and live in
+  single-node mode. If the command line is ever tidied, that is the seam that should collapse.
+- `ClusterNode` now closes its CP part between cancelling the scope and closing the AP transport.
+  The two gRPC servers are separate ports and separate lifetimes; nothing shares them, which is
+  the simplest thing that works and also two listening sockets per node where one would do.
+- T44's debt is still open and is what makes deviation 2 necessary: closing the connection's CP
+  session on `channelInactive` would let this test kill the holder's connection and watch the lock
+  fall free on its own.
+- The README now carries the running instructions, the test tiers and their timings, and the five
+  known debts of the last five progress entries. It is the first document a reader meets, so a
+  ticket that repays one of those debts should strike it from there as well as recording it here.

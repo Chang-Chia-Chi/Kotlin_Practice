@@ -10,11 +10,11 @@ in the same run.
 
 **Nature:** acceptance (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache c03496d + merge 613ae99, merged into misc/ai_gen)
 
-- [ ] `P5_acceptance_two_engines_one_cluster` green
-- [ ] Every test of P1 to P5 green in the same run
-- [ ] Progress entry appended
+- [x] `P5_acceptance_two_engines_one_cluster` green
+- [x] Every test of P1 to P5 green in the same run
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
