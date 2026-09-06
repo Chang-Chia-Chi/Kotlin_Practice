@@ -26,11 +26,11 @@ sealed class Command {
      */
     sealed class Fanned(val keys: List<Key>) : Command() {
 
-        /** The single-key command for argument [index]. */
-        internal abstract fun single(index: Int): Command
+        /** The single-key command for argument [index]. Public so the router splits by coordinator the same way. */
+        abstract fun single(index: Int): Command
 
         /** Joins the per-argument [replies], already in argument order. */
-        internal abstract fun join(replies: List<Reply>): Reply
+        abstract fun join(replies: List<Reply>): Reply
     }
 
     /**

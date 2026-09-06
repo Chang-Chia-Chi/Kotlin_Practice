@@ -92,6 +92,23 @@ It is not the **dispatcher**, which chooses between the AP and the CP engine by 
 sits above it.
 _Avoid_: proxy, forwarder, gateway
 
+**Replica**:
+Any node of a key's preference list; the coordinator is the first of them and a replica too.
+A replica applies what the coordinator ships and answers its reads; it never decides.
+_Avoid_: secondary, follower, slave
+
+**Quorum**:
+How many distinct replicas must answer before a request is answered: W acks for a write and R
+answers for a read, the coordinator counting as one of each, with R + W > N (C4). A quorum
+that does not form within the deadline is an error reply, never a hang.
+_Avoid_: majority (that is Raft's word), consensus
+
+**Version**:
+The DVV a stored value carries; on a node it lives in the replication layer's side table next
+to the engine, keyed by key, so the engine never learns of it. Replicas exchange values with
+their versions, and a read answers with the version that dominates.
+_Avoid_: timestamp, revision, vector clock
+
 ### CP
 
 **Log time**:

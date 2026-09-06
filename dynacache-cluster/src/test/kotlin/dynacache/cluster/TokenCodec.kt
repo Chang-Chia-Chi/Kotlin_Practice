@@ -2,6 +2,7 @@ package dynacache.cluster
 
 import dynacache.engine.Command
 import dynacache.engine.Key
+import java.time.Duration
 
 /**
  * The test kit's stand-in for the wire form a [Router] forwards a command in: the few commands
@@ -16,8 +17,10 @@ object TokenCodec {
     /** The tokens a client would have sent for [command]. */
     fun tokens(command: Command): List<ByteArray> = when (command) {
         is Command.Get -> listOf(name("GET"), command.key.bytes)
-        is Command.Set -> listOf(name("SET"), command.key.bytes, command.value)
+        is Command.Set -> listOf(name("SET"), command.key.bytes, command.value) +
+            (command.ttl?.let { listOf(name("PX"), name(it.toMillis().toString())) } ?: emptyList())
         is Command.Del -> listOf(name("DEL"), command.key.bytes)
+        is Command.Exists -> listOf(name("EXISTS"), command.key.bytes)
         is Command.IncrBy -> listOf(name("INCRBY"), command.key.bytes, name(command.delta.toString()))
         is Command.HSet -> listOf(name("HSET"), command.key.bytes) + command.entries.flatMap { listOf(it.first, it.second) }
         is Command.HGetAll -> listOf(name("HGETALL"), command.key.bytes)
@@ -28,8 +31,13 @@ object TokenCodec {
     fun command(tokens: List<ByteArray>): Command =
         when (val verb = tokens[0].decodeToString().uppercase()) {
             "GET" -> Command.Get(Key(tokens[1]))
-            "SET" -> Command.Set(Key(tokens[1]), tokens[2])
+            "SET" -> Command.Set(
+                Key(tokens[1]),
+                tokens[2],
+                ttl = tokens.getOrNull(4)?.let { Duration.ofMillis(it.decodeToString().toLong()) },
+            )
             "DEL" -> Command.Del(Key(tokens[1]))
+            "EXISTS" -> Command.Exists(Key(tokens[1]))
             "INCRBY" -> Command.IncrBy(Key(tokens[1]), tokens[2].decodeToString().toLong())
             "HSET" -> Command.HSet(Key(tokens[1]), tokens.drop(2).chunked(2).map { it[0] to it[1] })
             "HGETALL" -> Command.HGetAll(Key(tokens[1]))

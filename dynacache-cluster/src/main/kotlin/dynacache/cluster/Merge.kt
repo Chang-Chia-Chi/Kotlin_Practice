@@ -25,7 +25,10 @@ fun merge(local: Versioned, remote: Versioned, counter: DotCounter): Versioned =
     }
 }
 
-private val byDot = compareBy<Versioned>({ it.dvv.dot.node }, { it.dvv.dot.counter })
+/** Spec 2.5's tiebreak between concurrent versions, made total: the higher dot, node name first. */
+internal val lastWriter: Comparator<Dvv> = compareBy({ it.dot.node }, { it.dot.counter })
+
+private val byDot = compareBy(lastWriter, Versioned::dvv)
 
 /**
  * The table of spec 2.5 for two concurrent values, [later] being the last writer's. A string,

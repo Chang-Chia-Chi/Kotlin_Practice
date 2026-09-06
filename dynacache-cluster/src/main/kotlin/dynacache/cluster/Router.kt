@@ -33,13 +33,15 @@ import kotlinx.coroutines.launch
  * namespace; the router sits under that choice and moves one command between nodes.
  *
  * [run] is the node's one inbound loop and owns the demux: `Forward` and `ForwardReply` are
- * the router's, and every other envelope goes to [gossip], which is `Swim::deliver`.
+ * the router's, and every other envelope goes to [others]: `Replication.receive` first and then
+ * `Swim::deliver`, composed by whoever wires the node.
  *
  * @param local the engine that runs a command this node coordinates.
  * @param tokens the wire form of a command: what a client would have sent for it.
  * @param parse the inverse, applied to the tokens a peer forwarded.
  * @param scope the node's lifecycle scope; a forward and its deadline live on it.
  * @param deadline how long a forward may take before its future answers with an error.
+ * @param others where every envelope that is not a forward goes.
  */
 class Router(
     val self: NodeId,
@@ -51,7 +53,7 @@ class Router(
     private val parse: (List<ByteArray>) -> Command,
     private val scope: CoroutineScope,
     private val deadline: Duration = 2.seconds,
-    private val gossip: suspend (Envelope) -> Unit = {},
+    private val others: suspend (Envelope) -> Unit = {},
 ) : CommandEngine {
 
     private val pending = ConcurrentHashMap<Long, CompletableFuture<Reply>>()
@@ -59,13 +61,26 @@ class Router(
 
     /**
      * Spec 5.1 steps 2 and 3. Only a single-key command has a coordinator: a keyless command
-     * answers for this node, and a multi-key one runs through the engine's own fan-out, which
-     * T22 revisits once a write has replicas to reach.
+     * answers for this node, and a multi-key one is [split] into single-key parts first.
      */
     override fun submit(command: Command): CompletableFuture<Reply> {
+        if (command is Command.Fanned) return split(command)
         val key = (command as? Command.Keyed)?.key ?: return local.submit(command)
         val coordinator = ring.preferenceList(key, n).first()
         return if (coordinator == self) local.submit(command) else forward(coordinator, command)
+    }
+
+    /**
+     * ADR 0002 across nodes: each part is routed like the single-key command it is, one after
+     * the previous one answered so a repeated key keeps its last value, and the replies join in
+     * argument order. Nothing is atomic across parts.
+     */
+    private fun split(command: Command.Fanned): CompletableFuture<Reply> {
+        var parts = CompletableFuture.completedFuture(emptyList<Reply>())
+        for (index in command.keys.indices) {
+            parts = parts.thenCompose { replies -> submit(command.single(index)).thenApply { replies + it } }
+        }
+        return parts.thenApply(command::join)
     }
 
     /**
@@ -94,10 +109,10 @@ class Router(
     /** One inbound envelope. Public so a test can hand the router one without a loop. */
     suspend fun receive(envelope: Envelope) {
         when (envelope.bodyCase) {
-            Envelope.BodyCase.FORWARD -> coordinate(NodeId(envelope.from), envelope.forward)
+            Envelope.BodyCase.FORWARD -> scope.launch { coordinate(NodeId(envelope.from), envelope.forward) }
             Envelope.BodyCase.FORWARD_REPLY ->
                 pending.remove(envelope.forwardReply.id)?.complete(ReplyWire.decode(envelope.forwardReply.reply))
-            else -> gossip(envelope)
+            else -> others(envelope)
         }
     }
 
@@ -106,9 +121,11 @@ class Router(
      * Tokens this node cannot read are an error reply rather than a throw, because the throw
      * would leave [run] dead and take the node's gossip down with its forwarding.
      *
-     * ponytail: one forwarded command at a time per node, since the demux awaits this; a slow
-     * command delays the envelopes behind it. Running each on [scope] is the repair, and it
-     * costs the in-order delivery the transport promises per pair.
+     * Each forwarded command runs on its own coroutine on [scope]: the coordinator's answer needs
+     * the demux to keep reading, since its quorum's acks and read replies arrive there (T22).
+     *
+     * ponytail: two forwards from one contact may therefore run out of order at the coordinator;
+     * a per-sender queue of forwards is the repair if a pipelining client ever observes it.
      */
     private suspend fun coordinate(from: NodeId, request: Forward) {
         val reply = runCatching { parse(request.tokenList.map(ByteString::toByteArray)) }.fold(

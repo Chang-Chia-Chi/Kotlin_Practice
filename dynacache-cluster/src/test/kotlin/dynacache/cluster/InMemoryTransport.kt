@@ -78,9 +78,12 @@ class InMemoryTransport {
     private fun reachable(from: NodeId, to: NodeId): Boolean =
         from !in dead && to !in dead && (sides.isEmpty() || sides.any { from in it && to in it })
 
+    /** Whether any envelope is still waiting to be delivered. */
+    val inFlight: Boolean get() = pairs.values.any { it.isNotEmpty() }
+
     /** Runs delivery rounds until nothing is in flight, yielding between rounds. */
     suspend fun drain() {
-        while (pairs.values.any { it.isNotEmpty() }) {
+        while (inFlight) {
             round++
             for ((pair, queue) in pairs) {
                 while (queue.isNotEmpty() && queue.first().due <= round) {
