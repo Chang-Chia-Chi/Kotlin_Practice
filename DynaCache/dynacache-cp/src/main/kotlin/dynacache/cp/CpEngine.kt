@@ -2,6 +2,7 @@ package dynacache.cp
 
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
+import dynacache.engine.CpNamespace
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
@@ -19,9 +20,10 @@ import java.util.concurrent.CompletionException
 class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
 
     override fun submit(command: Command): CompletableFuture<Reply> {
-        // C16 at the engine's edge: CP work only, and only on the cp: namespace.
-        if (command !is Command.Cp) return answer(Reply.Error("NOTCP", "$command is not a CP command"))
-        if (!command.key.isCp()) return answer(Reply.Error("NOTCP", "${command.key} is not a cp: key"))
+        // C16 at the engine's edge: CP work only, on the cp: namespace, and only the verbs the
+        // key's own primitive answers. CpNamespace holds that rule for every reader of it.
+        if (command !is Command.Cp) return answer(CpNamespace.notCp("$command is not a CP command"))
+        CpNamespace.refusalFor(command)?.let { return answer(it) }
         // CP spec 6.7 asks this member what it can see, which every member can answer.
         if (command is Command.Cp.Introspection) return introspect(command)
         if (!runtime.isLeader) return answer(notLeader())
@@ -68,6 +70,4 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
     private fun answer(reply: Reply) = CompletableFuture.completedFuture(reply)
 
     private fun Throwable.cpCause(): Throwable = if (this is CompletionException) cause ?: this else this
-
-    private fun Key.isCp(): Boolean = toString().startsWith("cp:")
 }
