@@ -17,10 +17,15 @@ class AtomicReferenceStateMachine {
     fun apply(command: Command.Cp.AtomicReference, now: Long): Reply {
         val current = references[command.key]?.takeUnless { it.expired(now) }
         return when (command) {
-            is Command.Cp.RefSet -> {
-                references[command.key] = Reference(command.value, command.ttl?.let { now + it.toMillis() })
-                Reply.Simple("OK")
-            }
+            is Command.Cp.RefSet ->
+                // The Redis lock idiom: NX takes the reference only when nothing live holds it and
+                // XX only when something does, with the lease applied in the same entry (I21).
+                if (command.condition?.refuses(current != null) == true) {
+                    Reply.Bulk(null)
+                } else {
+                    references[command.key] = Reference(command.value, command.ttl?.let { now + it.toMillis() })
+                    Reply.Simple("OK")
+                }
             is Command.Cp.RefGet -> Reply.Bulk(current?.value)
             is Command.Cp.RefCas ->
                 if (current == null || !current.value.contentEquals(command.expected)) {
