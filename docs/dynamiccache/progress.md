@@ -2434,3 +2434,183 @@ engine 100, cluster 39, cp 47, server 30.
 - The production tick loop (plan 2.5) is still unwritten; `tick()` is complete for it, including the
   session sweep, and a failed tick is safe to ignore.
 - `GrpcCpKit` gained `heartbeat(member, sessionId)` and a private `stub(member)` shared with `applyDirect`.
+
+## T19: Request router
+
+**Built:** `dynacache.cluster.Router` is one node's request router (spec 5.1 steps 1 to 3, 5.2
+step 1) and presents the `CommandEngine` shape, so T13's pipeline submits to it exactly as it
+submits to an engine. `submit` takes the key of a `Command.Keyed`, asks
+`ring.preferenceList(key, n).first()` who coordinates it, and either runs it on the local engine
+or forwards it; a keyless command, a `Scan`, a `Ping` and a `Command.Cp` have no coordinator and
+run locally, and a `Command.Fanned` runs through the engine's own fan-out (T22 revisits). A
+forward is a `Forward` envelope carrying the command's tokens under an id unique to the sending
+router, a `CompletableFuture` parked in a `pending` map, and one coroutine on the node's scope
+that sends it and then sleeps the deadline; whichever of the reply and the deadline arrives
+first takes the future out of the map, so the same coroutine is both the timeout and the
+cleanup. A missed deadline answers `Reply.Error("ERR", "forward timeout after 2s waiting for
+<node>")`. On the coordinator's side `receive` parses the tokens, submits locally and sends a
+`ForwardReply` under the same id; an error reply crosses like any other reply.
+
+`cluster.proto` gains `Forward` (id, repeated bytes token), `ForwardReply` (id, `ReplyMsg`) and
+`ReplyMsg` with `ErrorReply`, `BulkReply` and `ArrayReply` under it: a `Reply` in exactly the
+five RESP2 shapes. `ReplyWire` (in `Router.kt`) maps a `Reply` to it and back. `Router.run` is
+the node's one inbound loop and owns the demux T20 asked this ticket to own: `Forward` and
+`ForwardReply` are the router's, and every other envelope goes to the injected `gossip`
+function, which is `Swim::deliver`. `Swim` gained exactly that one method, a public alias of its
+existing private `handle`. `InProcessCluster` takes a `CoroutineScope`, builds a `Router` per
+node, launches each router's loop on that scope, and `writeVia`/`readVia` go through the
+contact's router; `readAllReplicas` still reads each replica's engine directly, since its
+question is what each replica holds. `TokenCodec` is the test kit's wire form of the handful of
+commands the kit exercises. `mvn -B -o clean package` offline: engine 100, cluster 44, cp 24,
+server 30. 495 lines including tests, nine files.
+
+**Concepts named:** A **contact node** is the node a client happened to reach; it is the
+**coordinator** of the keys it owns and forwards the rest, and the client never learns the
+difference. Both are new CONTEXT.md entries, together with **Router**, which had to be told
+apart from the **dispatcher**: the dispatcher chooses between the AP and the CP engine by
+namespace and sits above the router, which only decides whether this node coordinates the key.
+The router is a decorator of the `CommandEngine` seam rather than a new seam: it presents the
+frozen shape and its second adapter is the engine it wraps, so nothing downstream of it learns
+that a cluster exists. The **demux** is the node's single reader of `Transport.inbound`: one
+inbound, two consumers, and the router is the one that owns the loop because it is the one with
+a `run()` to put it in. A forwarded command's identity on the wire is its **tokens**, the
+client's own frame, so the coordinator's parser reads it exactly as the contact's would have and
+no second encoding of a `Command` exists anywhere.
+
+**Acceptance:**
+- `router_executes_locally_when_coordinator`: the coordinator's own router submits to a
+  `RecordingEngine` and nothing is sent.
+- `router_forwards_to_coordinator`: a write through a contact that is not the coordinator lands
+  on the coordinator's engine and not on the contact's. Checked by mutation: with `submit`
+  always running locally, it fails.
+- `router_forwarded_reply_identical_to_local`: two identical three-node clusters run the same
+  seven commands, one through a forwarding contact and one on the coordinator itself, and every
+  reply shape the crossing carries -- status, bulk, nil bulk, integer, array and error -- comes
+  back equal. Checked by mutation: with `ReplyWire` dropping `BulkReply.nil`, it fails on the
+  nil bulk.
+- `router_forward_timeout_is_an_error`: a network partition between contact and coordinator; the
+  deadline runs on `runTest`'s virtual clock, no sleeps, and the reply is the timeout error while
+  the coordinator's engine never saw the write. Checked by the same never-forward mutation.
+- `router_unreadable_forward_is_an_error_and_the_node_lives`: tokens the coordinator cannot parse
+  answer with an error instead of throwing out of the demux, and the node forwards again after.
+- `GrpcTransportTest`'s exhaustive `when` gained a `FORWARD` and a `FORWARD_REPLY` branch and
+  round-trips both over real sockets; every earlier test green.
+- This entry.
+
+**Deviations:**
+1. **The router needs a `Command` to tokens direction, and it did not exist.** `submit` receives
+   a `Command`, not the frame it was parsed from, so a `Forward` carrying tokens has to
+   re-spell the command. The ticket named the tokens-to-`Command` direction and offered an
+   injected function for it; the router takes **both** directions as functions
+   (`tokens: (Command) -> List<ByteArray>` and `parse: (List<ByteArray>) -> Command`), which
+   keeps the module graph as plan 2.2 draws it and keeps the wire's spelling in the one place
+   T13 put it. `CommandParser` was not moved.
+2. **The real pair is not written yet.** Only the test kit's `TokenCodec` implements it, covering
+   GET, SET, DEL, INCRBY, HSET and HGETALL and throwing on anything else. The server has no
+   router to wire in this ticket, so the full inverse of `CommandParser` would have had no
+   consumer; whoever wires a router into the server owns it. See "For the next ticket".
+3. **A multi-key command runs on the contact.** `Command.Fanned` (`MGET`, `MSET`, variadic `DEL`
+   and `EXISTS`) is submitted to the local engine, so for a key the contact does not coordinate
+   it reads and writes the wrong node's data. This is what the ticket scopes to T22, and it is
+   the sharpest thing this ticket leaves open.
+4. **`atomically` never forwards.** The signature's `R` is the caller's own type and has no error
+   shape, so a batch whose keys this node does not coordinate comes back as a failed future
+   holding an `IllegalStateException` that names the coordinator, rather than as an error reply.
+   Forwarding the batch was not an option: a batch is a caller's block, which is code. `T14` turns
+   that failure into whatever `EXEC` should answer.
+5. **`Swim.tick()` still drains `inbound` itself.** The minimal change the ticket allowed:
+   `deliver` was added and `tick`'s own `tryReceive` loop left alone, because `SwimTest` drives
+   gossip with no router present and `InProcessCluster` has no `Swim`. Nothing today puts both
+   readers on one channel; the node that runs gossip and forwarding together must feed `Swim`
+   from the demux and let `tick` find an empty inbox, which is what it will find.
+6. **A forward pending at shutdown hangs.** Cancelling the node's scope kills the deadline
+   coroutine before it can complete the future. Debt: a `finally` on the launch completes it.
+   Nothing in P2 shuts a node down under load.
+7. **The demux awaits one forwarded command at a time** (marked `ponytail:`): a slow command on
+   the coordinator delays the envelopes behind it, gossip included. Running each on the node's
+   scope is the repair and costs the in-order delivery the transport promises per pair.
+
+**For the next ticket:** T22 builds replication on top of this. `Router.submit` is where the
+coordinator is known, so the replication fan-out belongs after the local `submit` on the
+coordinator's side, not in the contact's forward. The contact already blocks on one future per
+command, so a quorum's deadline composes with the forward's rather than replacing it. Take
+deviation 3 first: `Command.Fanned` has to split by coordinator the way `ApEngine.fanOut` splits
+by partition, and the pieces are already there in `Fanned.single` and `Fanned.join`.
+
+Whoever wires a router into the server module (T24) owes the real `(Command) -> List<ByteArray>`,
+the inverse of `CommandParser.dispatch`, next to the parser: an exhaustive `when` over
+`Command.Keyed` so a new variant stops the build rather than failing a forward at runtime. Two
+things it will hit: `Command.Expire` holds an absolute `Instant`, and T13 left `PEXPIREAT`
+without a parser row, so that row has to exist before an `EXPIRE` can be forwarded losslessly;
+and `Set`'s TTL should go out as `PX <millis>` since the `Duration` no longer knows which
+spelling it arrived as. A round-trip test over canonical token rows (`tokens(parse(row)) == row`)
+covers it in one line per variant and sidesteps `Command`'s array-valued variants having no
+equality.
+
+`InProcessCluster.settle(future)` is the kit's pump: nothing moves on an `InMemoryTransport`
+until a drain, and a forward needs two, so a test that submits through a router must settle
+rather than await. It drains a bounded number of rounds and then awaits, which is exactly what
+lets a deadline fire in virtual time when no reply is coming. `drainMessages()` now yields after
+the drain so each node's demux reads what arrived. `gossipOn(node)` is what the demux handed to
+gossip on that node, which is how a test asserts an envelope arrived now that no test can read a
+router-owned `inbound` directly; an endpoint for a node the cluster does not have (`network
+.endpoint(NodeId("onlooker"))`) is the way to get a router-free endpoint when a test needs to
+read raw envelopes.
+
+## T34: Fsync policies and group commit
+
+**Built:** `WalWriter` in `dynacache.engine.persist` now takes an `FsyncPolicy` (`ALWAYS`,
+`EVERY_SECOND`, `NEVER`), a `java.time.Clock`, and a `WalSink`, and `append(op, payload)` returns
+a `WalAppend(seq, durable)`: the sequence number at once, and a `CompletableFuture<Unit>` that
+completes when the policy says the entry is on disk. `ALWAYS` fsyncs before completing;
+`NEVER` completes on write; `EVERY_SECOND` completes on the caller's `tick()` once the injected
+clock is at least one second past the last fsync. Group commit: an append encodes its entry,
+takes its seq and enqueues under the writer's monitor, then the first appender to find no
+flusher running becomes the flusher. It drains the queue into one `write` and, under `ALWAYS`,
+one `fsync`, completes those waiters, and loops while the queue refills. `close()` drains what
+is queued, forces what `EVERY_SECOND` still holds, then closes the sink. T33's `WalReader` and
+the on-disk format are untouched. Four new tests in `WalFsyncTest`, JUnit 5 only, `@TempDir`,
+latches and futures with five-second deadlines, no sleeps; T33's four tests in `WalTest` are
+unchanged except two call sites that now read `.seq` off the returned `WalAppend`.
+
+**Concepts named:** A **sink** (`WalSink`: `write`, `fsync`, `close`) is where the log's bytes
+go; it is the one seam this ticket adds, and it has two adapters: `FileChannelSink` (a file
+opened for append, `force(true)` so the size change is on disk too) and the test's counting
+adapter, which also holds the first fsync open so a batch is forced to form. A **flusher** is
+whichever appender holds the `flushing` flag; it is the first to arrive, not a dedicated thread,
+because the engine owns no timers or threads beyond its partition executors (plan 2.5) and a
+lock-free arrival makes the group-commit test deterministic: the first flusher is held inside
+its fsync, the other ninety-nine enqueue and return, and the next drain holds them all. A
+**durability future** (`WalAppend.durable`) is what T35 replies after (C14). The flusher
+re-checks the queue after releasing the flag, so an entry enqueued between drain and release is
+never stranded.
+
+**Acceptance:**
+- `wal_fsync_always_durable`: five appends, the fsync count rises one per append and every
+  future is done when `append` returns.
+- `wal_fsync_every_second_batches`: fifty appends, zero fsyncs and no future done; a tick at
+  999 ms still nothing; a tick at 1000 ms one fsync and all fifty done; an idle tick forces
+  nothing; a fifty-first append and a tick a second later gives the second fsync.
+- `wal_group_commit_amortizes`: 100 appenders on a 100-thread pool under `ALWAYS`; every future
+  completes and the sink saw at most two writes and two fsyncs.
+- `wal_group_commit_preserves_seq_order`: the same 100 appenders; the file reads back
+  `CLEAN_END` with seqs 1..100 in order, the returned seqs sorted are 1..100, and the payload
+  stamped under each returned seq is the one that appender wrote. Passed on its first run: the
+  FIFO queue drained by a single flusher gives it by construction; the test pins it.
+- This entry.
+
+**Deviations:** None against the ticket, the plan or spec 2.8. Judgement calls: `append` returns
+`WalAppend(seq, durable)` rather than `CompletableFuture<Long>`, so a caller knows its seq
+without waiting for durability. `tick()` under `ALWAYS` and `NEVER` is a no-op. `tick()` forces
+only what was written before it looked, so an entry written during the fsync completes on the
+next tick, never early. The path constructor defaults to `NEVER` and `Clock.systemUTC()` so T33
+call sites compile unchanged; T35 should pass both explicitly. A write or fsync that throws
+`IOException` completes that batch's futures exceptionally and the writer stays usable.
+
+**For the next ticket:** T35 wires `WalWriter` into the engine: reply after `durable`, and own
+the scheduler that calls `tick()` (a one-second period is the spec's "lose at most 1s"). `close()`
+while another thread is mid-flush closes the channel under it; that flusher's batch completes
+exceptionally. Stop appending before closing. `WalSink` has no `truncate`: checkpoint truncation
+(T35) needs its own handle on the file, as T33 already noted. `EVERY_SECOND` counts from the
+last fsync, not from the first unforced write, so a burst after idle time is forced at the next
+due tick, at most one second after the last fsync.

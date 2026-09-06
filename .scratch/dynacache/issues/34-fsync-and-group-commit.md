@@ -10,13 +10,13 @@ boundary).
 
 **Nature:** concurrent durability protocol (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 448f668, merged into misc/ai_gen)
 
-- [ ] `wal_fsync_always_durable`: one fsync per append
-- [ ] `wal_fsync_every_second_batches`: fsync count far below append count
-- [ ] `wal_group_commit_amortizes`: 100 concurrent appenders, fsync count far below 100, every appender completes
-- [ ] `wal_group_commit_preserves_seq_order`
-- [ ] Progress entry appended
+- [x] `wal_fsync_always_durable`: one fsync per append
+- [x] `wal_fsync_every_second_batches`: fsync count far below append count
+- [x] `wal_group_commit_amortizes`: 100 concurrent appenders, fsync count far below 100, every appender completes
+- [x] `wal_group_commit_preserves_seq_order`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

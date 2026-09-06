@@ -10,11 +10,11 @@ forwarded errors pass through unchanged; a forward that misses its deadline is a
 
 **Nature:** routing adapter, spec 5.1 steps 1 to 3 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 8be8837, merged into misc/ai_gen)
 
-- [ ] `router_executes_locally_when_coordinator`, `router_forwards_to_coordinator`
-- [ ] `router_forwarded_reply_identical_to_local`, `router_forward_timeout_is_an_error`
-- [ ] Progress entry appended
+- [x] `router_executes_locally_when_coordinator`, `router_forwards_to_coordinator`
+- [x] `router_forwarded_reply_identical_to_local`, `router_forward_timeout_is_an_error`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
