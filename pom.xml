@@ -26,9 +26,6 @@
     </properties>
 
     <modules>
-        <module>dynacache-engine</module>
-        <module>dynacache-cluster</module>
-        <module>dynacache-server</module>
         <module>snapshotcache</module>
         <module>SimpleEtl</module>
         <module>composed-host-example</module>
