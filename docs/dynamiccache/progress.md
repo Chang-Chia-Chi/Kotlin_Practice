@@ -5635,3 +5635,114 @@ checker is free to place it or drop it.
 negated delta like the other three, so the deletion is still one variant, one wire arm and one
 branch. If a `-CAPACITY` rule is ever built, `add` is the single place both the INCR family and
 GETADD pass through.
+
+---
+
+## T61 - SET NX and SET XX on cp: keys
+
+**Built:** the Redis lock idiom now works on the CP namespace. `SET cp:ref:lock v NX PX 30000`
+takes the reference only when nothing live holds it, with the lease applied in the same committed
+entry, and `SET ... XX` writes only what is already there; the same on a `cp:counter:` key with a
+numeric value. Four changes, in the order the command travels:
+
+1. **The model.** `Command.Cp.LongSet` and `Command.Cp.RefSet` each gain a trailing
+   `condition: Set.Condition? = null`, reusing the enum `Command.Set` already has rather than
+   inventing a second vocabulary for NX/XX. That was the smaller of the two shapes the ticket
+   offered (an optional condition versus a sibling conditional variant): every existing call site
+   compiles unchanged, the `when` in `CpWire` and in both state machines keeps one arm per verb,
+   and nothing else in the CP hierarchy grows a variant. `RefSet`'s hand-written
+   `equals`/`hashCode`/`toString` include the condition.
+2. **The rule.** `Command.Set.Condition.refuses(exists: Boolean)` says what NX and XX mean in one
+   place: NX refuses a key that exists, XX refuses one that does not. Both CP state machines read
+   it; the AP partition still spells the same three lines out in its own `SET` branch, because the
+   AP engine is outside this ticket's seams (noted below).
+3. **The dispatcher.** `CommandDispatcher.compat`'s `SET` branch no longer refuses a conditional
+   SET with `-NOTCP`. It passes `command.condition` into the SET verb of the kind the key names,
+   exactly as it already passed the TTL. The counter arm still reads the value as a number first,
+   so `SET cp:counter:x banana NX` is `-ERR value is not an integer or out of range` and not nil:
+   the value is parsed before the condition is looked at.
+4. **The state machines.** `AtomicLongStateMachine` and `AtomicReferenceStateMachine` each test the
+   condition against the key's presence at that entry's log time and answer `Reply.Bulk(null)` when
+   it refuses, otherwise write the value and the TTL as before. Condition, value and TTL are one
+   applied entry, so no reader sees a half state (I21), and nothing reads a clock, so a lease still
+   runs on log time (CP spec 5, 9.4).
+
+Diff: 310 insertions, 28 deletions over eight files. Main code is 99 of those insertions - 43 in
+`Command.kt` (most of it the two KDoc blocks and `refuses`), 30 in `CpWire.kt`, 9 in
+`CommandDispatcher.kt`, 9 in `AtomicReferenceStateMachine.kt`, 8 in `AtomicLongStateMachine.kt` -
+and 211 are tests: 163 in `CpRoutingTest.kt`, 32 in `CommandDispatcherTest.kt`, 16 in
+`CpWireTest.kt`.
+
+**Encoding and wire tags:** no new wire tag. The condition rides on the two existing SET tags,
+`CMD_SET` (1) and `CMD_REF_SET` (28), as one byte written after the TTL, so nothing collides with
+T60's new CP tag or with anything at 40 and above. The byte is spelled out
+(`NO_CONDITION` 0, `CONDITION_NX` 1, `CONDITION_XX` 2) in a `when` rather than taken from the enum's
+ordinal, because a log entry outlives the declaration order of a Kotlin enum, and an unknown byte is
+an `error(...)` the way an unknown tag already is. A `readTtl()` helper was pulled out while both
+SET decoders were being touched, since three call sites spelled the same `takeIf { it != NO_TTL }`
+out.
+
+**Reply shapes:** the compat path answers Redis's shapes exactly - `+OK` when the conditional SET
+takes, nil bulk when it is refused - and the dispatcher rewrites nothing, so the CP verb has the
+same two shapes. There is no second shape to record: the reply is produced once, in the state
+machine, and the `CP.LONG.SET`/`CP.REF.SET` spelling would answer the same `+OK`/nil if a parser row
+is ever added for the condition.
+
+**Acceptance (all in a real three-member CP group behind the RESP socket, `CpRoutingTest`):**
+- `compat_set_nx_on_ref_key_acquires_once`: nine clients on nine connections, released together by
+  a `CountDownLatch` and not a sleep, race `SET cp:ref:lock owner-N NX`; exactly one reads `+OK`,
+  the other eight read nil, and `GET` returns the winner's bytes.
+- `compat_set_nx_px_expires_on_log_time`: `SET ... NX PX 30000` takes, a second `NX` is nil, `PTTL`
+  reads the lease; the leader's clock 31 s on and one `tick()` past the deadline, `GET` is nil and
+  the next `SET ... NX` takes.
+- `compat_set_xx_on_missing_key_is_nil` (and the refusal wrote nothing) and
+  `compat_set_xx_on_present_key_replaces` (bytes replaced, and `TTL` is -1 because a plain SET
+  clears the lease it replaces, as Redis does).
+- The same four behaviours on a counter, over three tests rather than four:
+  `compat_set_nx_on_counter_key_acquires_once`, `compat_set_nx_px_on_counter_expires_on_log_time`,
+  `compat_set_xx_on_counter_key_is_nil_then_replaces` (which also holds the `-ERR` for a
+  non-numeric value under `NX`).
+- `compat_conditional_set_retargets_to_the_kinds_set_verb` (`CommandDispatcherTest`): the four
+  conditional spellings reach the CP engine as `LongSet`/`RefSet` carrying the condition and the
+  TTL, and the AP engine sees none of them. The old row asserting `-NOTCP` for a conditional SET is
+  gone from `a cp key outside the compat set is NOTCP`, which now also asserts that `NX` does not
+  excuse a non-numeric counter value; `I22_namespaces_never_cross` is untouched and passes.
+- `conditional_set_commands_round_trip` (`CpWireTest`): both kinds, both conditions, with and
+  without a TTL, so a follower applies the rule the leader replicated.
+- Red before green: the dispatcher slice failed to compile against the old model, then passed. For
+  the end-to-end slice, `refuses` was temporarily stubbed to prove the tests are load-bearing -
+  NX disabled fails 4 of them, XX disabled fails the other 2 - and then restored.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 93 (92 + 1), server 101
+  (93 + 8), all green. The server base is 93 and not the 91 the briefing expected; the eight new
+  tests are one in `CommandDispatcherTest` and seven in `CpRoutingTest`.
+
+**Deviations:**
+1. **The counter's four behaviours are three tests, not four.** The acceptance list names four test
+   names for the reference and says "the same four behaviours" for the counter without naming them;
+   the two XX behaviours on a counter share one test because they share one session, which is one
+   less three-member Raft group to start.
+2. **No `NX`/`XX` on the `CP.LONG.SET` / `CP.REF.SET` spelling.** The ticket calls exposing it free,
+   not required, and the fix asked for is the compat path. The commands carry the condition, so a
+   parser row is two lines whenever a ticket wants the CP spelling; the parser's command rows are
+   outside this ticket's seams anyway.
+3. **The NX/XX rule is stated twice in the tree.** `Condition.refuses` is the one statement of it,
+   but `Partition.run`'s `SET` branch still has its own three-line `when`, because the AP engine is
+   outside this ticket's seams. Folding that call site is a one-line change whenever the AP engine
+   is open.
+4. **Two Kotlin warnings sit on a re-wrapped line.** The compiler reports
+   "identity-sensitive operation on an instance of value type `Duration?`" twice at
+   `RefSet.equals`'s `ttl == other.ttl`. The diff only re-wrapped that expression to fit the new
+   `condition` term beside it; the comparison itself is unchanged from T42.
+5. **The namespace rule is still the key prefix.** `compat` reads `cp:ref:` to pick the kind, as it
+   has since T44 and T54. Ticket 71 folds it.
+
+**For the next ticket:**
+- **Ticket 71** folds the kind lookup: `compat` now branches on `reference` in five arms (`GET`,
+  `SET`, `EXPIRE`, `TTL`, `PERSIST`), and the conditional SET added here is inside the existing
+  `SET` arm, so it costs 71 nothing extra. Its `compat_set_matches_cp_spec_9_5` should assert that
+  `SET` with a condition is in the compat set, which it now is.
+- **Ticket 62**, the reply-shape ledger, has one thing to record that this ticket did not
+  introduce: `SETNX k v` parses to `Command.Set(..., NX)` and therefore answers `+OK`/nil on both
+  engines, where Redis's `SETNX` answers 1/0. That divergence is the parser's and predates T61; it
+  is now reachable on `cp:` keys as well as AP ones.
+- **T60's wire tag** does not collide: this ticket added no tag and used no number at 40 or above.
