@@ -12,13 +12,13 @@ from the future to coroutines. See ADR 0001.
 
 **Nature:** concurrency and invariant work (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 97f5336, merged into misc/ai_gen)
 
-- [ ] `string_set_get_roundtrip`, `string_set_nx_rejects_existing`, `string_set_xx_rejects_missing`, `string_set_ex_expires` (clock advanced, never slept)
-- [ ] `C1_one_command_at_a_time_per_partition`: two commands on one partition never overlap and commands on two partitions may (Lincheck or an interleaving test with a blocking command)
-- [ ] `keys_with_same_hash_tag_share_a_partition`
-- [ ] `DEL`, `EXISTS`, `TYPE`, `PING` reply with Redis shapes
-- [ ] Progress entry appended
+- [x] `string_set_get_roundtrip`, `string_set_nx_rejects_existing`, `string_set_xx_rejects_missing`, `string_set_ex_expires` (clock advanced, never slept)
+- [x] `C1_one_command_at_a_time_per_partition`: two commands on one partition never overlap and commands on two partitions may (Lincheck or an interleaving test with a blocking command)
+- [x] `keys_with_same_hash_tag_share_a_partition`
+- [x] `DEL`, `EXISTS`, `TYPE`, `PING` reply with Redis shapes
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

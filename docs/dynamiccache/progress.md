@@ -189,3 +189,75 @@ entry or after a checkpoint, and `WalScan.entries.last().seq` gives it the numbe
 opens the channel in `APPEND` mode, so T34's group commit must batch before the channel, not
 seek within it, and T35's checkpoint truncation needs its own handle. `WalScan` carries no
 `nextSeq` field because nothing needed one yet.
+
+## T02: Engine walking skeleton and partition executors
+
+**Built:** `ApEngine(partitionCount, clock)` owns a fixed list of `Partition`s. Each partition is
+one JDK single-thread executor (daemon thread named `partition-<i>`) and a `HashMap<Key, Entry>`
+that only that thread touches. `partitionOf(key)` is `key.hash % partitionCount`;
+`submit(command)` picks the partition from the command's key (keyless `PING` runs on partition
+0) and returns `CompletableFuture.supplyAsync(...)` on that executor, so the future completes on
+the partition thread. `Command` gains `Get`, `Set(key, value, condition: Condition?, ttl:
+Duration?)` with `enum Condition { NX, XX }`, single-key `Del`, `Exists`, `Type`. `SET` with a
+TTL stores `now + ttl` as an absolute `Instant`; every access goes through one `live(key, now)`
+helper that deletes an expired entry and reports it absent (spec 5.4 lazy check). The injected
+`Clock` is read exactly once per command. `close()` calls `shutdown()` on every executor.
+`dynacache-cluster` gains `suspend fun <T> CompletableFuture<T>.await()`, an alias of kotlinx's
+own future bridge so callers import the cluster's name only. `atomically` is still
+`TODO("T14: batches")`.
+
+**Concepts named:** `Partition` (internal) is the CONTEXT.md partition made concrete: executor
+plus store plus the command interpreter, one class. `Entry(value, expiresAt)` is the stored
+cell; `expiresAt == null` means no TTL. `live` is the one place the lazy expiry rule lives, so
+T09's wheel only has to remove keys earlier, never re-check. `Set.Condition` models NX/XX as one
+nullable enum rather than two booleans, so both flags at once is unrepresentable and the parser
+(T13) rejects that combination at the wire. `EX` and `PX` both arrive as a `Duration`; the
+distinction is wire syntax, not engine meaning. Seams unchanged: `CommandEngine`,
+`PartitionContext`, `Reply`, `Key`, `PartitionId` are exactly T01's.
+
+**Acceptance:**
+- `string_set_get_roundtrip`, `string_set_nx_rejects_existing` (value unchanged after the
+  rejected SET), `string_set_xx_rejects_missing` (key still absent): green.
+- `string_set_ex_expires`: SET EX 1, clock advanced 999 ms, value present; advanced 2 ms more,
+  nil. A `MutableClock` in the test; nothing sleeps.
+- `C1_one_command_at_a_time_per_partition`: every command reads the clock once on its partition
+  thread, so the test injects a gate clock that records `Thread.currentThread()` and blocks in
+  `instant()` until released. Sequence: submit GET on `{p}.1` (enters, blocks); submit GET on
+  `{p}.2` (same partition); submit GET on a key found via `partitionOf` to be elsewhere; the
+  semaphore shows a second entrant while the first is still blocked (partitions overlap) and
+  the queued future is not done; release; the third recorded thread is the same object as the
+  first (the queued command waited for the busy partition's one thread) and the second differs
+  (the other partition ran concurrently). Mutation check: with the partition executor swapped
+  to a two-thread pool the test fails on the thread-identity assertion. No test-only `Command`
+  variant; the clock is the one allowed boundary mock.
+- `keys_with_same_hash_tag_share_a_partition`: `{user1}.a` and `{user1}.b`, and `{user1}` and
+  `x{user1}y`, share `partitionOf`.
+- Redis shapes: `DEL replies 1 for a deleted key and 0 for a missing one`, `EXISTS replies 1
+  for a live key and 0 for a missing or expired one`, `TYPE replies string for a String key and
+  none for a missing one`, `PING replies PONG`. Cluster: `a coroutine awaits the engine's reply
+  without blocking on the future` (under `runBlocking`; coroutines-test is not a cluster
+  dependency and a real executor completes the future).
+- This entry.
+
+**Deviations:** None against plan 2.3, the frozen types or the ticket. Judgement calls: (1) the
+expiry boundary is "readable through the deadline instant, gone after it"
+(`now.isAfter(expiresAt)`), Redis's `now > when`; T09's C7 test should assume the same. (2)
+`PING` runs on partition 0's executor rather than completing inline, so every command has one
+path and the C1 gate can use any command. (3) `Command.Set` is a plain class, not a data class,
+because `ByteArray` equality is by reference. (4) Lincheck was unavailable offline; the
+gate-clock interleaving test above is the C1 proof, and it is deterministic in both directions
+(it cannot pass with a multi-thread partition, since the busy thread cannot host the third
+command). (5) The T01 server test that asserted the `submit` stub threw was rewritten to assert
+PING through a real engine.
+
+**For the next ticket:** `ApEngine.keyOf` is a `when` over every variant and
+`Partition.execute` is another; T03 adds many variants and should consider whether a keyed
+intermediate is worth the frozen-shape change (it was not for six commands). Multi-key
+`DEL`/`EXISTS`/`MGET`/`MSET` fan-out (ADR 0002) belongs in `ApEngine.submit`, not in
+`Partition`; a partition still only ever sees single-key work. `Entry.value` is a bare
+`ByteArray`; T03/T04 will want a small sealed value type for Hash and List and `TYPE`, and C13's
+type check should sit in front of `Partition.execute`'s branches. `live()` is the only expiry
+hook: T09 schedules on the wheel in the `Set` branch and cancels in `Del`. The executors are
+daemon threads; `close()` is `shutdown()`, not `shutdownNow()`, so queued commands still
+complete. `atomically` (T14) should run `block` via the same executor with a `PartitionContext`
+that calls `execute` directly.
