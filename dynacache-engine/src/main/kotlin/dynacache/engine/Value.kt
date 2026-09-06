@@ -7,7 +7,7 @@ import dynacache.engine.ds.SkipList
  * What a key holds. A key is one kind and never another, and a command declares the [Kind]
  * it needs so a wrong-type command is refused before it can touch the entry (C13).
  */
-internal sealed class Value(val kind: Kind) {
+sealed class Value(val kind: Kind) {
 
     /** The word `TYPE` reports, and what a command names when it needs a kind. */
     enum class Kind(val text: String) {
@@ -114,4 +114,4 @@ private const val NUMERIC = "0123456789.eE+-"
 internal fun fieldName(field: ByteArray): String = field.toString(Charsets.ISO_8859_1)
 
 /** The bytes of a field name the store keyed by [fieldName]. */
-internal fun fieldBytes(name: String): ByteArray = name.toByteArray(Charsets.ISO_8859_1)
+fun fieldBytes(name: String): ByteArray = name.toByteArray(Charsets.ISO_8859_1)
