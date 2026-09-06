@@ -31,7 +31,7 @@ class RaftRuntime(val config: CpConfig, transport: Transport) : AutoCloseable {
     @Volatile
     private var appliedTerm = 0
 
-    val stateMachine = AtomicLongStateMachine(currentTerm = { node.term.term }, onTermApplied = ::termApplied)
+    val stateMachine = CpStateMachine(currentTerm = { node.term.term }, onTermApplied = ::termApplied)
 
     val node: RaftNode = RaftNode.newBuilder()
         .setGroupId(config.groupId)

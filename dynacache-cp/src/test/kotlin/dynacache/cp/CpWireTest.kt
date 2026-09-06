@@ -22,6 +22,18 @@ class CpWireTest {
     }
 
     @Test
+    fun lock_commands_round_trip() {
+        val key = Key("cp:lock:l")
+        listOf(
+            Command.Cp.LockTry(key, session = 7, ttl = Duration.ofSeconds(30)),
+            Command.Cp.LockUnlock(key, session = 7, token = 3),
+            Command.Cp.LockRenew(key, session = 7, token = 3, ttl = Duration.ofMillis(1500)),
+            Command.Cp.LockForceUnlock(key),
+            Command.Cp.LockState(key),
+        ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
+    }
+
+    @Test
     fun ttl_tick_round_trips() {
         assertEquals(TtlTick(42), roundTrip(TtlTick(42)))
     }

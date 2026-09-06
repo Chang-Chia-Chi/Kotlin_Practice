@@ -211,6 +211,21 @@ object CpWire {
             is Command.Cp.LongExpire -> tagged(CMD_EXPIRE, command.key) { writeLong(command.ttl.toMillis()) }
             is Command.Cp.LongTtl -> tagged(CMD_TTL, command.key) {}
             is Command.Cp.LongPersist -> tagged(CMD_PERSIST, command.key) {}
+            is Command.Cp.LockTry -> tagged(CMD_LOCK_TRY, command.key) {
+                writeLong(command.session)
+                writeLong(command.ttl.toMillis())
+            }
+            is Command.Cp.LockUnlock -> tagged(CMD_LOCK_UNLOCK, command.key) {
+                writeLong(command.session)
+                writeLong(command.token)
+            }
+            is Command.Cp.LockRenew -> tagged(CMD_LOCK_RENEW, command.key) {
+                writeLong(command.session)
+                writeLong(command.token)
+                writeLong(command.ttl.toMillis())
+            }
+            is Command.Cp.LockForceUnlock -> tagged(CMD_LOCK_FORCE_UNLOCK, command.key) {}
+            is Command.Cp.LockState -> tagged(CMD_LOCK_STATE, command.key) {}
         }
     }
 
@@ -229,6 +244,11 @@ object CpWire {
             CMD_EXPIRE -> Command.Cp.LongExpire(key, Duration.ofMillis(readLong()))
             CMD_TTL -> Command.Cp.LongTtl(key)
             CMD_PERSIST -> Command.Cp.LongPersist(key)
+            CMD_LOCK_TRY -> Command.Cp.LockTry(key, readLong(), Duration.ofMillis(readLong()))
+            CMD_LOCK_UNLOCK -> Command.Cp.LockUnlock(key, readLong(), readLong())
+            CMD_LOCK_RENEW -> Command.Cp.LockRenew(key, readLong(), readLong(), Duration.ofMillis(readLong()))
+            CMD_LOCK_FORCE_UNLOCK -> Command.Cp.LockForceUnlock(key)
+            CMD_LOCK_STATE -> Command.Cp.LockState(key)
             else -> error("unknown CP command tag $tag")
         }
     }
@@ -320,6 +340,11 @@ object CpWire {
     private const val CMD_EXPIRE = 8
     private const val CMD_TTL = 9
     private const val CMD_PERSIST = 10
+    private const val CMD_LOCK_TRY = 11
+    private const val CMD_LOCK_UNLOCK = 12
+    private const val CMD_LOCK_STATE = 13
+    private const val CMD_LOCK_RENEW = 14
+    private const val CMD_LOCK_FORCE_UNLOCK = 15
     private const val NO_TTL = -1L
 
     private const val REPLY_SIMPLE = 1
