@@ -5059,3 +5059,57 @@ deterministic (T44) and would let P5 kill the holder's connection and watch the 
 the connection lives, `channelInactive` is about the session outliving the connection. The two
 would meet in the same field, so whoever takes it should reuse `forgetSession` for the clearing
 half. The README's known-debts list still carries the `channelInactive` entry and should keep it.
+
+---
+
+## T56 - Settle the batch cross-partition error
+
+**Decision, and why the kind stays.** A batch whose keys span partitions now answers
+`-CROSSSLOT keys of a batch must share a partition (use a hash tag)`. The error KIND is
+unchanged and deliberately so: `CROSSSLOT` is what Redis client libraries switch on, and the
+"considered and rejected" line in ADR 0002 rejected `-CROSSSLOT` for fan-out commands like
+`MGET`, which DynaCache serves by fanning out to the partitions involved. A batch is the
+opposite case: it declares its keys, it must run on one executor with nothing interleaved
+(C12), and when the keys span partitions there is genuinely nothing to fan out, so the refusal
+is real. Only the message text was wrong. It spoke Redis Cluster's vocabulary ("hash to the
+same slot") in a project whose glossary bans "slot" and whose remedy is a hash tag, so it named
+neither the real constraint nor the fix. The new wording is the glossary's own: partition, and
+hash tag.
+
+**What changed.** One source of truth, so one edit reached all three paths. The message lives
+in `CrossPartitionBatch.error` in
+`DynaCache/dynacache-engine/src/main/kotlin/dynacache/engine/CommandEngine.kt`; the engine fails
+the batch future with that exception, and `orBatchError()` in `DynaCacheServer.kt` unwraps it
+for both the MULTI/EXEC path and the EVAL path (`Lua.kt` calls the same helper). No Lua bridge
+line re-renders the text: an EVAL that spans partitions is refused before the script starts, so
+the reply never round-trips through a Lua table. The round-trip was checked anyway for the
+`redis.call` path, where `Reply.Error` becomes `err = "$kind $message"` and is split back at the
+first space -- the new message has no leading space and no format character, so kind and message
+survive intact. Three comment lines above the error record why the kind stays. ADR 0002 gained a
+paragraph saying the rejection covers fan-out commands only and that a batch still answers the
+kind. Three pinned tests updated: `CommandEngineTest` (the constant, renamed `CROSS_SLOT` to
+`CROSS_PARTITION`, plus its one use), `DynaCacheServerTest.multi_exec_cross_partition_rejected`,
+`LuaTest.lua_cross_partition_rejected`.
+
+**Grep proof, with one honest deviation.** `grep -rni slot` under `DynaCache/` for `.kt`, `.md`,
+`.lua`, `.java` and `.xml`, excluding `CROSSSLOT`, leaves no use of "slot" in the partition
+sense. What remains is three unrelated senses, and the ticket's box as literally worded ("the
+word slot appears nowhere") cannot be met without changes the seams forbid:
+
+- `CONTEXT.md` lines 35 and 198: `_Avoid_: shard, slot, bucket`. This is the glossary declaring
+  the ban; deleting the word would delete the rule.
+- `ds/TimerWheel.kt` and `ds/CountMinSketch.kt`: a timer-wheel bucket and a sketch counter cell.
+  "Slot" is the standard name in both data structures and has nothing to do with partitions.
+  Renaming a `slots` constructor parameter is a code change outside this ticket's seams.
+- `CommandParserTest.kt:467` and `RespFuzzTest.kt:11`: "the slot a random expiry argument goes
+  in", meaning an argument position.
+
+Since the literal box is unreachable while `TimerWheel` keeps its slots, partially chasing it
+would add diff without satisfying it, so nothing outside the partition sense was touched. Read
+as the glossary means it, the box is met: "slot" now names a partition nowhere in DynaCache.
+
+**Tests.** Red first: the `CommandEngineTest` pin was updated ahead of the engine and failed on
+the old text (`Tests run: 63, Failures: 1`), then passed once `CrossPartitionBatch.error` was
+reworded. Full run `-pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 91, all
+green, counts unchanged as required -- this was wording only, so no test was added or removed.
+Diff is 4 files, well inside the size budget.
