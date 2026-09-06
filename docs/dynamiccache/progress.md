@@ -2614,3 +2614,89 @@ exceptionally. Stop appending before closing. `WalSink` has no `truncate`: check
 (T35) needs its own handle on the file, as T33 already noted. `EVERY_SECOND` counts from the
 last fsync, not from the first unforced write, so a burst after idle time is forced at the next
 due tick, at most one second after the last fsync.
+
+## T32: Snapshot engine
+
+**Built:** the local RDB snapshot of spec 2.8, on top of T31's codec.
+
+`Partition.snapshotView(now)` runs as one task on the partition executor and returns a
+`List<RdbEntry>` that is a point in time by construction: the task sits between two commands
+or batches, never inside one, so C9 needs no lock. The view is a shallow copy of the live
+entries with every mutable value copied: a Hash into a fresh `HashTable`, a List into a fresh
+`ArrayDeque`, a Sorted Set into a fresh `SkipList` seeded from the partition's own `Random`
+and filled through `writeScore` (so I3 holds for the copy too). A String's `ByteArray` is
+shared, since no command mutates one in place (`APPEND`, `INCRBY` and `LSET` all replace the
+reference). Expired keys are left out at the view, so the writer's own filter has nothing to
+do. The DVV bytes are empty until replication stamps them (T22). `Partition.restore(entries)`
+is the entry point back in: one task on the executor, every live entry through `write`, so a
+restored TTL lands on the wheel like any other. `ApEngine.snapshotView(now)` gathers every
+partition's view with `allOf`; `ApEngine.restore(entries)` groups by partition and writes.
+Both are `internal`; the `CommandEngine` interface is untouched.
+
+`SnapshotEngine(engine, dir, clock, interval = 300s, seeds = Random(), sink)` in
+`dynacache.engine.persist`: `save()` reads the clock once, takes every partition's view, and
+serializes off the executors on the caller's thread through `sink(dump.rdb.tmp)`, then
+`Files.move(ATOMIC_MOVE, REPLACE_EXISTING)` to `dump.rdb`. `restore()` reads `dump.rdb` if
+present, refuses a file holding a zero-member sorted set (T31's "say so out loud"), writes
+every entry into its partition and answers the count; no file is 0, not an error. `save` and
+`restore` are both `@Synchronized` on the engine object, so neither runs inside the other.
+`maybeSave(now)` is the interval hook, a plain method that saves once `interval` has passed
+since the last save (or construction). `close()` is the shutdown save. `sink: (Path) ->
+OutputStream` defaults to `Files.newOutputStream` and is the slow-sink test seam.
+
+The server's `main` gains an optional third argument `[dir]`: with it, `restore()` runs before
+the port opens, the tick lambda calls `maybeSave(clock.instant())` after `engine.tick()`, and
+the shutdown hook calls `snapshots.close()` between `server.close()` and `engine.close()`. So
+the graceful-shutdown save is the server's doing, not `ApEngine.close()`'s: the engine still
+knows nothing about files.
+
+**Concepts named:** the *view* (`snapshotView`) is the point-in-time copy CONTEXT.md's
+snapshot needs, and it is a task, not a lock: what makes it consistent is the executor's
+single thread, the same thing that makes a batch consistent. `frozen(value)` is the one
+place the copy rule lives (which kinds share and which copy). The *sink* is the writer's
+output stream, injectable at the `SnapshotEngine` constructor, the one seam that makes
+"does not block reads" observable without a slow disk. `RdbEntry` now travels engine-wide
+(Partition imports it), which is why `Partition.kt` gained a `persist` import.
+
+**Acceptance:**
+- `rdb_concurrent_writes`: a writer thread `HSET`s 32 fields of one hash with rising round
+  stamps while a save runs with a stalled sink; the writer completes three more rounds while
+  the sink is parked; the restored fields are non-increasing along field order, span at most
+  two adjacent rounds, and none is newer than the writer's stamp when the sink stalled. The
+  last assertion is what makes a reference copy fail: verified by removing the Hash copy in
+  `frozen`, which fails it deterministically with stamps from three rounds later.
+- `C9_snapshot_never_contains_half_a_batch`: a thread runs `atomically` batches of ten
+  hash-tagged keys with rising stamps; a save lands after three rounds; the restored ten keys
+  hold exactly one distinct value.
+- `snapshot_restore_on_startup`: String, String with TTL, Hash, List and Sorted Set saved from
+  one engine and read back through a fresh engine's commands; `TTL` still answers 90.
+- `snapshot_does_not_block_reads`: a `GET` completes while the sink is parked on the writer's
+  first byte; the file is then valid once released.
+- `snapshot_atomic_rename_leaves_no_tmp`: two saves in a row leave exactly `dump.rdb` in the
+  directory; restore with no file answers 0.
+- Progress entry: this file.
+
+**Deviations:** none from the spec. Two choices the ticket left open, stated: the shutdown
+save is wired by the server's `main`, not by `ApEngine.close()`; and the interval is a
+constructor parameter with the spec's default of 300 s rather than a `saveEvery(interval)`
+method, since `maybeSave(now)` is the only call the scheduler makes.
+
+**For the next ticket:** `save()` serializes on the caller's thread, and in the server that
+is the tick thread, so a large keyspace delays the following ticks by the write time; the
+scheduler catches up and lazy expiry covers the gap, but T35 (WAL checkpoint after a
+snapshot) may want the save on its own thread when it adds fsync to the path. `save()` answers
+nothing; T35 needs the WAL sequence number of the checkpoint, and the natural place is a
+return value from `save()` carrying what the views were taken at. `Partition.restore`
+overwrites whatever a key holds, which is right at startup and is what T35's replay order
+(RDB first, then WAL) relies on. The zero-member sorted set check is in
+`SnapshotEngine.restore`, before anything is written, so a bad file leaves the engine empty.
+`RdbReader`'s `seeds` is the `SnapshotEngine` constructor's `Random`, not the partition's:
+the file is decoded off the executors before its keys are grouped, so a restored skip list's
+levels are reproducible from that seed, not from the engine's. T36 (Chandy-Lamport) can call
+`ApEngine.snapshotView(now)` directly for the local state and `RdbWriter` for the file; the
+sink seam is per `SnapshotEngine`, so a per-node state file needs its own instance or a path
+argument on `save()`. T10 touches `Partition.write` and `drop`; `restore` goes through
+`write`, so memory accounting will count restored keys with no extra line.
+
+**Build:** `mvn -B -o -q clean package` offline, green. Engine 117 tests, cluster 49, cp 38,
+server 35; 0 failures, 0 errors, 0 skipped. Commit `a683b6f` on branch `t32`.

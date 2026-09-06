@@ -10,12 +10,12 @@ joins; atomic rename on completion.
 
 **Nature:** non-blocking snapshot under concurrent writes, C9 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache a683b6f, merged into misc/ai_gen)
 
-- [ ] `rdb_concurrent_writes`: writes during the save, the file is a valid point in time
-- [ ] `C9_snapshot_never_contains_half_a_batch`: a `MULTI/EXEC` of ten keys racing a snapshot, all ten or none
-- [ ] `snapshot_restore_on_startup`, `snapshot_does_not_block_reads` (a read completes while the writer is stalled by a slow injected sink)
-- [ ] Progress entry appended
+- [x] `rdb_concurrent_writes`: writes during the save, the file is a valid point in time
+- [x] `C9_snapshot_never_contains_half_a_batch`: a `MULTI/EXEC` of ten keys racing a snapshot, all ten or none
+- [x] `snapshot_restore_on_startup`, `snapshot_does_not_block_reads` (a read completes while the writer is stalled by a slow injected sink)
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
