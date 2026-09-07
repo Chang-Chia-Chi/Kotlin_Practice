@@ -13,6 +13,9 @@ import dynacache.cluster.Ring
 import dynacache.cluster.Router
 import dynacache.cluster.VersionedStore
 import dynacache.cluster.Swim
+import dynacache.cp.CP_DIR
+import dynacache.cp.cpAddressBook
+import dynacache.cp.cpNode
 import dynacache.engine.ApEngine
 import dynacache.engine.BatchEngine
 import dynacache.engine.Command
