@@ -5,6 +5,7 @@ import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.Forward
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
+import dynacache.engine.CommandEngine
 import dynacache.engine.Key
 import dynacache.engine.Reply
 import java.time.Clock
@@ -144,6 +145,53 @@ class RouterTest {
         assertEquals("ERR", (ReplyWire.decode(answered!!.forwardReply.reply) as Reply.Error).kind)
         assertEquals(Reply.Simple("OK"), cluster.writeVia(contact, key, "v1".toByteArray()))
         cluster.close()
+    }
+
+    /** A local engine that answers nothing until [answer], and records what reached it. */
+    private class HoldingEngine : CommandEngine {
+
+        val submitted = mutableListOf<Command>()
+
+        private val held = mutableListOf<CompletableFuture<Reply>>()
+
+        override fun submit(command: Command): CompletableFuture<Reply> {
+            submitted += command
+            return CompletableFuture<Reply>().also { held += it }
+        }
+
+        /** Answers each held part with its own key, so the joined reply shows the order it kept. */
+        fun answer() = held.forEachIndexed { at, future ->
+            future.complete(Reply.Bulk((submitted[at] as Command.Keyed).key.bytes))
+        }
+
+        override fun close() = Unit
+    }
+
+    /**
+     * T79 at the router's seam: the parts of a multi-key command go out together, not one after
+     * the previous one answered. Both keys share a hash tag, so this node coordinates both and
+     * nothing forwards; the engine holds every future it hands back, so two submitted parts can
+     * only mean the router did not wait for the first.
+     */
+    @Test
+    fun router_split_submits_every_part_before_any_answers() = runTest {
+        val coordinator = ring.preferenceList(one, N).first()
+        val engine = HoldingEngine()
+        val router = Router(
+            self = coordinator,
+            ring = ring,
+            n = N,
+            local = engine,
+            transport = InMemoryTransport().endpoint(coordinator),
+            scope = backgroundScope,
+        )
+
+        val reply = router.submit(Command.MGet(listOf(one, two)))
+
+        assertEquals(listOf(one, two), engine.submitted.map { (it as Command.Keyed).key }, "both parts are in")
+        assertFalse(reply.isDone, "neither part has answered yet")
+        engine.answer()
+        assertEquals(Reply.Array(listOf(Reply.Bulk(one.bytes), Reply.Bulk(two.bytes))), reply.await())
     }
 
     /**

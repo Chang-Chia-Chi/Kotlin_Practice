@@ -1,4 +1,4 @@
-# DynaCache P7 - Measured performance fixes (T77 to T79)
+# DynaCache P7 - Measured performance fixes (T77 to T79, T85, T86)
 
 Companion to `../plan.md`. Source: the single-node benchmark of 2026-09-06
 (`../benchmarks/2026-09-06-single-node.md`, T47), whose four anomalies each name a code path.
@@ -91,3 +91,49 @@ ticket's base commit, the after pass on the ticket's head, same machine, same se
   change; if T79's `-P 16` pass shows p99 latency growing with in-flight count, that becomes
   its own ticket.
 - **Model:** Opus. **Size:** small (150 to 350 lines).
+
+---
+
+## Addendum: finding from the fix loop (T85)
+
+T78's interleaving review found one pre-existing shutdown edge while adding the group-commit
+deadline. It is its own ticket, blocked by T78 because the 2 ms cadence is what makes it likely. Numbered 85
+because the other session committed T80 to T84 while this was still a draft.
+
+### T85 - Shutdown drains the log instead of interrupting it
+
+- **Goal:** `DynaCacheServer.close` calls `scheduler.shutdownNow()`, which interrupts the tick
+  thread; an interrupt inside `FileChannel.force` closes the channel and throws, so the waiters
+  that force covered fail. They fail correctly, since their bytes were not durable; the fault is
+  that a clean shutdown should have made them durable. The shutdown hook closes the server before
+  the snapshot engine, so the final save's rotate runs after the scheduler is down and meets the
+  channel the interrupt closed. Nothing acknowledged is lost, so this is shutdown correctness,
+  not a durability hole.
+- **Deliverables:** close stops the scheduler, waits a bounded grace for the force in flight,
+  forces whatever is still parked, then interrupts; hitting the bound is reported, not silent.
+- **Blocked by:** T78.
+- **Fixed contracts:** C14; spec 2.8; the shutdown snapshot still saves.
+- **Acceptance:** `close_completes_the_force_in_flight_rather_than_interrupting_it`,
+  `close_forces_whatever_is_still_parked_before_it_returns`,
+  `close_past_its_grace_bound_reports_and_returns`.
+- **Model:** Fable. **Size:** small to medium (200 to 500 lines).
+
+
+### T86 - Replace the contended single-node baseline
+
+- **Goal:** the published baseline (`../benchmarks/2026-09-06-single-node.md`) is provisional:
+  every table was taken while another session built, and its own variance section records the
+  same pass moving by a factor of two. It is now stale twice, contended and describing a tree
+  three fixes behind. Handed over by the other orchestrator session, which owns neither the
+  benchmark area nor the three fixes.
+- **Deliverables:** the whole suite rerun on a quiet machine with T77, T78 and T79 in; a new
+  dated report; a pointer at the top of the old one; and a line per original anomaly saying
+  whether it closed, by which ticket, and what it costs now.
+- **Blocked by:** T77, T78, T79. It measures the tree with all three in, which is the number
+  worth publishing; folding it into any one of them would measure a tree nobody will run.
+- **Fixed contracts:** none; measurement only, no change under `src/main`.
+- **Acceptance:** the four original anomalies each answered, an anomaly that did not improve as
+  its ticket predicted reported with the prediction quoted, and the load recorded per pass.
+- **Window:** the longest of the phase, 35 to 40 minutes, and the one where the disk must be
+  quiet too, not only the CPU. The other session clears the machine rather than pausing dispatch.
+- **Model:** Opus. **Size:** measurement only.

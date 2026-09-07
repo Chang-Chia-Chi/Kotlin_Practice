@@ -190,6 +190,17 @@ Escalation: an Opus ticket that fails compile or tests on its second attempt, or
 change a seam of 2.3, is terminated and relaunched fresh on Fable with the error context. A
 Fable subagent that dies (HTTP 429) is relaunched fresh, never resumed.
 
+**Tier 1 unavailable, 2026-09-07.** Fable ran out of usage credits mid-wave: three tier 1
+subagents (T67, T80, T84) died within two minutes of spawning, having done nothing, and the
+tier was gone for the rest of the run. Those three, and T85 which was routed to tier 1 by
+shape, were done on Opus instead, each recording the swap in its progress entry. Read that as
+a fact about the tickets and not only about the billing: this table sends interleavings, causal
+orders and consistent cuts to tier 1 for a reason, so a run of tickets in that class carried by
+tier 2 is worth a second look if one of them later proves subtly wrong. When a tier is gone,
+prefer swapping the model to holding the ticket, and swap **before** dispatching into a
+resource someone else is holding open: an agent is cheap and replaceable, a quiet benchmark
+window costs another session a whole wave of dispatches to produce.
+
 ---
 
 ## 5. Traceability
