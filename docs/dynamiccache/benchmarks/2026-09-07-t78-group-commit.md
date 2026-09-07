@@ -33,14 +33,18 @@ tell a prediction from a rationalisation.**
    swallows. If it is swallowed, that is the result and nothing is landed on the strength of it.
    If it is instead a real gain, the reasoning above is wrong and the report has to say why, which
    is a finding of its own.
-2. **The `GROUP_COMMIT` durability pass against `EVERY_SECOND` will carry a real effect, and in
-   orders of magnitude rather than percent.** `EVERY_SECOND`'s measured 53.30 requests per second
-   is arithmetic, not a slow path: fifty clients divided by a one-second fsync interval, with a
-   p50 of 1014.783 ms which is one interval. The deadline is 2 ms rather than 1000 ms and the
-   clients are the same fifty. If the mechanism is what this ticket says it is, the result lands
-   near what that arithmetic predicts; agreement between the two would be evidence the mechanism
-   is understood rather than merely observed, and a large disagreement is worth more than the
-   number itself.
+2. **`GROUP_COMMIT` will land between 20,000 and 26,000 requests per second, bound by the network
+   rather than by the disk.** `EVERY_SECOND`'s 53.30 is arithmetic, not a slow path: fifty clients
+   over a one-second fsync interval, p50 1014.783 ms being one interval. The same arithmetic at
+   2 ms gives a ceiling of 25,000, but that ceiling sits above the other constraint in the path:
+   plain `SET` under `NEVER` measured about 26,500 on 2026-09-06, and that number is the Docker
+   round trip, not the log. So at a 2 ms deadline the fsync stops being what binds and the round
+   trip takes over, putting `GROUP_COMMIT` near the `NEVER` rate rather than near 25,000 or near
+   53. Each way it can fail says something. Far below the band, and the force path costs more than
+   the arithmetic allows, which is a finding. At or above the `NEVER` rate, and durability is not
+   costing what reply-after-durable implies, so the next thing to check is whether the force
+   really covers its waiters. Landing in the band is two independent constraints agreeing, which
+   is the strongest form of the result.
 3. **The no-data-directory pass states the log's share separately.** A node started with no data
    directory has no log at all, so the gap between it and the `NEVER` node is everything the log
    costs a pipelined write, of which the buffer is one part.
