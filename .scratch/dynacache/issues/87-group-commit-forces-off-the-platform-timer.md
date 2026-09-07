@@ -20,6 +20,13 @@ scheduler only covers a genuinely idle writer. If that is not enough, park a ded
 resolution. Do not reach for `Thread.sleep` or a busy-wait loop; the first has the same tick
 problem and the second burns a core to save a millisecond.
 
+**A constraint from T78 that shapes the fix.** A parking thread is a thread, and the engine owns
+none by rule (ADR 0001), so it belongs to the server exactly as the current schedule does. It must
+also stay on the same thread as the checkpoint rotate, or the interleaving T78 closed reopens: a
+force running while `rotate` sees a clear flag and an empty queue can fsync the new sink for bytes
+in the closed one. That constraint is the whole reason the present design is a scheduled task
+rather than a timer of its own, so a fix that adds an independent timer thread is not a fix.
+
 **Blocked by:** 78 (Group-commit WAL with a short fsync deadline)
 
 **Nature:** concurrent durability protocol, C14, spec 2.8 (Opus; plan 4 routes this to Fable,
