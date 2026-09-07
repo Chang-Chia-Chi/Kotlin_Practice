@@ -4,7 +4,6 @@ import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.CpNamespace
 import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -22,16 +21,10 @@ private fun bytes(text: String) = text.toByteArray(Charsets.ISO_8859_1)
 private class Recording(private val reply: Reply) : CommandEngine {
 
     val seen = mutableListOf<Command>()
-    val batches = mutableListOf<List<Key>>()
 
     override fun submit(command: Command): CompletableFuture<Reply> {
         seen += command
         return CompletableFuture.completedFuture(reply)
-    }
-
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> {
-        batches += keys
-        return CompletableFuture.failedFuture(NotImplementedError("the recording engine runs no batch"))
     }
 
     override fun close() = Unit
@@ -106,11 +99,6 @@ class CommandDispatcherTest {
         )
         overCpKeys.forEach { dispatcher.submit(it).get() }
         assertTrue(ap.seen.isEmpty(), "the AP engine saw ${ap.seen}")
-
-        // A batch declaring a cp: key never runs on the AP engine either.
-        val batch = dispatcher.atomically(listOf(Key("plain"), Key("cp:counter:x"))) { Reply.Simple("OK") }
-        assertTrue(batch.isCompletedExceptionally, "the batch ran")
-        assertTrue(ap.batches.isEmpty(), "the AP engine was given ${ap.batches}")
     }
 
     /**

@@ -11,7 +11,6 @@ import dynacache.cluster.proto.Version
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import dynacache.engine.Stored
 import dynacache.engine.persist.CommandCodec
@@ -112,10 +111,6 @@ class Replication(
         command.isRead() -> scope.future { read(command) }
         else -> scope.future { write(command) }
     }
-
-    /** A batch is not replicated yet: it runs on this node's engine alone (debt, see progress T22). */
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        engine.atomically(keys, block)
 
     override fun close() = engine.close()
 

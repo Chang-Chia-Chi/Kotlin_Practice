@@ -13,6 +13,7 @@ import dynacache.cluster.Ring
 import dynacache.cluster.Router
 import dynacache.cluster.Swim
 import dynacache.engine.ApEngine
+import dynacache.engine.BatchEngine
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.EvictionPolicy
@@ -86,7 +87,7 @@ class ClusterNode(
      * call about a real network, not something this assembly can know (T45).
      */
     cpRaft: RaftConfig = RaftConfig.DEFAULT_RAFT_CONFIG,
-) : CommandEngine, AutoCloseable {
+) : CommandEngine, BatchEngine, AutoCloseable {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ring = Ring.of(nodes)
@@ -191,7 +192,7 @@ class ClusterNode(
         .takeIf { it.isNotEmpty() }
         ?.let { cpNode(self, it, cpAddresses, cpPort, dataDir?.resolve(CP_DIR), clock, cpRaft) }
 
-    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, clock = clock) {
+    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, batch = this, clock = clock) {
         engine.tick()
         engine.wal?.tick()
         // The leader's TTL tick (CP spec 5): log time moves on, and a session past its timeout is
@@ -231,11 +232,23 @@ class ClusterNode(
         if (command == Command.Info) router.submit(command).thenApply(::withClusterSection) else router.submit(command)
 
     /**
-     * A batch runs only where its keys are coordinated (T19 deviation 4). It is not replicated
-     * either (T22 deviation 5): the writes land on this node's engine and reach no replica.
+     * A batch runs only where its keys are coordinated (T19 deviation 4): it is one partition's
+     * uninterrupted run (C12), and a forward would have to carry the caller's block, which is
+     * code. A batch whose keys this node does not coordinate fails the future rather than
+     * answering, since the signature's `R` is the caller's own type and has no error shape.
+     *
+     * It is not replicated either (T22 deviation 5): the writes land on this node's engine and
+     * reach no replica, which is why it goes to [engine] and not through [replication].
      */
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        router.atomically(keys, block)
+    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> {
+        val elsewhere = keys.map { it to ring.preferenceList(it, config.n).first() }.firstOrNull { it.second != self }
+        if (elsewhere != null) {
+            return CompletableFuture.failedFuture(
+                IllegalStateException("${elsewhere.first} is coordinated by ${elsewhere.second}, not $self")
+            )
+        }
+        return engine.atomically(keys, block)
+    }
 
     /**
      * Starts snapshot [id] from this node (spec 2.8 step 1). An operator's control rather than a
