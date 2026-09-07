@@ -7475,3 +7475,76 @@ Two samples per side, full tables in `docs/dynamiccache/benchmarks/2026-09-07-t7
 - Why the write side moved and the read side did not is a hypothesis, not a measurement: a
   fanned write's chain serialized the WAL append per group as well as the executor hops.
   Separating the log's share from the executor's is T78's pass.
+
+## T77: List accounting is incremental
+
+**Built**
+
+- `ElementList` (engine, in `Value.kt`): a list's elements over Kotlin's `ArrayDeque`, keeping the
+  running byte total its own mutations book. `AbstractMutableList`, so every existing read of
+  `Value.List.items` still compiles; the deque is private, so no caller can grow a list without
+  booking its bytes. Both ends still push and pop in O(1) and every index still reads in O(1).
+- `ElementTable<V>` (same file): a hash's fields and a sorted set's scored members over the same
+  `HashTable` as before, keeping the same running total. One class for both, because a hash and a
+  sorted set cost the same shape -- a name, a value and `ELEMENT_BYTES` -- and differ only in what
+  one value costs, which is the constructor's one argument. `scan` carries the `HSCAN`/`ZSCAN` walk.
+- `Value.approximateBytes()` reads those totals: `PartitionStore.charge` after every keyed command
+  is now O(1) for every kind. Its `ponytail:` note naming this as the upgrade path is gone.
+- `Value.ZSet.removeMember` joins `writeScore` as the second and last way in or out of the dual
+  index; `ZREM` calls it instead of writing the score map and the skip list itself.
+- `PartitionStore` is untouched: the interface T72 gave it keeps its shape and `charge` keeps its
+  arithmetic; only what `approximateBytes()` costs changed.
+
+**Tests**
+
+Full reactor, 496 tests, no failures: engine 183, cluster 92, cp 113, server 108. Five new:
+
+- `list_charge_is_constant_in_list_length`, `hash_charge_is_constant_in_field_count`,
+  `zset_charge_is_constant_in_member_count` (`PartitionStoreTest`): recharging a 100,000-element
+  aggregate reads the same number of elements as recharging a 1-element one, counted off a
+  `visits` counter on the container and never timed. Each asserts the counter is live by walking
+  the same aggregate from scratch and seeing all 100,000.
+- `list_running_total_matches_a_recount_after_every_step`,
+  `hash_and_zset_running_totals_match_a_recount_after_every_step` (new `ValueTest`): a seeded
+  sequence of pushes at both ends, pops at both ends, sets in place, removals and trims, with
+  `approximateBytes()` checked against a from-scratch recount after every step. Verified to bite:
+  dropping the delta from `ElementList.set` fails it at step 8.
+- `store_used_bytes_equals_sum_of_entries_after_any_sequence` (T72's, I6) is unchanged and green.
+
+**Measured**
+
+`docs/dynamiccache/benchmarks/2026-09-07-t77-list-accounting.md`, both passes on one reserved
+machine at 90 to 97 percent CPU idle. Plain, RPUSH 1373.21 to 25239.78 and LPOP 2745.97 to
+23849.27; pipelined, RPUSH 1803.56 to 145348.83 with its p50 down from 445.183 ms to 5.255 ms.
+The reading is the convergence rather than the multiplier: before, the four list tests spread
+8.80x and their order was explained entirely by how long `mylist` was; after, they sit within
+7.6 percent of their mean and the two tests on the 150,000-element key are the two fastest.
+Pipelined they now sit in the band `SET` and `HSET` already occupied, so the anomaly is closed
+rather than reduced. The 40 percent still separating them from Redis is the per-command WAL,
+which is anomaly 3 and T78's. The surviving LRANGE slope is the reply size and is correct.
+
+**Deviations**
+
+- The `visits` counters on `ElementList` and `ElementTable` are production fields read only by
+  tests. They follow `SkipList.comparisons`, which exists in this codebase for the same reason: a
+  complexity property proved by counting rather than by timing.
+- T72's invariant test now compares the store's total against the values' own totals rather than
+  against a walk, because the walk is what this ticket removed. The value-level walk it lost is
+  the new `ValueTest` recount, and the two tests say so in each other's terms.
+- `Value.Hash` lost its `HashTable` constructor argument (only `Merge` and `MergeTest` passed one)
+  so that no caller holds a reference to a table whose byte total it could bypass.
+
+**Merged** (`937ac2c9`, `misc/ai_gen` at `1bf5fc55`)
+
+No conflict, and the two changes compose rather than merely compile. T66's `StoreAccess` writes
+through `install`, which calls `PartitionStore.put`, and through `execute`, which is the command
+interpreter: both charge through the running totals. Every value reaching `install` was built by
+`Merge`, `Rdb.decode` or `frozen`, all of which go through the accounted methods, because this
+ticket made the containers private and left no other way in. `VersionedStore` orders values by
+their RDB encoding, not by `approximateBytes`, so its decisions do not read the totals at all.
+
+**For the next ticket**
+
+- `~/.m2` holds an installed `dynacache-engine` from another session's branch, so
+  `mvn -rf :dynacache-cp` resolves a stale engine and fails to compile. Build the whole reactor.
+- `CpSnapshotTest.lagging_member_is_brought_up_by_snapshot` flaked once and passed on the rerun.

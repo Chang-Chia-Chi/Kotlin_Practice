@@ -27,7 +27,7 @@ Found by T78's interleaving review.
 
 **Blocked by:** 78 (Group-commit WAL with a short fsync deadline)
 
-**Nature:** shutdown ordering and durability edges, C14, spec 2.8 (Fable)
+**Nature:** shutdown ordering and durability edges, C14, spec 2.8 (Opus; plan 4 routes this to Fable, which is out of usage credits on this account as of 2026-09-07 — record the swap as a deviation)
 
 **Status:** ready-for-agent
 
