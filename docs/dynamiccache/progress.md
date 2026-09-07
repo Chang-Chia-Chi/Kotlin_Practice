@@ -6354,3 +6354,155 @@ with `addAllToken`; it now carries `GET k` as the codec writes it. No assertion 
 - Deleting `commandToTokens` (`dynacache-server/.../CommandTokens.kt`) and its
   `CommandTokensTest`, and the kit's `TokenCodec.kt`, falls out of T65 once `Replication` and
   `InProcessCluster.seed` stop calling them. Nothing else references either file.
+
+---
+
+## T55 - A snapshot-set part is a persist adapter
+
+The cluster module no longer touches the filesystem. A node's part of a snapshot set is written
+and read by `SnapshotParts` in `dynacache.engine.persist`, and `DistributedSnapshot` keeps only
+the marker rules and the channel bookkeeping. Plan 2.2's rule that `java.nio.file` appears only
+in the engine's persist package and the cp module holds again for the cluster: there is no
+`java.nio.file`, `kotlin.io.path` or `java.io.File` import left under `dynacache-cluster/src/main`.
+
+### The interface
+
+`dynacache-engine/src/main/kotlin/dynacache/engine/persist/SnapshotParts.kt`, shaped after
+`DotCeilingStore` and `WalSink` in the same package. Set ids and channel names are opaque strings
+and the recorded bytes are opaque bytes, so nothing in the engine knows what a marker, an
+envelope or a protobuf is.
+
+```kotlin
+interface SnapshotParts {
+    fun cut(id: String)                                        // open this node's part, state into it
+    fun record(id: String, channel: String, bytes: ByteArray)  // append one whole record
+    fun restore(id: String)                                    // the state back into the engine
+    fun replay(id: String, channel: String): List<ByteArray>   // every whole record, in order
+    fun delete(id: String)                                     // the whole set, every node's part
+}
+```
+
+The one adapter is `FileSnapshotParts(root, self, engine, clock)`: a set is `<root>/<id>/`, a part
+is `<root>/<id>/<self>/`, its state is the T32 snapshot's `dump.rdb` in it, and a channel is
+`from-<peer>.wal` beside that.
+
+### Record format, crc and torn tail
+
+A channel log is an ordinary WAL: `WalWriter`/`WalReader` are reused as-is, so a record is the
+spec 2.8 entry `[crc32:u32][length:u32][seq:u64][op:u8][payload]` with the envelope's bytes as
+the payload. The header is not command-specific, so no new record writer was needed.
+
+- Torn tail (a crash mid-append): `WalReader` reports `TORN_TAIL` and `replay` answers every
+  whole record before it and stops. Covered by
+  `snapshot_part_with_torn_channel_log_replays_the_complete_prefix`.
+- Checksum failure: `replay` throws `IOException`. A torn tail is the shape a crash leaves at the
+  end of a file; a crc mismatch is corruption, and nothing at or past it is trusted. The old
+  delimited-protobuf loop had neither check.
+- Every record carries `seq = 0` and `op = 0`. A channel's order is its file order and nothing
+  reads the seq back, so the log is not a sequenced WAL, only a crc'd record file in the WAL's
+  format. Deliberate: reusing the writer is cheaper than a second record format.
+- A recorded envelope is **not** fsynced (`FsyncPolicy.NEVER`), which is exactly what the old
+  `Files.newOutputStream(...).use { writeDelimitedTo }` did. Recording happens on the node's
+  inbound path, and forcing the disk there would stall it.
+- A failed append is surfaced: `record` joins the append's `durable` future, because `WalWriter`
+  hands an `IOException` to that future and nowhere else, and under `NEVER` nothing later forces
+  it. Found in the code-review self-pass; without the join a full disk would silently drop an
+  in-flight envelope and break I12 with no error anywhere.
+
+### Compatibility with parts written before this ticket: **rejected, with a clear error**
+
+The channel log's name changed from `from-<peer>.log` to `from-<peer>.wal`, so an old part is
+recognisable. `restore` refuses one:
+`IOException("<path> predates the checksummed channel log and cannot be restored")`. Old records
+are length-delimited protobuf with no header and cannot be read as WAL records; restoring the
+state without them would silently drop everything that was in flight at the cut (I12), which is
+worse than refusing. `restore` runs before any `replay` on the only path that reads a part
+(`DistributedSnapshot.restoreFrom`), so no part can be half-restored. Covered by
+`a_part_written_before_the_channel_log_became_a_wal_is_rejected`.
+
+### What moved out of the cluster
+
+`DistributedSnapshot` lost its `engine`, `dir` and `clock` constructor parameters and gained
+`parts: SnapshotParts`; the class is 67 lines shorter in the diff. Gone from it: the
+`java.nio.file` imports, `Files.createDirectories`, the `SnapshotEngine` construction in `start`
+and `restoreFrom`, the delimited-protobuf append and `generateSequence { parseDelimitedFrom }`
+loop, the `deleteRecursively` in `abort`, and the `part(root, id)` path helper. What stayed: the
+marker rules, `open`/`aborted`, the `cutting` mutex and T49's cut-then-open order, the deadline
+timer, and the peer iteration on replay.
+
+`restoreFrom(from: Path, id: String)` became `restoreFrom(id: String)`. Every caller passed the
+same directory the adapter is already built on, so the parameter carried no information.
+
+T49's ordering is preserved and is now slightly stronger. The part directory used to be created
+before the `cutting` mutex was taken; `parts.cut(id)` now creates it and writes the state inside
+the mutex. Nothing can observe the gap: `record` is reachable only from `receive`, which takes
+the same mutex and iterates `open`, and `open[id]` is published inside the mutex strictly after
+`cut` returns.
+
+### Tests and counts
+
+New: `dynacache-engine/src/test/kotlin/dynacache/engine/persist/SnapshotPartsTest.kt`, six tests
+(`a_channel_replays_what_was_recorded_on_it_in_order`,
+`snapshot_part_with_torn_channel_log_replays_the_complete_prefix`,
+`a_channel_log_with_a_corrupt_record_is_rejected`, `a_part_holds_the_state_it_cut`,
+`a_set_is_deleted_as_a_whole`, `a_part_written_before_the_channel_log_became_a_wal_is_rejected`).
+
+| Module | Before | After |
+|---|---|---|
+| engine | 158 | 164 |
+| cluster | 86 | 86 |
+| cp | 102 | 102 |
+| server | 103 | 103 |
+
+Every Chandy-Lamport test passes unchanged in name and assertion: `chandy_lamport_consistent_cut`,
+`chandy_lamport_restorable`, `chandy_lamport_timeout_aborts`, `C10_marker_on_every_channel`,
+`I12_reads_after_restore_return_snapshot_time_values`, `I12_write_during_the_cut_is_restored_once`,
+`C10_state_is_cut_before_any_channel_opens`; `P4AcceptanceTest` passes.
+
+### Deviations
+
+1. **`snapshot_set_deleted_as_a_whole_on_deadline` does not exist and was not added.** The ticket
+   names it; no test under that name has ever existed. The deadline-abort test that must keep
+   passing is `chandy_lamport_timeout_aborts` (`DistributedSnapshotTest`), and it does, asserting
+   that `<dir>/s1` is gone after the deadline. The new unit-level `a_set_is_deleted_as_a_whole`
+   covers `delete` itself, without a deadline.
+2. **`SnapshotParts` is a seam with one adapter, which plan 2.1 forbids** ("A seam exists only
+   where a second adapter is real, and every seam has one in the test kit"). Built as an interface
+   because the ticket and the orchestrating brief both name an interface as the deliverable, and
+   the concrete `FileSnapshotParts` would satisfy plan 2.2 on its own. Collapsing the interface
+   into the class is a one-line change at five call sites if the plan's rule is meant to win.
+3. **The cluster test helper `recorded` reads a part's records through the adapter but still
+   finds its channels by listing `from-*.wal`.** The code-review self-pass called the glob
+   coupling to a layout the adapter now owns and suggested deriving the channels from the set's
+   node list instead. That was tried and is wrong: a peer whose envelopes were recorded need not
+   have a part of its own, which is exactly the `Lone` node in
+   `C10_state_is_cut_before_any_channel_opens` and `I12_write_during_the_cut_is_restored_once`,
+   and the refactor made that test read an empty channel map. Which channels a part recorded is a
+   fact only the files hold. Reverted, with the reason written into the helper's KDoc. If the
+   coupling is worth removing later, the adapter needs a `channels(id)` listing, which the ticket
+   did not ask for and nothing in main sources needs.
+
+### For the next ticket (T66)
+
+1. **A distributed snapshot rotates the node's live WAL into the snapshot part, and an abort
+   deletes it.** Pre-existing since T36 and moved verbatim here, not introduced by T55, but
+   `FileSnapshotParts.cut` now owns the line. `SnapshotEngine.save()` calls `cut()`, which does
+   `wal.rotate(FileChannelSink(logFile(seq)))` with `logFile` resolved under the **part**
+   directory. On a node with both `dataDir` and `snapshotDir` (which is how `clusterMain` wires
+   every persisting node: `snapshotDir = dataDir.resolve("snapshots")`) the live WAL therefore
+   continues inside the snapshot part, and `DistributedSnapshot.abort` `deleteRecursively`s the
+   set at the deadline, taking the open log file with it. Every write acked after the cut is then
+   unrecoverable on restart, since recovery reads `dataDir` only. C14 and spec 2.8's recovery
+   sequence. Not fixed here: the fix is in `SnapshotEngine`'s save/rotate contract, outside this
+   ticket's seams. No test covers it because no test wires `dataDir` and `snapshotDir` together
+   and then aborts.
+2. **A snapshot id arrives on a marker from the wire and becomes a path segment unchecked.**
+   `envelope.marker.snapshotId` reaches `root.resolve(id)` in `FileSnapshotParts`, and `abort`
+   turns that into `deleteRecursively`. Pre-existing and identical before T55. Not fixed here: a
+   bare `require` would swap a traversal for a node kill, because `Router.run` has no per-envelope
+   catch by design, so the real fix is for the marker path to ignore an unusable id, and the brief
+   put the marker protocol off-limits. Worth a ticket: validate in the adapter and have
+   `DistributedSnapshot.receive` drop a marker whose id the adapter refuses.
+3. Restoring an id that was never cut is a silent no-op that leaves the engine empty
+   (`SnapshotEngine.restore` on a missing `dump.rdb`). `ClusterNode.restoreSnapshot("typo")`
+   therefore empties a node without complaint.
