@@ -7548,3 +7548,20 @@ their RDB encoding, not by `approximateBytes`, so its decisions do not read the 
 - `~/.m2` holds an installed `dynacache-engine` from another session's branch, so
   `mvn -rf :dynacache-cp` resolves a stale engine and fails to compile. Build the whole reactor.
 - `CpSnapshotTest.lagging_member_is_brought_up_by_snapshot` flaked once and passed on the rerun.
+
+---
+
+## T82 - Delete the two pass-through aliases
+
+Both aliases are gone; nothing was kept.
+
+- `DistributedSnapshot.initiate(id)` deleted. It was `= start(id)` and the only reason `start` was private, so `start` is now public and carries the KDoc `initiate` had. The doc line about an operator's id failing rather than being dropped was kept and sharpened: it now also says an id off the wire is checked by `receive` (`parts.accepts`) before it reaches `start`, which the old KDoc's "an operator's, not the wire's" left implicit. Callers changed: `ClusterNode.snapshot` (1) and `DistributedSnapshotTest` (10 calls, plus two local `Job` vals renamed `initiate` to `starting` and three doc references).
+- `TimerWheel.reschedule(key, deadline)` deleted. It was `= schedule(key, deadline)`, called only by `TimerWheelTest` (2 calls, now `schedule`). `schedule`'s own KDoc already promises "an existing entry for [key] is replaced", so the alias's KDoc added nothing.
+
+Call sites touched: 13 in tests, 1 in main (`ClusterNode`), plus 3 in-file doc/comment references.
+
+Kept: nothing. Neither call site showed an intent the KDoc did not already state.
+
+Tests: engine 179, cluster 97, cp 113, server 108, 497 total, all green, no test names changed. The brief predicted engine 181 / cluster 95; the base commit `1bf5fc55` already had 179 / 97, and the 497 total matches.
+
+Commit: `b210c606` on branch `t82`.
