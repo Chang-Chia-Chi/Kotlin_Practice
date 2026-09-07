@@ -234,6 +234,29 @@ class RulesTest {
     fun rule23_a_move_target_is_not_the_polled_directory() =
         assertEquals(listOf(23), violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("/inbox") } })))
 
+    /** onReject files a file away rather than answering it, so it speaks the ack vocabulary; `nak` is a subscription's word. */
+    @Test
+    fun rule12_onReject_is_in_the_trigger_kinds_vocabulary() =
+        assertEquals(
+            listOf(12),
+            violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("temp/"); onReject = AckAction.Nak } })),
+        )
+
+    @Test
+    fun rule12_onReject_may_move_delete_or_be_left_unset() =
+        assertEquals(
+            emptyList<Int>(),
+            violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("temp/"); onReject = move("rejected/") } })),
+        )
+
+    /** Rule 23 reads the same for a rejected file: filing it back into the polled directory is the loop it exists to refuse. */
+    @Test
+    fun rule23_a_reject_target_is_not_the_polled_directory() =
+        assertEquals(
+            listOf(23),
+            violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("temp/"); onReject = move("/inbox") } })),
+        )
+
     @Test
     fun rule24_readiness_is_known_and_restartBackoff_initial_is_at_most_max() =
         assertEquals(listOf(24), violated(config(more = { supervision { restartBackoff(15.minutes, max = 30.seconds) } })))

@@ -513,10 +513,22 @@ class SftpSource(
                 reason,
             )
             try {
-                perform(polling.onNack, slot.file)
+                // Two different answers, and they want opposite things done to the file: one that
+                // comes back has to stay where the next poll will list it, one that never will is
+                // litter. `onReject` defaults to Noop, so a connector that says nothing keeps the
+                // behaviour it had before the knob existed.
+                perform(if (redeliver) polling.onNack else polling.onReject, slot.file)
                 meters.settled(Settlement.NACK)
             } finally {
-                slot.release(forGood = !redeliver)
+                // A file the reject action takes out of the directory needs no remembering: it will
+                // not be listed again, and the set that keeps it out would hold it until the process
+                // ended. Only a file left where it is has to be recognised on the next poll.
+                //
+                // A reject action that *failed* also lands here - `perform` threw and the finally
+                // still runs - and it is right that such a file is not remembered either: it is
+                // still in the directory, so the next poll hands it over, the consumer nacks it for
+                // good again, and the move is retried until it works.
+                slot.release(forGood = !redeliver && polling.onReject == PostAction.Noop)
             }
         }
 

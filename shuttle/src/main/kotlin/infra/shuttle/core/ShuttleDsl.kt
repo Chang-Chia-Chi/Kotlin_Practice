@@ -266,7 +266,7 @@ class RouteBuilder(private val name: String) {
     val Acked = DeliveryMoment.ACKED
 
     fun poll(store: StoreRef, directory: String, configure: PollBuilder.() -> Unit = {}): Source =
-        PollBuilder().apply(configure).let { Source.Poll(store.name, directory, it.every, it.readiness, it.onAck, it.onNack) }
+        PollBuilder().apply(configure).let { Source.Poll(store.name, directory, it.every, it.readiness, it.onAck, it.onNack, it.onReject) }
 
     fun subscribe(channel: ChannelRef, subject: String, configure: SubscribeBuilder.() -> Unit = {}): Source =
         SubscribeBuilder().apply(configure).let { Source.Subscribe(channel.name, subject, it.onAck, it.onNack, it.inProgressEvery) }
@@ -285,6 +285,9 @@ class RouteBuilder(private val name: String) {
         var readiness: List<FileReadiness> = listOf(FileReadiness.SizeStable(), FileReadiness.MinAge(1.minutes))
         var onAck: AckAction? = null
         var onNack: AckAction? = null
+
+        /** What becomes of a file this route will not take again; see `Source.Poll.onReject`. */
+        var onReject: AckAction? = null
     }
 
     @ShuttleDsl

@@ -145,6 +145,14 @@ sealed interface Source {
         val readiness: List<FileReadiness> = listOf(FileReadiness.SizeStable(), FileReadiness.MinAge(1.minutes)),
         val onAck: AckAction? = null,
         val onNack: AckAction? = null,
+        /**
+         * What becomes of a file this route will not take again - REJECTED, or FAILED at
+         * `maxAttempts`. Distinct from [onNack], which answers a file that is coming back: the poll's
+         * nack is always `none` so that the file stays for the next listing, and a file that has no
+         * next listing left in it wants the opposite. Unset leaves it in the polled directory, where
+         * every later poll lists it, turns it away, and spends one of `maxFilesPerPoll` on it.
+         */
+        val onReject: AckAction? = null,
     ) : Source
 
     data class Subscribe(

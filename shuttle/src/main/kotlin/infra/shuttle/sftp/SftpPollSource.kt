@@ -217,6 +217,7 @@ fun sftpConnectorConfig(
         directories(poll.directory)
         onAck = postAction("onAck", poll.onAck)
         onNack = postAction("onNack", poll.onNack)
+        onReject = postAction("onReject", poll.onReject)
         readiness = readinessOf(poll.readiness)
         // Spec 5.1: one listing of a directory at a time; a tick that finds the last one still
         // running is a PollSkipped rather than a second lister.

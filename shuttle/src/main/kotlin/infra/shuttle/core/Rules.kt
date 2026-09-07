@@ -146,10 +146,17 @@ object Rules {
                     if (!source.every.isPositive()) fail(7, "route $name: poll every must be > 0")
                     source.readiness.forEach { readiness(name, it) }
                     if (route.fetch != null) fail(6, "route $name polls and has a fetch")
-                    ack(name, source.onAck, source.onNack, (stores[source.store] as? S3Store)?.let { S3_ACKS } ?: SFTP_ACKS, setOf(AckAction.None))
-                    val move = source.onAck as? AckAction.Move
-                    if (move != null && Path.of(source.directory).resolve(move.folder).normalize() == Path.of(source.directory).normalize()) {
-                        fail(23, "route $name moves acked files into the polled directory itself")
+                    val vocabulary = (stores[source.store] as? S3Store)?.let { S3_ACKS } ?: SFTP_ACKS
+                    ack(name, source.onAck, source.onNack, vocabulary, setOf(AckAction.None))
+                    // onReject files a file away rather than answering it, so it speaks the ack
+                    // vocabulary, not the nack one - `none` included, which is what leaving it where
+                    // it is means.
+                    source.onReject?.let { if (vocabulary.none { known -> known::class == it::class }) fail(12, "route $name: onReject $it is not in the trigger's vocabulary") }
+                    listOf("acked" to source.onAck, "rejected" to source.onReject).forEach { (what, action) ->
+                        val move = action as? AckAction.Move ?: return@forEach
+                        if (Path.of(source.directory).resolve(move.folder).normalize() == Path.of(source.directory).normalize()) {
+                            fail(23, "route $name moves $what files into the polled directory itself")
+                        }
                     }
                 }
                 is Source.Subscribe -> {

@@ -165,7 +165,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
         // An action that files a message back into the folder it came out of would hand the same
         // file to the next poll, and the poll after that, for as long as the connector runs. The
         // check is per watched directory because a relative target resolves against each of them.
-        listOf("onAck" to polling.onAck, "onNack" to polling.onNack).forEach { (knob, action) ->
+        listOf("onAck" to polling.onAck, "onNack" to polling.onNack, "onReject" to polling.onReject).forEach { (knob, action) ->
             val move = action as? PostAction.Move ?: return@forEach
             // Nothing left once the separators and the here-and-above dots come off means the
             // target names no folder at all. "." is the worst of those, because it reads like a
@@ -274,6 +274,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 directories = polling.watched.toList(),
                 onAck = polling.onAck,
                 onNack = polling.onNack,
+                onReject = polling.onReject,
                 createActionTargets = polling.createActionTargets,
                 startupProbe = polling.startupProbe,
                 staging = StagingConfig(dir = polling.staging.dir, digest = polling.staging.digest),
@@ -370,6 +371,12 @@ class PollingBuilder internal constructor() {
     /** What becomes of a file the consumer has finished with. Defaults leave the server alone. */
     var onAck: PostAction = PostAction.Noop
     var onNack: PostAction = PostAction.Noop
+
+    /**
+     * What becomes of a file the consumer will not take again. Defaults to leaving it alone, which
+     * leaves it in the walk for good; see `PollingConfig.onReject` for what that costs.
+     */
+    var onReject: PostAction = PostAction.Noop
 
     /**
      * On by default, because a connector configured to move files into a folder and refusing to

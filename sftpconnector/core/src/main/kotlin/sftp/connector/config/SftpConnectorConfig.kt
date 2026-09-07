@@ -162,8 +162,23 @@ data class PollingConfig internal constructor(
     val directories: List<String>,
     /** What happens to a file once the consumer says it is done with it. */
     val onAck: PostAction,
-    /** What happens to a file the consumer says it could not process. */
+    /** What happens to a file the consumer says it could not process this time. */
     val onNack: PostAction,
+    /**
+     * What happens to a file the consumer nacked for good - it will not be handed over again,
+     * however many polls run. Separate from [onNack] because the two answers want opposite things
+     * from the file: a file to be handed over again has to stay exactly where it is, and a file
+     * that never will is litter in a watched directory.
+     *
+     * The default leaves it there, which is the behaviour of every version before this knob, and
+     * it has a ceiling worth stating: such a file is listed by every later poll and turned away
+     * again, so it keeps a place in `maxFilesPerPoll` for as long as the connector runs. Enough of
+     * them and a poll's whole listing budget goes on files nothing will ever do anything with, and
+     * files that arrive after them are never reached. A `Move` into a quarantine folder is what
+     * takes them out of the walk - that folder is an action target like any other, so the poll does
+     * not descend into it and start-up checks it exists.
+     */
+    val onReject: PostAction,
     /**
      * Whether the connector creates the folders its actions move files into. Off for an account
      * that is not allowed to create directories; the folders then have to exist already, and the
@@ -207,7 +222,7 @@ data class PollingConfig internal constructor(
      * same one.
      */
     fun actionTargetsUnder(directory: String): List<String> =
-        listOf(onAck, onNack)
+        listOf(onAck, onNack, onReject)
             .filterIsInstance<PostAction.Move>()
             .map { it.targetUnder(directory) }
             .distinct()

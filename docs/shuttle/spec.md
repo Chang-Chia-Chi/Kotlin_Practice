@@ -305,12 +305,20 @@ broker's id is not stable across redeliveries.
 The ack is the commit action on the source side. Its vocabulary belongs to the trigger kind and
 is validated at boot (rule 12):
 
-| Trigger | `onAck` | `onNack` |
-|---|---|---|
-| poll on SFTP | `move: <folder>`, `delete`, `none` | `none` (the file stays; redelivery is the next poll) |
-| poll on S3 | `delete`, `move: <prefix>`, `tag: <key=value>`, `none` | `none` |
-| subscribe on NATS | `ack`, `term` | `nak` |
-| any | `callback: <channel>` | as above |
+| Trigger | `onAck` | `onNack` | `onReject` |
+|---|---|---|---|
+| poll on SFTP | `move: <folder>`, `delete`, `none` | `none` (the file stays; redelivery is the next poll) | `move: <folder>`, `delete`, `none` (default `none`) |
+| poll on S3 | `delete`, `move: <prefix>`, `tag: <key=value>`, `none` | `none` | as `onAck` (default `none`) |
+| subscribe on NATS | `ack`, `term` | `nak` | - |
+| any | `callback: <channel>` | as above | - |
+
+`onReject` is what becomes of a polled file this route will not take again - REJECTED, or FAILED
+at `maxAttempts`. It is separate from `onNack` because the two refusals want opposite things: a
+file coming back has to stay where the next listing finds it, and a file that is never coming back
+is litter in the polled directory. Left unset it stays there, and every later poll lists it, skips
+it, and spends one of the connector's `maxFilesPerPoll` on it; a directory that accumulates enough
+of them stops reaching the files that arrive after them. `move: <folder>` is the answer, and rule
+23 refuses a target that resolves onto the polled directory itself, exactly as it does for `onAck`.
 
 `callback` is for an upstream that must be told before it considers the object released: the
 call is synchronous, retried with the stage, and the transfer is not ACKED until it succeeds.
@@ -963,7 +971,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 9 | Per object store, the sum of `parallelism` over every route that polls it, fetches from it or targets it, plus one lister per polled directory, is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
-| 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
+| 12 | `onAck` is stated explicitly, no default, and it, `onNack` and `onReject` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
 | 13 | A `key` or `directory` pattern uses only `{name}` (the staged object's name at store time, after the chain), `{sourceName}` (the source object's original name), `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
 | 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, a regex has named groups or an `into` list whose length equals its group count, `expand.format` is `json` or `message` with `message` only on a subscribed route, `expand.from` names a store this route can fetch by path from - its own `fetch.store`, or another S3 store stating an `expand.bucket` of its own (an SFTP store the route does not fetch from offers no such fetch, and a poll's fetcher knows only the files that poll handed over), `unzip.maxEntries >= 1` and `unzip.maxBytes > 0` |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
@@ -974,7 +982,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 20 | A channel's `response.success` and `response.retry` are disjoint status sets |
 | 21 | `digest` is `md5`, `sha256` or `sha1`; a mapping `digest` request is one of them |
 | 22 | Attribute limits: a route's declared attribute names number at most 32 and each name is at most 64 characters |
-| 23 | A `move` ack target is not the polled directory itself; the connector excludes it from listing |
+| 23 | A `move` target of `onAck` or `onReject` is not the polled directory itself; the connector excludes it from listing |
 | 24 | `readiness` is `all-routes-down` or `any-route-down`; `restartBackoff.initial <= max` |
 | 25 | A secret appears only as a `${VAR}` reference, never as a literal. A reference is expanded wherever it stands, `custom.config` included, and one naming a variable that is not set is a load error naming its path (Sec 12.2), because a document with an unresolved reference never became a configuration |
 | 26 | A mapping row's `digest: <algo>` names the algorithm its route computes, `digest` or the process default (D49) |

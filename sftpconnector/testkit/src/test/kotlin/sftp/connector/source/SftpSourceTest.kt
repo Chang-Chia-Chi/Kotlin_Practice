@@ -540,6 +540,62 @@ class SftpSourceTest {
         assertThat(inFlight()).isZero()
     }
 
+    /**
+     * `onReject` is the answer to a file that is never coming back, and it is a different answer
+     * from `onNack`. A file nacked for good leaves the watched directory, so no later poll spends
+     * a place in `maxFilesPerPoll` on it, and the set that keeps files out forgets it: it is not
+     * in the directory to be recognised, and remembering it would hold it until the process ended.
+     * The proof is the same file dropped again - identical path, size and time, which under the
+     * default `onReject` is exactly the file kept out - being handed over.
+     */
+    @Test
+    fun `a file nacked for good is filed away by onReject and is not remembered after it`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1").directory("/drop/rejected")
+        val source = sourceOver(transport) { onReject = move("rejected/") }
+
+        source.poll("/drop").toList().filterIsInstance<FileSeen>().single()
+            .nack(IllegalStateException("never again"), redeliver = false)
+
+        assertThat(client.exists("/drop/a.csv")).describedAs("left in the watched directory").isFalse()
+        assertThat(client.exists("/drop/rejected/a.csv")).describedAs("filed away").isTrue()
+
+        transport.file("/drop/a.csv", "1")
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.path })
+            .describedAs("dropped again after the reject took the first copy away")
+            .containsExactly("/drop/a.csv")
+    }
+
+    /**
+     * The trap the two knobs exist to keep apart. A file the consumer will take again has to stay
+     * exactly where the next poll lists it, so `onReject` - however it is set - does nothing to a
+     * nack that asked for redelivery.
+     */
+    @Test
+    fun `onReject leaves a file that asked to be handed over again alone`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1").directory("/drop/rejected")
+        val source = sourceOver(transport) { onReject = move("rejected/") }
+
+        source.poll("/drop").toList().filterIsInstance<FileSeen>().single()
+            .nack(IllegalStateException("try again"), redeliver = true)
+
+        assertThat(client.exists("/drop/a.csv")).describedAs("still where the next poll will list it").isTrue()
+        assertThat(client.exists("/drop/rejected/a.csv")).isFalse()
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.path })
+            .containsExactly("/drop/a.csv")
+    }
+
+    /** The reject target is an action target like the others, so a recursive walk does not find its files again. */
+    @Test
+    fun `the folder onReject files into is left out of a recursive walk`() = runTest {
+        val transport = FakeSftpTransport()
+            .directory("/drop").file("/drop/a.csv", "1")
+            .directory("/drop/rejected").file("/drop/rejected/bad.csv", "2")
+        val source = sourceOver(transport) { recursive = true; onReject = move("rejected/") }
+
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.path })
+            .containsExactly("/drop/a.csv")
+    }
+
     private fun inFlight(): Int = registry.get("sftp_inflight").gauge().value().toInt()
 
     private fun TestScope.sourceOver(transport: FakeSftpTransport, polling: PollingBuilder.() -> Unit): SftpSource {

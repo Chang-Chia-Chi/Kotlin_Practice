@@ -171,6 +171,7 @@ object YamlLoader {
                             p.items("readiness")?.mapNotNull { it.readiness() }?.let { readiness = it }
                             p.ack("onAck")?.let { onAck = it }
                             p.ack("onNack")?.let { onNack = it }
+                            p.ack("onReject")?.let { onReject = it }
                         }
                     }
                 }

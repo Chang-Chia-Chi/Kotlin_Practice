@@ -564,8 +564,25 @@ ignored as a second answer, and its WARN line says the watch had already given t
 
 ### 8.1 Actions
 
-`onAck` and `onNack` are each one of `Move(target, overwrite)`, `Delete` or `Noop`. Default is
-`Noop` for both; the pipeline in Sec 1.1 configures `onAck = Move("temp/", Overwrite.REPLACE)`.
+`onAck`, `onNack` and `onReject` are each one of `Move(target, overwrite)`, `Delete` or `Noop`.
+Default is `Noop` for all three; the pipeline in Sec 1.1 configures
+`onAck = Move("temp/", Overwrite.REPLACE)`.
+
+`onNack` and `onReject` split the consumer's two refusals, which want opposite things done to the
+file. `nack(redeliver = true)` runs `onNack`, and a file that is to be handed over again has to
+stay exactly where the next listing finds it, so `Noop` is the only sane setting there.
+`nack(redeliver = false)` runs `onReject`: that file is never handed over again, and left in the
+watched directory it is listed by every later poll, turned away, and holds one of
+`maxFilesPerPoll` for as long as the process runs - enough of them and the listing budget goes
+entirely on files nothing will ever do anything with, and files that arrive after them are never
+reached. `Move` into a quarantine folder is what takes them out of the walk; that folder is an
+action target like any other, so Sec 8.2's rules, the start-up probe and the recursive walk's
+exclusion all apply to it unchanged.
+
+A file `onReject` moved or deleted is also not remembered: the set that keeps rejected files out
+holds only files still in the directory, since a file that has left it cannot be listed again.
+Under the default `Noop` the file stays and is remembered, which is the behaviour of every
+version before this knob - and the reason the knob exists.
 
 `overwrite` is the `Overwrite` enum (`REFUSE`, `REPLACE`), not a boolean, wherever it appears
 (D33). `REPLACE` is not a bit on a request: SFTP version 3 has no way to say "put this here and
