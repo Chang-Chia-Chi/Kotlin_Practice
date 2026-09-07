@@ -2,19 +2,16 @@ package dynacache.server
 
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
+import dynacache.engine.CpNamespace
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import java.time.Clock
 import java.time.Duration
 import java.time.Instant
-import java.time.ZoneOffset
 import java.util.concurrent.CompletableFuture
-
-private val FIXED: Clock = Clock.fixed(Instant.ofEpochSecond(1_000_000), ZoneOffset.UTC)
 
 private fun bytes(text: String) = text.toByteArray(Charsets.ISO_8859_1)
 
@@ -44,7 +41,7 @@ class CommandDispatcherTest {
 
     private val ap = Recording(Reply.Integer(1))
     private val cp = Recording(Reply.Integer(7))
-    private val dispatcher = CommandDispatcher(ap, cp, FIXED)
+    private val dispatcher = CommandDispatcher(ap, cp)
 
     private fun answer(command: Command): Reply = dispatcher.submit(command).get()
 
@@ -155,8 +152,6 @@ class CommandDispatcherTest {
             Command.IncrBy(counter, -1) to Command.Cp.LongDecr(counter),
             Command.IncrBy(counter, 5) to Command.Cp.LongIncrBy(counter, 5),
             Command.IncrBy(counter, -5) to Command.Cp.LongIncrBy(counter, -5),
-            Command.Expire(counter, FIXED.instant().plusSeconds(10)) to
-                Command.Cp.LongExpire(counter, Duration.ofSeconds(10)),
             Command.Ttl(counter, Command.Ttl.Precision.SECONDS) to
                 Command.Cp.LongTtl(counter, Command.Ttl.Precision.SECONDS),
             Command.Ttl(counter, Command.Ttl.Precision.MILLIS) to
@@ -168,8 +163,6 @@ class CommandDispatcherTest {
             Command.Set(reference, bytes("v")) to Command.Cp.RefSet(reference, bytes("v")),
             // The TTL verbs read the key's kind too: CP spec 9.4 gives them to the owning state
             // machine, so a reference's lease is the reference's own and not a missing counter's.
-            Command.Expire(reference, FIXED.instant().plusSeconds(10)) to
-                Command.Cp.RefExpire(reference, Duration.ofSeconds(10)),
             Command.Ttl(reference, Command.Ttl.Precision.SECONDS) to
                 Command.Cp.RefTtl(reference, Command.Ttl.Precision.SECONDS),
             Command.Ttl(reference, Command.Ttl.Precision.MILLIS) to
@@ -223,9 +216,32 @@ class CommandDispatcherTest {
         assertTrue(ap.seen.isEmpty(), "the AP engine saw ${ap.seen}")
     }
 
+    /**
+     * CP spec 6.8 names `-WRONGTYPE` for a "key exists as different primitive (e.g., LOCK on
+     * AtomicLong key)", and CP spec 2 makes the sub-namespace the thing that says which primitive
+     * a key is. So a verb of one kind aimed at another kind's key is that error, spelled as a CP
+     * verb or as the Redis command the compat set maps to one -- decided once in [CpNamespace]
+     * rather than differently per verb. A `cp:` key in no sub-namespace at all is nobody's in
+     * particular and still reads as the counter, which is what it has always done.
+     */
+    @Test
+    fun a_kind_mismatch_on_a_cp_key_is_wrongtype() {
+        assertEquals("WRONGTYPE", errorKind(Command.Cp.LongIncr(Key("cp:lock:x"))))
+        assertEquals("WRONGTYPE", errorKind(Command.Get(Key("cp:lock:x"))))
+        assertEquals("WRONGTYPE", errorKind(Command.Set(Key("cp:sem:x"), bytes("1"))))
+        assertEquals("WRONGTYPE", errorKind(Command.IncrBy(Key("cp:ref:r"), 1)))
+        assertEquals("WRONGTYPE", errorKind(Command.Ttl(Key("cp:latch:x"), Command.Ttl.Precision.SECONDS)))
+        // CP spec 9.4: the lock's TTL is its lease, so an EXPIRE on it is rejected outright.
+        assertEquals("WRONGTYPE", errorKind(Command.Expire(Key("cp:lock:x"), Instant.EPOCH)))
+        assertTrue(cp.seen.isEmpty() && ap.seen.isEmpty(), "a refused command reached an engine")
+        // The counter still answers its own keys and the untyped ones.
+        assertEquals(Reply.Integer(7), answer(Command.IncrBy(Key("cp:x"), 1)))
+        assertEquals(Reply.Integer(7), answer(Command.IncrBy(Key("cp:counter:x"), 1)))
+    }
+
     @Test
     fun `a node without a CP engine answers NOTCP`() {
-        val apOnly = CommandDispatcher(ap, null, FIXED)
+        val apOnly = CommandDispatcher(ap, null)
         assertEquals("NOTCP", (apOnly.submit(Command.Cp.LongIncr(Key("cp:x"))).get() as Reply.Error).kind)
         assertEquals("NOTCP", (apOnly.submit(Command.IncrBy(Key("cp:x"), 1)).get() as Reply.Error).kind)
         assertEquals(Reply.Integer(1), apOnly.submit(Command.IncrBy(Key("x"), 1)).get())
