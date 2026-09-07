@@ -4,6 +4,7 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.Value
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -33,6 +34,10 @@ class SnapshotPartsTest {
 
     @TempDir
     lateinit var root: Path
+
+    /** The node's own data directory (spec 2.8), where its live log lives; never under [root]. */
+    @TempDir
+    lateinit var data: Path
 
     private val clock: Clock = Clock.fixed(Instant.parse("2026-09-06T12:00:00Z"), ZoneOffset.UTC)
     private val engines = ArrayList<ApEngine>()
@@ -109,6 +114,36 @@ class SnapshotPartsTest {
         assertFalse(root.resolve("s1").exists(), "every node's part of the set went")
         assertTrue(root.resolve("s2").exists(), "another set is untouched")
         parts(engine()).delete("s1")
+    }
+
+    /**
+     * A node with a data directory logs every write; its part of a set holds the state as of the
+     * log's seq at the cut and no log at all, so the live log is never inside a part and deleting
+     * the set can never take a file recovery needs (C14, spec 2.8 recovery).
+     */
+    @Test
+    fun snapshot_part_holds_the_log_up_to_the_cut_only() {
+        val live = engine()
+        SnapshotEngine(live, data, clock, fsync = FsyncPolicy.NEVER).restore()
+        live.submit(Command.Set(Key(bytes("k")), bytes("before"), null, null)).get()
+        val atCut = live.wal!!.lastSeq
+        parts(live).cut("s1")
+        live.submit(Command.Set(Key(bytes("k")), bytes("after"), null, null)).get()
+        live.submit(Command.Set(Key(bytes("later")), bytes("1"), null, null)).get()
+        live.wal!!.close()
+
+        val part = root.resolve("s1").resolve("node-1")
+        assertEquals(emptyList<Path>(), Files.walk(root).use { it.filter { p -> p.fileName.toString().startsWith("wal.") }.toList() }, "no log file under any part")
+        val checkpoint = Files.newInputStream(part.resolve("dump.rdb")).use { RdbReader(Random(1)).read(it) }
+        assertEquals(atCut, checkpoint.walSeq, "the part's state is the log up to the cut")
+        assertEquals(listOf("before"), checkpoint.entries.map { (it.value as Value.Str).bytes.decodeToString() })
+        val log = WalReader(data.resolve("wal.0")).readAll()
+        assertEquals((1..atCut + 2).toList(), log.entries.map { it.seq }, "the live log continued under the data directory")
+
+        val restarted = engine()
+        SnapshotEngine(restarted, data, clock, fsync = FsyncPolicy.NEVER).restore()
+        assertEquals(Reply.Bulk(bytes("after")), restarted.submit(Command.Get(Key(bytes("k")))).get())
+        assertEquals(Reply.Bulk(bytes("1")), restarted.submit(Command.Get(Key(bytes("later")))).get())
     }
 
     /** Before this ticket a channel log was length-delimited protobuf in `from-<peer>.log`. */

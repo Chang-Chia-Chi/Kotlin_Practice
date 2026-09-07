@@ -24,7 +24,12 @@ import java.time.Clock
  */
 interface SnapshotParts {
 
-    /** Opens this node's part of set [id] and writes the engine's state into it. */
+    /**
+     * Opens this node's part of set [id] and writes the engine's state into it. The engine's own
+     * log is left alone: it keeps running under the node's data directory, so the part holds the
+     * state as of the log's seq at the cut and no log file, and [delete] can never take a file
+     * recovery needs (C14, spec 2.8).
+     */
     fun cut(id: String)
 
     /**
