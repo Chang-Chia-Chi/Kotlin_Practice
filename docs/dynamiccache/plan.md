@@ -84,11 +84,12 @@ architecture decisions are `DynaCache/docs/adr/`.
 
 ### 2.3 Seams (public surface budget)
 
-Five seams, each with two real adapters (grilled 2026-09-06; ADR 0001, ADR 0002):
+Six seams, each with two real adapters (grilled 2026-09-06; ADR 0001, ADR 0002; T73):
 
 | Seam | Module | Interface (everything a caller must know) | Adapters |
 |---|---|---|---|
-| `CommandEngine` | engine | `submit(Command): CompletableFuture<Reply>` runs the command on its key's partition executor, fanning a multi-key command out and joining in argument order (non-atomic across partitions, ADR 0002); `atomically(keys) { ctx -> R }` runs a batch on the declared keys' partition with nothing interleaved, rejects keys on different partitions before running (C12), and answers an undeclared key inside the block with an error reply. One command or batch at a time per partition (C1) holds by construction. The CP engine presents the same shape. | AP engine; CP engine (T38); the test kit's recording fake (T18) |
+| `CommandEngine` | engine | `submit(Command): CompletableFuture<Reply>` runs the command on its key's partition executor, fanning a multi-key command out and joining in argument order (non-atomic across partitions, ADR 0002); `close()` shuts the partition executors down. One command at a time per partition (C1) holds by construction. The CP engine presents the same shape. A batch is not part of it: it is the `BatchEngine` capability below, so no adapter implements a batch it cannot run (T73). | AP engine; CP engine (T38); the test kit's recording fake (T18) |
+| `BatchEngine` | engine | `atomically(keys) { ctx -> R }` runs a batch on the declared keys' partition with nothing interleaved, rejects keys on different partitions before running (C12), and answers an undeclared key inside the block with an error reply. Only the connection handler asks for it, for `MULTI`/`EXEC` and `EVAL`; the CP engine offers none, because its replicated log already serializes every entry. | AP engine, which runs a batch; `ClusterNode`, which refuses a batch whose keys this node does not coordinate and otherwise runs it on its own AP engine (T19 deviation 4, unreplicated per T22 deviation 5) |
 | `Clock` and wheel tick | engine | `java.time.Clock` injected; the timer wheel exposes `advanceTo(instant)`; the server owns the scheduler that calls it. | fixed clock in tests |
 | `Transport` | cluster | `send(to: NodeId, message)`, `inbound: Flow<message>`; the messages are the generated protobuf types, so no codec exists between the in-memory and the gRPC adapter. | `InMemoryTransport` (test kit, T18) with network partition, heal, drop, delay, kill; `GrpcTransport` (T23) |
 | `Membership` | cluster | The gossip's current view: alive, suspect, dead; change events. | SWIM (T20); a scripted fake in the test kit |
@@ -97,9 +98,10 @@ Five seams, each with two real adapters (grilled 2026-09-06; ADR 0001, ADR 0002)
 Frozen types, not seams: `Command` (sealed, with a `Cp` sub-hierarchy for the CP verbs and
 compat commands) and `Reply` (exactly RESP2: `Simple`, `Error(kind, message)`, `Integer`,
 `Bulk(bytes?)`, `Array`), frozen in T01; `Command` variants are added per ticket.
-`CommandDispatcher` is a concrete class that only routes (CP spec 9.5). `Ring`, `Dvv`,
-`MerkleTree`, `HintStore` and the data structures are concrete and tested through
-`CommandEngine` or their own public methods.
+`CommandDispatcher` is a concrete class that only routes (CP spec 9.5) and knows nothing of
+batches; the `cp:` refusal a batch needs (C16) is the connection handler's, beside the two
+callers that ask for one. `Ring`, `Dvv`, `MerkleTree`, `HintStore` and the data structures are
+concrete and tested through `CommandEngine` or their own public methods.
 
 A **partition** is a fixed-count local hash bucket inside the engine, each with one JDK
 single-thread executor and its own store; the ring's **vnodes** decide placement across nodes

@@ -11,11 +11,13 @@ import dynacache.cp.GrpcRaftTransport
 import dynacache.cp.InMemoryRaftStore
 import dynacache.cp.RaftRuntime
 import dynacache.engine.ApEngine
+import dynacache.engine.BatchEngine
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.CpNamespace
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
+import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
@@ -58,12 +60,18 @@ import java.util.concurrent.TimeUnit
  * [ap] is the dispatcher's AP side. It defaults to [engine], which is the single node; a
  * [ClusterNode] passes its router, so the same pipeline serves a cluster without knowing it
  * (T24). [engine] stays the local one either way: it is what the scheduler ticks.
+ *
+ * [batch] is what `MULTI`/`EXEC` and `EVAL` run on: a capability of the AP engine rather than
+ * part of the engine seam (T73), so nothing between the socket and a partition has to implement
+ * a batch it cannot run. A [ClusterNode] passes itself, which refuses a batch whose keys it does
+ * not coordinate before running it on its own engine.
  */
 class DynaCacheServer(
     private val port: Int,
     private val engine: ApEngine,
     cp: CommandEngine? = null,
     ap: CommandEngine = engine,
+    private val batch: BatchEngine = engine,
     private val clock: Clock = Clock.systemUTC(),
     private val tick: () -> Unit = { engine.tick() },
 ) : AutoCloseable {
@@ -89,7 +97,7 @@ class DynaCacheServer(
             .channel(NioServerSocketChannel::class.java)
             .childHandler(object : ChannelInitializer<SocketChannel>() {
                 override fun initChannel(ch: SocketChannel) {
-                    ch.pipeline().addLast(RespFrameDecoder(), CommandHandler(dispatcher, clock))
+                    ch.pipeline().addLast(RespFrameDecoder(), CommandHandler(dispatcher, batch, clock))
                 }
             })
             .bind(port).sync().channel()
@@ -141,6 +149,7 @@ private class RespFrameDecoder : ByteToMessageDecoder() {
  */
 private class CommandHandler(
     private val engine: CommandEngine,
+    private val batch: BatchEngine,
     clock: Clock,
 ) : ChannelInboundHandlerAdapter() {
 
@@ -197,7 +206,7 @@ private class CommandHandler(
                 spoiled = true
                 return done(Reply.Error("ERR", "EVAL inside MULTI is not supported"))
             }
-            return evalScript(engine, parser, tokens.drop(1))
+            return evalScript(batch, parser, tokens.drop(1))
         }
         return when (val parsed = parser.parse(tokens)) {
             is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: submit(parsed.command)
@@ -295,11 +304,9 @@ private class CommandHandler(
         val refused = spoiled
         forget()
         if (refused) return done(Reply.Error("EXECABORT", "Transaction discarded because of previous errors."))
-        return engine
-            .atomically<Reply>(commands.flatMap(CpNamespace::keysOf).distinct()) { ctx ->
-                Reply.Array(commands.map(ctx::execute))
-            }
-            .orBatchError()
+        return batch.runBatch(commands.flatMap(CpNamespace::keysOf).distinct()) { ctx ->
+            Reply.Array(commands.map(ctx::execute))
+        }
     }
 
     private fun forget() {
@@ -356,11 +363,24 @@ private val BATCH = setOf("multi", "exec", "discard")
 internal fun done(reply: Reply): CompletableFuture<Reply> = CompletableFuture.completedFuture(reply)
 
 /**
- * A batch's answer, with C12's refusal turned back into the reply it carries. Both batches --
- * `EXEC` and `EVAL` -- end this way: `atomically` answers whatever its block returned, so a span
- * that was never allowed to run can only arrive as the future's failure.
+ * One batch, as the connection handler asks for it: both callers -- `EXEC` and `EVAL` -- go
+ * through here. A `cp:` key among the declared ones is refused before anything runs, the way a
+ * cross-partition span is (C12, C16): the CP engine has no partition the batch could share, so
+ * the two namespaces can never be one uninterrupted run.
  */
-internal fun CompletableFuture<Reply>.orBatchError(): CompletableFuture<Reply> = exceptionally { failure ->
+internal fun BatchEngine.runBatch(
+    keys: List<Key>,
+    block: (PartitionContext) -> Reply,
+): CompletableFuture<Reply> =
+    if (keys.any(CpNamespace::owns)) done(Reply.Error("ERR", "a batch cannot name a cp: key"))
+    else atomically(keys, block).orBatchError()
+
+/**
+ * A batch's answer, with C12's refusal turned back into the reply it carries: `atomically`
+ * answers whatever its block returned, so a span that was never allowed to run can only arrive
+ * as the future's failure.
+ */
+private fun CompletableFuture<Reply>.orBatchError(): CompletableFuture<Reply> = exceptionally { failure ->
     val span = failure as? CrossPartitionBatch ?: failure.cause as? CrossPartitionBatch
     span?.error ?: Reply.Error("ERR", failure.cause?.message ?: failure.message ?: "internal error")
 }

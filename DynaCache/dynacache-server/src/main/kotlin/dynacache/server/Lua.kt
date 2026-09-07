@@ -1,6 +1,6 @@
 package dynacache.server
 
-import dynacache.engine.CommandEngine
+import dynacache.engine.BatchEngine
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
@@ -53,7 +53,7 @@ private val BANNED_GLOBALS = listOf(
 // key on that partition stops answering with it. Redis bounds this with a busy-script timeout
 // and SCRIPT KILL; an instruction-count hook on the Globals is the repair here, and it wants
 // its own ticket because killing a half-run script is a question about atomicity, not sandboxing.
-fun evalScript(engine: CommandEngine, parser: CommandParser, args: List<ByteArray>): CompletableFuture<Reply> {
+fun evalScript(batch: BatchEngine, parser: CommandParser, args: List<ByteArray>): CompletableFuture<Reply> {
     if (args.size < 2) return done(Reply.Error("ERR", "wrong number of arguments for 'eval' command"))
     val declared = args[1].text().toIntOrNull()
         ?: return done(Reply.Error("ERR", "value is not an integer or out of range"))
@@ -63,9 +63,7 @@ fun evalScript(engine: CommandEngine, parser: CommandParser, args: List<ByteArra
     }
     val keys = args.subList(2, 2 + declared).map(::Key)
     val argv = args.subList(2 + declared, args.size)
-    return engine
-        .atomically<Reply>(keys) { ctx -> runScript(ctx, parser, args[0], keys, argv) }
-        .orBatchError()
+    return batch.runBatch(keys) { ctx -> runScript(ctx, parser, args[0], keys, argv) }
 }
 
 /**

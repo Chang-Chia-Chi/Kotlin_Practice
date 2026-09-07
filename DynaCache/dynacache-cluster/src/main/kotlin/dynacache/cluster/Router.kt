@@ -10,8 +10,6 @@ import dynacache.cluster.proto.ForwardReply
 import dynacache.cluster.proto.ReplyMsg
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
-import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import dynacache.engine.persist.CommandCodec
 import java.util.concurrent.CompletableFuture
@@ -77,22 +75,6 @@ class Router(
             parts = parts.thenCompose { replies -> submit(command.single(index)).thenApply { replies + it } }
         }
         return parts.thenApply(command::join)
-    }
-
-    /**
-     * A batch runs only on the coordinator of its keys: it is one partition's uninterrupted
-     * run (C12), and a forward would have to carry the caller's block, which is code. A batch
-     * whose keys this node does not coordinate fails the future rather than answering, since
-     * the signature's `R` is the caller's own type and has no error shape.
-     */
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> {
-        val elsewhere = keys.map { it to ring.preferenceList(it, n).first() }.firstOrNull { it.second != self }
-        if (elsewhere != null) {
-            return CompletableFuture.failedFuture(
-                IllegalStateException("${elsewhere.first} is coordinated by ${elsewhere.second}, not $self")
-            )
-        }
-        return local.atomically(keys, block)
     }
 
     override fun close() = local.close()

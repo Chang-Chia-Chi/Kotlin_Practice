@@ -3,8 +3,6 @@ package dynacache.cp
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.CpNamespace
-import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import io.microraft.exception.CannotReplicateException
 import io.microraft.exception.IndeterminateStateException
@@ -43,9 +41,6 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
             }
         }
     }
-
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        throw NotImplementedError("CP has no batches: the Raft log already serializes every entry")
 
     override fun close() = runtime.close()
 

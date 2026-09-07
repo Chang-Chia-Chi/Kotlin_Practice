@@ -2,8 +2,6 @@ package dynacache.cluster
 
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
-import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import java.util.concurrent.CompletableFuture
 
@@ -20,9 +18,6 @@ class RecordingEngine(private val reply: Reply = Reply.Simple("OK")) : CommandEn
         submitted.add(command)
         return CompletableFuture.completedFuture(reply)
     }
-
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        TODO("record batches when a T19 or T22 test needs them")
 
     override fun close() = Unit
 }

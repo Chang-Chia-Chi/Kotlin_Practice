@@ -4,8 +4,6 @@ import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.CpNamespace
 import dynacache.engine.CpRouting
-import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import java.util.concurrent.CompletableFuture
 
@@ -33,18 +31,6 @@ class CommandDispatcher(
         is CpRouting.Refused -> done(routing.error)
         CpRouting.Ap -> ap.submit(command)
     }
-
-    /**
-     * A batch runs on the AP engine: the CP log already serializes every entry, so CP has no
-     * batches to run. A `cp:` key among the declared ones is refused before anything runs, the way
-     * a cross-partition span is (C12, C16), and reaches the caller as this future's failure.
-     */
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        if (keys.any(CpNamespace::owns)) {
-            CompletableFuture.failedFuture(IllegalArgumentException("a batch cannot name a cp: key"))
-        } else {
-            ap.atomically(keys, block)
-        }
 
     /** Closes the AP engine and, when this node has one, the CP engine. */
     override fun close() {
