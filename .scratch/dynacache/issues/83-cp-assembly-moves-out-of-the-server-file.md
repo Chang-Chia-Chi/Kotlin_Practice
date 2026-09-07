@@ -13,15 +13,15 @@ tickets edit the same two files heavily, so they are sequenced to avoid a merge.
 
 **Nature:** wiring, no behaviour change (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 95776a55, merged into misc/ai_gen; the args helper stays in the server by design)
 
-- [ ] The CP assembly is not in `DynaCacheServer.kt`; the file's remaining reasons to change
+- [x] The CP assembly is not in `DynaCacheServer.kt`; the file's remaining reasons to change
       are the socket, the handler and `main`
-- [ ] A node in single-node mode and a node in cluster mode both start, serve and shut down as
+- [x] A node in single-node mode and a node in cluster mode both start, serve and shut down as
       before; the existing acceptance tests prove it unchanged
-- [ ] The module graph is unchanged: nothing new is imported into a module that did not already
+- [x] The module graph is unchanged: nothing new is imported into a module that did not already
       depend on it
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Size budget: 200 to 600 lines; the diff is a move, so report how much is genuinely new. If the
 CP assembly cannot move without the CP module learning about Netty or the command line, stop

@@ -8082,3 +8082,57 @@ the number is read by something and not just written down.
    were kept rather than deleted for that reason: the ticket's third acceptance criterion is
    that the exchange decides exactly what the local diff decides, and deleting the reference
    would delete the test that says so.
+
+---
+
+## T83 - The CP assembly moves out of the server file
+
+The review's Divergent Change finding on `DynaCacheServer.kt`: one file changed for the socket,
+the handler, `main` and the whole CP wiring. The CP wiring is gone from it.
+
+**Where the assembly went, and why there.** A new `dynacache-cp/src/main/kotlin/dynacache/cp/CpNode.kt`
+holds the `CpNode` class, the `cpNode` factory, `cpAddressBook` and `CP_DIR`. That is the module
+whose code the assembly wires: the store, the runtime, the engine and the gRPC presence are all
+`dynacache.cp`, so the one order they have to go together in is `dynacache.cp` too. Plan 2.2 also
+names `dynacache.cp` as an owner of its own on-disk layout, which is where `CP_DIR` belongs and
+where `FileRaftStore`-or-`InMemoryRaftStore` is chosen. Nothing that moved knows about Netty or
+the command line: a composition root passes a group, an address book, a port and a directory and
+gets back a node to start, read a port from and close. `cpAddressBook` went with it because
+`id@host:port,...` is how a CP group is written down (CP spec 2.2), not how the command line is
+shaped; it is called from `main`'s helper and from `clusterMain`, and both now import it.
+
+**What the server file is left responsible for.** The Netty bootstrap and the frame decoder (the
+socket), the per-connection handler with its batch and session state, and `main` with its
+argument reading. `DynaCacheServer.kt` went from 512 to 449 lines. A Raft change no longer lands
+in it.
+
+**Deviation: `cpNodeFromArgs` stays in the server file (10 lines).** It reads `main`'s two
+positional arguments, `cp-self` and `cp-members`, and is called from nowhere else. It cannot move
+without `dynacache.cp` learning the command line's positional convention, which the ticket
+forbids; it is `main`'s argument reading, and `main` is one of the three reasons the server file
+is allowed to change. Its doc now points at `cpNode` for the assembly itself.
+
+**Visibility.** `CpNode`, `cpNode`, `cpAddressBook` and `CP_DIR` were `internal` to the server
+module and are now public in `dynacache-cp`, since the server module is a different compilation
+unit. None of them is a seam of plan 2.3, and no pom changed.
+
+**New versus moved.** 85 insertions, 70 deletions across three files. Of the 75 lines in the new
+file, about 62 are relocated verbatim (the class, the factory, `cpAddressBook`, `CP_DIR` and
+their docs) and about 13 are genuinely new: 8 lines of package and imports, and 5 doc lines in
+the `CpNode` KDoc saying why the assembly lives beside the CP code now. `DynaCacheServer.kt`
+gains 4 import lines and 3 reworded doc lines; `ClusterNode.kt` gains 3 import lines. No
+behaviour changed: the construction order, the close order and every default are as they were.
+
+**Module graph unchanged.** `dynacache-cp` already depended on `dynacache-cluster` (for `NodeId`
+and `HostPort`), on `dynacache-engine` transitively (for `CommandEngine`, which `CpEngine` and
+`ForwardingCpEngine` already implement) and on MicroRaft (for `RaftConfig`). `dynacache-server`
+already imported `dynacache.cp`. Nothing was added to any pom.
+
+**Tests.** No test was added, changed or renamed: the ticket is a move and the existing acceptance
+tests are what prove a single node and a cluster node still start, serve and shut down as before.
+Baseline and after are identical, 507 total, all green: engine 188, cluster 98, cp 113, server
+108. The brief's split (180/97/113/117) was wrong on three of four modules; the total matched.
+`P1AcceptanceTest`, `P5AcceptanceTest`, `CpRoutingTest`, `CpSessionLifecycleTest` and
+`DynaCacheServerTest` all pass unchanged. No flakes, no rerun needed.
+
+**Commit.** `95776a55` on branch `t83`.
