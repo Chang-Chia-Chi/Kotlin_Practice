@@ -68,7 +68,7 @@ sealed class Value(val kind: Kind) {
      * mean walking the JVM's object graph.
      *
      * ponytail: O(elements), so the cost of measuring a big aggregate is the aggregate's size.
-     * [Partition] calls it once per command on the one key that command touched, which is the
+     * [PartitionStore] charges it once per command for the one key that command touched, which is
      * same order as the command's own work for a String and more than it for one field of a big
      * hash. Per-element deltas threaded through every mutation site would make it O(1) and cost
      * a running total in every structure.
