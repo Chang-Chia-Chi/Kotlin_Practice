@@ -4,6 +4,7 @@ package dynacache.engine
 import dynacache.engine.ds.Entry as Scored
 import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
+import dynacache.engine.persist.KeyVersions
 import dynacache.engine.persist.RdbEntry
 import java.time.Clock
 import java.time.Duration
@@ -20,7 +21,7 @@ import java.util.concurrent.Executors
  * deadlines and which key goes under pressure are the store's, not its.
  */
 internal class Partition(
-    id: PartitionId,
+    private val id: PartitionId,
     private val clock: Clock,
     private val random: Random,
     tickMillis: Long,
@@ -37,6 +38,12 @@ internal class Partition(
      * durability of the entry it appended, or null when the command changed nothing (C14).
      */
     private val log: (Command, Reply, Instant) -> CompletableFuture<*>?,
+    /**
+     * The versions this partition's keys are held under (T67), read on this thread so a snapshot
+     * never pairs one install's value with another's version. A function, not a value: the
+     * engine's store is attached after the partitions are built.
+     */
+    private val versions: () -> KeyVersions,
 ) {
 
     /**
@@ -92,15 +99,20 @@ internal class Partition(
      * executor so it sits between two commands or batches and never inside one (C9). The
      * entries are copied, not referenced: a Hash, List or Sorted Set is mutated in place by the
      * next command, and the writer serializes off this thread. A String's bytes are shared,
-     * since no command mutates that array. The DVV is empty until replication stamps one (T22).
+     * since no command mutates that array. Each entry carries the version the key is held under,
+     * empty on a node that versions nothing, and a version with no live value goes in as a
+     * tombstone row: a restart that forgot one would let anti-entropy resurrect a delete (T67).
      * The task waits at [cut] first, so every partition's view is taken at the same moment.
      */
     fun snapshotView(now: Instant, cut: CyclicBarrier): CompletableFuture<List<RdbEntry>> =
         CompletableFuture.supplyAsync({
             cut.await()
-            store.entries().filterNot { it.value.expired(now) }
-                .map { RdbEntry(it.key, frozen(it.value.value), it.value.expiresAt, EMPTY) }
+            val held = versions().on(id)
+            val live = store.entries().filterNot { it.value.expired(now) }
+                .map { RdbEntry(it.key, frozen(it.value.value), it.value.expiresAt, held[it.key] ?: EMPTY) }
                 .toList()
+            val alive = live.mapTo(HashSet()) { it.key }
+            live + held.entries.filter { it.key !in alive }.map { RdbEntry(it.key, null, null, it.value) }
         }, executor)
 
     /** [work] as one task on this thread with the store at hand (T66): what [StoreAccess] promises. */
@@ -134,11 +146,18 @@ internal class Partition(
         override fun execute(command: Command): Reply = this@Partition.execute(command)
     }
 
-    /** Writes restored [entries] in, through the same funnel a command uses, skipping the already expired. */
+    /**
+     * Writes restored [entries] in, through the same funnel a command uses, skipping the already
+     * expired. A tombstone has no value to write: it is a version alone, and the version table is
+     * where it lands (T67).
+     */
     fun restore(entries: List<RdbEntry>): CompletableFuture<Void> =
         CompletableFuture.runAsync({
             val now = clock.instant()
-            for (entry in entries) if (!entry.expired(now)) store.put(entry.key, now, entry.value, entry.expiresAt)
+            for (entry in entries) {
+                val value = entry.value ?: continue
+                if (!entry.expired(now)) store.put(entry.key, now, value, entry.expiresAt)
+            }
         }, executor)
 
     private fun frozen(value: Value): Value = when (value) {

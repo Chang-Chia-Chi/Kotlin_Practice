@@ -10,6 +10,7 @@ import dynacache.engine.Stored
 import dynacache.engine.Value
 import dynacache.engine.onEveryPartition
 import dynacache.engine.onPartitionOf
+import dynacache.engine.persist.KeyVersions
 import dynacache.engine.persist.encodeValue
 import java.time.Instant
 import java.util.Arrays
@@ -48,12 +49,43 @@ class Installed(val outcome: Outcome, val held: Held)
  * The table is one map per partition, touched only on that partition's thread next to the
  * value, so it needs no lock of its own. A key the table holds and the engine does not is a
  * tombstone, and it is held like any other pair: anti-entropy carries it (T66, closing T28
- * deviation 3). Nothing is persisted yet (T67): a restart empties the table, and a value the
- * engine restored without a version is invisible here until a peer's version reaches it.
+ * deviation 3).
+ *
+ * The table survives a restart (T67): this store is the engine's [KeyVersions], so a snapshot
+ * writes every version down beside its value and every tombstone as a row of its own, the log
+ * carries each version behind the command that moved it, and recovery hands them all back
+ * through [restored] before the node serves anyone. The dot counter takes each restored version
+ * as a floor on the way past, so it resumes above every dot this node ever gave a write (C2)
+ * and a restarted replica answers a quorum read with the authority it had (I2).
  */
-class VersionedStore(private val engine: ApEngine, private val counter: DotCounter) {
+class VersionedStore(private val engine: ApEngine, private val counter: DotCounter) : KeyVersions {
 
     private val tables = ConcurrentHashMap<PartitionId, ConcurrentHashMap<Key, Dvv>>()
+
+    init {
+        // One store per engine, and the engine has nothing else to persist versions for: wiring
+        // it here is wiring it everywhere the store is built, rather than at each assembly.
+        engine.versions = this
+    }
+
+    /** Persistence's view of one partition's table, encoded: what the snapshot writes down. */
+    override fun on(partition: PartitionId): Map<Key, ByteArray> =
+        tables[partition].orEmpty().mapValues { (_, dvv) -> dvv.encode() }
+
+    /** Persistence's view of one key, encoded: what the log carries behind that key's command. */
+    override fun of(key: Key): ByteArray = table(key)[key]?.encode() ?: KeyVersions.NO_VERSION
+
+    /**
+     * Recovery hands back what it persisted, snapshot first and then the log after it, so the
+     * last version a key was written under is the one it ends held under. A version that does not
+     * decode fails the restore rather than starting the key over with none, as the dot ceiling's
+     * unreadable file does (T51).
+     */
+    override fun restored(key: Key, version: ByteArray) {
+        val dvv = Dvv.decode(version)
+        table(key)[key] = dvv
+        counter.saw(dvv)
+    }
 
     private fun table(key: Key): ConcurrentHashMap<Key, Dvv> = tables.computeIfAbsent(engine.partitionOf(key)) { ConcurrentHashMap() }
 
