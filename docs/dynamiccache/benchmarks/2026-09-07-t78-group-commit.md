@@ -82,6 +82,13 @@ To be filled from `environment.txt` and `load.txt` with the passes: every pass r
 Java process count and the CPU idle it ran under, and a pass taken under contention is marked as
 such rather than quietly believed.
 
+Run with `QUIET_BUDGET=60`, not the default 600. The gate waits that long per pass before giving
+up and running anyway, so on a busy machine the default costs ten minutes a pass to arrive at a
+number stamped as contended. A first attempt at this measurement spent ten minutes in the gate
+and took no reading at all. One minute is long enough to catch a machine that is briefly busy and
+short enough that a machine which is properly busy says so while the window can still be given
+back. Recommended for whoever measures next.
+
 ## Pass 1: NEVER, plain and pipelined, `-t set,incr,hset,zadd`
 
 To be filled.
