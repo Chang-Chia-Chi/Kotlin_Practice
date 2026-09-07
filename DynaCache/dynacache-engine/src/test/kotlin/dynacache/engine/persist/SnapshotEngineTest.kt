@@ -173,4 +173,24 @@ class SnapshotEngineTest {
         val values = keys.map { restored().get(it.bytes.toString(Charsets.ISO_8859_1)) }
         assertEquals(1, values.distinct().size, "all ten keys carry one batch's stamp or none: $values")
     }
+
+    /**
+     * The engine makes its own directory. Every caller hands it a path that came from
+     * configuration -- a command-line argument, a set's part -- and no caller above the persist
+     * package should have to prepare the directory before the engine can use it (T81). With a
+     * log, the first `restore` lists the directory too, so a missing one used to fail there.
+     */
+    @Test
+    fun a_data_directory_that_does_not_exist_yet_is_the_engine_s_to_create() {
+        val fresh = dir.resolve("node-1").resolve("data")
+        val engine = engine()
+        val snapshots = SnapshotEngine(engine, fresh, clock, fsync = FsyncPolicy.NEVER)
+
+        assertTrue(Files.isDirectory(fresh), "the engine left its own directory to its caller")
+        assertEquals(0, snapshots.restore(), "a directory with nothing in it restores nothing")
+        engine.run(Command.Set(key("plain"), bytes("hello"), null, null))
+        snapshots.close()
+
+        assertTrue(Files.isRegularFile(SnapshotEngine.stateFile(fresh)), "the shutdown save wrote no snapshot")
+    }
 }
