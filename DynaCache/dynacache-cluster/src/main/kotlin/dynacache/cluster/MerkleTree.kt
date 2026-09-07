@@ -21,13 +21,20 @@ class MerkleLeaf(val key: Key, val valueHash: ByteArray, val dvv: Dvv)
 class MerkleTree private constructor(
     /** The range's leaves, ascending by unsigned key bytes. */
     private val leaves: List<MerkleLeaf>,
-    private val fanout: Int,
+    /** The width of every node: two trees compare, and descend, only at one fan-out. */
+    val fanout: Int,
     /** `levels[0]` is the leaf hashes, each level above it the [fanout]-way chunking of the one below. */
     private val levels: List<List<ByteArray>>,
 ) {
 
     /** The hash the anti-entropy exchange of T28 compares first. */
     val root: ByteArray get() = levels.last().single()
+
+    /** How many leaves the range holds: what [heightOf] turns back into this tree's [height]. */
+    val size: Int get() = leaves.size
+
+    /** The number of levels; `height - 1` is the root's level and 0 is the leaves. */
+    val height: Int get() = levels.size
 
     /**
      * The keys this tree and [other] disagree about, grouped into the leaf spans the descent
@@ -39,9 +46,6 @@ class MerkleTree private constructor(
      * against [other], so a range is reported only when something in it really differs.
      */
     fun diff(other: MerkleTree): List<DivergentRange> {
-        require(fanout == other.fanout) {
-            "Merkle trees compare only at one fan-out: $fanout against ${other.fanout}"
-        }
         val suspect = suspectLeaves(other)
         val ranges = ArrayList<DivergentRange>()
         var from = 0
@@ -54,26 +58,67 @@ class MerkleTree private constructor(
         return ranges
     }
 
-    /** The leaf indices under a subtree pair that disagreed, ascending. */
-    private fun suspectLeaves(other: MerkleTree): List<Int> {
+    /**
+     * The leaf positions a descent against [other] suspects, ascending: the descent starts at
+     * the root and, at each level, opens only the nodes whose hashes disagreed. This is the
+     * whole comparison, and T84's exchange runs the same three steps a level at a time over the
+     * wire ([hashesAt], [differing], [childrenOf]) so a subtree that matches never crosses.
+     */
+    fun suspectLeaves(other: MerkleTree): List<Int> {
+        require(fanout == other.fanout) {
+            "Merkle trees compare only at one fan-out: $fanout against ${other.fanout}"
+        }
         if (root.contentEquals(other.root)) return emptyList()
         // Trees of different height have no level to compare; checking every leaf still gives
         // the exact answer below, it only spends the descent's saving.
-        if (levels.size != other.levels.size) {
-            return (0 until maxOf(leaves.size, other.leaves.size)).toList()
+        if (height != other.height) return (0 until maxOf(size, other.size)).toList()
+        var level = height - 1
+        var positions = listOf(0)
+        while (true) {
+            positions = differing(level, positions, other.hashesAt(level, positions))
+            if (level == 0 || positions.isEmpty()) return positions
+            positions = childrenOf(positions)
+            level--
         }
-        val suspect = ArrayList<Int>()
-        descend(other, levels.size - 1, 0, suspect)
-        return suspect
     }
 
-    private fun descend(other: MerkleTree, level: Int, index: Int, suspect: MutableList<Int>) {
-        val mine = levels[level].getOrNull(index)
-        val theirs = other.levels[level].getOrNull(index)
-        if (mine == null && theirs == null) return
-        if (mine != null && theirs != null && mine.contentEquals(theirs)) return
-        if (level == 0) suspect.add(index)
-        else for (child in index * fanout until (index + 1) * fanout) descend(other, level - 1, child, suspect)
+    /** This tree's hashes at [level] for [positions], in order, null where it has no such node. */
+    fun hashesAt(level: Int, positions: List<Int>): List<ByteArray?> =
+        positions.map { levels.getOrNull(level)?.getOrNull(it) }
+
+    /**
+     * Which of [positions] at [level] this tree disagrees about, [theirs] being the other side's
+     * hashes for the same positions in the same order. A position neither side has a node at
+     * agrees; a position only one side has does not.
+     */
+    fun differing(level: Int, positions: List<Int>, theirs: List<ByteArray?>): List<Int> {
+        require(positions.size == theirs.size) {
+            "a level answers one hash per position asked: ${theirs.size} for ${positions.size}"
+        }
+        val mine = hashesAt(level, positions)
+        return positions.filterIndexed { at, _ -> !sameHash(mine[at], theirs[at]) }
+    }
+
+    /** The positions at the level below that [positions] cover: [fanout] children each, in order. */
+    fun childrenOf(positions: List<Int>): List<Int> =
+        positions.flatMap { it * fanout until (it + 1) * fanout }
+
+    /** The leaves this tree holds among [positions], in position order. */
+    fun leavesAt(positions: List<Int>): List<MerkleLeaf> = positions.mapNotNull { leaves.getOrNull(it) }
+
+    /**
+     * The keys this tree and [theirs] hold differently, ascending: [theirs] is the other side's
+     * leaves at the same [positions] a descent suspected. A key only one side holds diverges, and
+     * so does one whose leaf hash differs, which is what [diff] decides key by key at the bottom
+     * of a local descent. Outside the suspect positions the two sides hold identical leaves, so
+     * these positions hold every key that can differ.
+     */
+    fun divergentKeys(positions: List<Int>, theirs: List<MerkleLeaf>): List<Key> {
+        val here = leavesAt(positions).associateBy { it.key }
+        val there = theirs.associateBy { it.key }
+        return (here.keys + there.keys)
+            .sortedWith { a, b -> compareKeys(a, b) }
+            .filter { !sameHash(here[it]?.let(::leafHash), there[it]?.let(::leafHash)) }
     }
 
     /** The keys of one suspect span, and which of them [other] really disagrees about. */
@@ -116,6 +161,27 @@ class MerkleTree private constructor(
             }
             return MerkleTree(sorted, fanout, levels)
         }
+
+        /**
+         * The [height] a tree of [leafCount] leaves has under [fanout], without building it:
+         * how a descent over the wire learns from a peer's leaf count alone whether the two
+         * trees line up level by level (T84).
+         */
+        fun heightOf(leafCount: Int, fanout: Int = FANOUT): Int {
+            require(fanout >= 2) { "a Merkle tree needs a fan-out of at least 2, not $fanout" }
+            if (leafCount <= 0) return 2
+            var width = leafCount
+            var height = 1
+            while (width != 1) {
+                width = (width + fanout - 1) / fanout
+                height++
+            }
+            return height
+        }
+
+        /** Two hashes agree when both are absent or both are the same bytes. */
+        private fun sameHash(a: ByteArray?, b: ByteArray?): Boolean =
+            if (a == null || b == null) a == null && b == null else a.contentEquals(b)
 
         /** Key order is the ring's order: unsigned bytes, so it matches how keys are exchanged. */
         private fun compareKeys(a: Key, b: Key): Int = Arrays.compareUnsigned(a.bytes, b.bytes)
