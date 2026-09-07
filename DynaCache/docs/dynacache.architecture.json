@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DynaCache — One Node, End to End",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "request-path", "label": "Client request path", "focus": ["clients", "server", "dispatcher", "router", "apengine", "store"], "note": "Follow a Redis command from the socket to the partition that owns its key." },
+      { "id": "durability", "label": "Durability", "focus": ["apengine", "persist", "store"], "note": "The write-ahead log fronts the store; RDB plus replay rebuilds it after a crash." },
+      { "id": "quorum", "label": "Replication and quorum", "focus": ["router", "replication", "swim", "transport"], "note": "The coordinator ships the write, counts acks, and reads liveness from gossip." },
+      { "id": "convergence", "label": "Convergence", "focus": ["store", "antientropy", "replication", "transport"], "note": "Read repair on the read path, Merkle anti-entropy in the background." },
+      { "id": "cp", "label": "CP subsystem", "focus": ["dispatcher", "cpengine"], "note": "The cp:* namespace leaves the AP path entirely and lands on a Raft group." }
+    ]
+  },
+  "components": [
+    { "id": "clients", "type": "external", "label": "Redis Clients", "sublabel": "redis-cli / Jedis", "pos": [30, 40], "size": [170, 66] },
+    { "id": "server", "type": "frontend", "label": "RESP2 Server", "sublabel": "Netty pipeline", "tag": "byte-identical", "pos": [305, 40], "size": [170, 66] },
+    { "id": "dispatcher", "type": "backend", "label": "Dispatcher", "sublabel": "namespace rule", "tag": "-NOTCP", "pos": [580, 40], "size": [170, 66] },
+    { "id": "cpengine", "type": "backend", "label": "CP Engine", "sublabel": "Raft state machines", "tag": "own gRPC group", "pos": [855, 40], "size": [170, 66] },
+
+    { "id": "router", "type": "backend", "label": "Router", "sublabel": "coordinate or forward", "tag": "preference list", "pos": [580, 165], "size": [170, 66] },
+    { "id": "replication", "type": "backend", "label": "Replication", "sublabel": "quorum / DVV / hints", "tag": "R + W > N", "pos": [855, 165], "size": [170, 66] },
+    { "id": "swim", "type": "backend", "label": "SWIM Gossip", "sublabel": "alive / suspect / dead", "pos": [1130, 165], "size": [170, 66] },
+
+    { "id": "persist", "type": "database", "label": "WAL + RDB", "sublabel": "group commit", "tag": "replay on restart", "pos": [305, 290], "size": [170, 66] },
+    { "id": "apengine", "type": "backend", "label": "AP Command Engine", "sublabel": "executor per partition", "tag": "C1 single-writer", "pos": [580, 290], "size": [170, 66] },
+    { "id": "transport", "type": "messagebus", "label": "Cluster Transport", "sublabel": "gRPC to 3-7 peers", "tag": "drop, never throw", "pos": [1130, 290], "size": [170, 191] },
+
+    { "id": "store", "type": "database", "label": "Partition Store", "sublabel": "hash table / skip list", "tag": "wheel + W-TinyLFU", "pos": [580, 415], "size": [170, 66] },
+    { "id": "antientropy", "type": "backend", "label": "Anti-entropy", "sublabel": "Merkle + read repair", "pos": [855, 415], "size": [170, 66] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "One DynaCache node", "wraps": ["server", "dispatcher", "cpengine", "router", "replication", "swim", "persist", "apengine", "transport", "store", "antientropy"] }
+  ],
+  "connections": [
+    { "id": "resp-in", "from": "clients", "to": "server", "label": "RESP2 :6379", "variant": "emphasis" },
+    { "id": "parsed", "from": "server", "to": "dispatcher", "label": "parsed command" },
+    { "id": "cp-branch", "from": "dispatcher", "to": "cpengine", "label": "cp:* keys" },
+    { "id": "ap-branch", "from": "dispatcher", "to": "router", "label": "AP keys", "labelDy": 43 },
+    { "id": "ship-write", "from": "router", "to": "replication", "label": "ship to N-1" },
+    { "id": "coordinate", "from": "router", "to": "apengine", "label": "runs it locally", "labelDy": 43 },
+    { "id": "membership", "from": "swim", "to": "replication", "label": "liveness" },
+    { "id": "wal", "from": "apengine", "to": "persist", "label": "append first" },
+    { "id": "apply", "from": "apengine", "to": "store", "label": "one at a time", "labelDy": 43 },
+    { "id": "merkle-scan", "from": "store", "to": "antientropy", "label": "key ranges" },
+    { "id": "gossip-out", "from": "swim", "to": "transport", "label": "probes", "labelDy": 43 },
+    { "id": "repl-out", "from": "replication", "to": "transport", "label": "writes + hints" },
+    { "id": "sync-out", "from": "antientropy", "to": "transport", "label": "range sync" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Client path", "items": ["RESP2 on :6379, byte-identical to Redis", "The dispatcher splits cp:* from AP keys and never rewrites a reply", "The router coordinates keys this node owns and forwards the rest"] },
+    { "dot": "emerald", "title": "AP data plane", "items": ["One partition executor runs one command, batch or script at a time", "Hash table with incremental rehashing, skip lists, hierarchical timer wheel", "Every mutation reaches the log before the client is acked"] },
+    { "dot": "violet", "title": "Cluster", "items": ["A preference list is the N nodes clockwise from a key's hash", "W acks for a write, R answers for a read, with R + W > N", "A write for a dead replica is held as a hint and replayed on recovery"] },
+    { "dot": "amber", "title": "CP subsystem", "items": ["cp:* keys land on Raft state machines: counter, lock, semaphore, latch, reference, session", "Leases and session timeouts run on log time, never a member's own clock"] }
+  ]
+}
