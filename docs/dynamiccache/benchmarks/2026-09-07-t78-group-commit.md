@@ -3,14 +3,19 @@
 Measured by `DynaCache/bench/single-node.sh` with `SECTIONS=t78`. Every number is a value
 `redis-benchmark --csv` printed; nothing is rounded, averaged or adjusted.
 
+**The ratios are the result. The absolute rates are provisional.** Every pass ran on a machine
+that could not pass the quiet gate, and says so in its own row. Both sides were measured minutes
+apart in one window under the same recorded load, which is what makes a ratio survive here where
+a rate does not.
+
 ## What is compared
 
 The two parents of one merge, whose trees differ by this ticket alone:
 
 | | commit |
 |---|---|
-| before | the `misc/ai_gen` head this branch merged (filled in with the pass) |
-| after | this branch's merge commit (filled in with the pass) |
+| before | `d24c4699`, the `misc/ai_gen` head this branch merged |
+| after | `1add9a48`, this branch, whose only engine difference from the before tree is this ticket |
 
 Not the ticket's base `ca75415f`, which stopped being the right baseline when the branch merged:
 a delta against it would carry another session's versioned store, inbound loop and narrowed
@@ -19,8 +24,10 @@ that ships. Progress entry deviation 0.
 
 **Two samples per side, not one.** T79 measured its read side once, saw a 2 to 15 percent gain
 that looked real, sampled again and found the noise band on the same binary was 1 to 32 percent.
-The apparent win was nothing. So the noise band is established first and any delta inside it is
-reported as a null.
+The apparent win was nothing. So the passes run A, A, B, B; the within-side spread is the noise
+band and is reported separately from the between-side difference; anything inside the band is a
+null; and if the two before samples straddle the two after samples the result is a null whatever
+the means say.
 
 ## Predictions
 
@@ -78,44 +85,143 @@ tell a prediction from a rationalisation.**
 
 ## Environment
 
-To be filled from `environment.txt` and `load.txt` with the passes: every pass records the other
-Java process count and the CPU idle it ran under, and a pass taken under contention is marked as
-such rather than quietly believed.
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 7840HS, 8 cores / 16 threads |
+| OS | Microsoft Windows 11 Home 10.0.26200 |
+| JVM | OpenJDK 22.0.1, default heap and GC |
+| Docker | Docker Desktop, engine 29.7.2 |
+| Client | `redis-benchmark` from `redis:7`, `sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7` |
+| before run | 2026-09-07T12:57:20Z, commit `d24c4699` |
+| after run | 2026-09-07T13:11:08Z, commit `1add9a48` |
 
-Run with `QUIET_BUDGET=60`, not the default 600. The gate waits that long per pass before giving
-up and running anyway, so on a busy machine the default costs ten minutes a pass to arrive at a
-number stamped as contended. A first attempt at this measurement spent ten minutes in the gate
-and took no reading at all. One minute is long enough to catch a machine that is briefly busy and
-short enough that a machine which is properly busy says so while the window can still be given
-back. Recommended for whoever measures next.
+**Every pass ran contended and every pass says so.** Load recorded per pass: one other Java
+process throughout, an IntelliJ Maven daemon, and CPU idle between 63 and 97 percent, most passes
+above 92. Docker Desktop was also running a three-container kind cluster. The gate's floor is 70
+percent idle with an allowance of one Java process, so every pass is stamped
+`NO_TAKEN_UNDER_CONTENTION`: the machine cannot pass that gate unless the user shuts down their
+own tooling, which is not this ticket's to require.
+
+Run with `QUIET_BUDGET` at 45 seconds, not the default 600. The gate waits that long per pass
+before giving up and running anyway, so on a busy machine the default costs ten minutes a pass to
+reach a number that is stamped contended regardless. A first attempt at this measurement spent
+ten minutes in the gate and took no reading at all. A minute catches a machine that is briefly
+busy and hands the window back while it is still worth having. Recommended for whoever measures
+next.
 
 ## Pass 1: NEVER, plain and pipelined, `-t set,incr,hset,zadd`
 
-To be filled.
+Plain, requests per second:
+
+| test | before A | before B | after A | after B | before spread | before to after |
+|---|---|---|---|---|---|---|
+| SET | 19190.17 | 24050.02 | 24201.36 | 23923.45 | 25.3% | +11.3% |
+| INCR | 20470.83 | 25753.29 | 25746.65 | 25131.94 | 25.8% | +10.2% |
+| HSET | 21992.52 | 27777.78 | 26990.55 | 27225.70 | 26.3% | +8.9% |
+| ZADD | 21519.26 | 27647.22 | 27925.16 | 28082.00 | 28.5% | +14.0% |
+
+Pipelined `-P 16`, requests per second:
+
+| test | before A | before B | after A | after B | before spread | before to after |
+|---|---|---|---|---|---|---|
+| SET | 161550.89 | 149476.83 | 151057.41 | 146627.56 | 8.1% | -4.3% |
+| INCR | 165562.92 | 167785.23 | 166944.92 | 160513.64 | 1.3% | -1.8% |
+| HSET | 162601.62 | 164473.69 | 164744.64 | 162866.44 | 1.2% | +0.1% |
+| ZADD | 154320.98 | 156250.00 | 156250.00 | 153374.23 | 1.2% | -0.5% |
+
+**Null.** The plain pass's own before-side spread is 25 to 28 percent against a before-to-after
+difference of 9 to 14 percent, so the difference is inside the band by a factor of two. The
+before samples do not straddle the after samples, but only because before A alone is low: it ran
+first, on a cold JVM and a cold page cache, immediately after a Maven build. The pipelined pass
+settles it. Its band is 1.2 percent, and there the change measures between -4.3 and +0.1 percent,
+with the four tests disagreeing on the sign.
+
+This is prediction 1 landing. The reused buffer removes one allocation and one copy per batch
+from a path that ends in a file write, and that is not visible against a syscall. Nothing is
+landed on the strength of it. The buffer reuse stays because it is strictly less work, not
+because it was measured to be faster.
 
 ## Pass 2: pipelined with no data directory
 
-To be filled.
+| test | before A | before B | after A | after B |
+|---|---|---|---|---|
+| SET | 152207.00 | 147275.41 | 151285.92 | 158227.84 |
+| INCR | 183486.23 | 185873.61 | 177935.95 | 189753.31 |
+| HSET | 189753.31 | 206611.58 | 196850.39 | 198019.80 |
+| ZADD | 263852.25 | 268817.19 | 289855.06 | 297619.06 |
+
+Null between the trees, as it must be: this node has no log, so nothing in this ticket can reach
+it. The pass is here for the other reason.
+
+**The log's share, from the after tree.** `SET` runs at 151286 with no data directory against
+151057 with one, which is no difference at all. `ZADD` runs at 289855 against 156250, which is
+the log costing 46 percent of the command. So the log's share is not one number: it is per
+command, and it is largest for the commands whose in-memory work is smallest.
 
 ## Pass 3: durability, `SET` under `NEVER`, `EVERY_SECOND` and `GROUP_COMMIT`, at 50 and 1 client
 
-Three policies, one node shape, one window. `NEVER` and `GROUP_COMMIT` run at the same request
-count, which is what makes their ratio the clean one.
+All from the after tree, one window, minutes apart.
 
-`EVERY_SECOND` runs at 500 where the other two run at 20,000, so its ratio is computed across
-different counts. That is legitimate because its rate is not a measurement of the engine but
-arithmetic: fifty clients divided by a one-second interval, with a p50 of one interval. A
-quantity fixed by a clock does not sharpen with more samples the way a noisy one does, and 500
-requests already spans nine or ten intervals; 20,000 would buy the same number after six minutes.
+| policy | clients | requests | rps A | rps B | p50 A ms | p50 B ms |
+|---|---|---|---|---|---|---|
+| `NEVER` | 50 | 20000 | 15037.59 | 14630.58 | 2.487 | 2.735 |
+| `GROUP_COMMIT` | 50 | 20000 | 3188.27 | 2931.69 | 15.511 | 17.647 |
+| `EVERY_SECOND` | 50 | 500 | 50.17 | 49.43 | 1019.391 | 1013.759 |
+| `EVERY_SECOND` | 50 | 1500 | 49.60 | 49.46 | 1017.343 | 1016.319 |
+| `NEVER` | 1 | 5000 | 1991.24 | 1984.91 | 0.455 | 0.463 |
+| `GROUP_COMMIT` | 1 | 5000 | 63.27 | 63.24 | 15.791 | 15.807 |
 
-Asserting that is not showing it, so it is checked rather than assumed: `EVERY_SECOND` runs twice,
-at 500 and 1500, about nine and twenty-eight seconds. Two rates that agree demonstrate the
-interval bound and the mismatched ratio stands. Two that disagree mean the rate is not purely
-interval-bound, which is worth more than the six minutes, and then the matched pass is worth
-running.
+Ratios, means of the two samples:
 
-To be filled.
+| ratio | measured | predicted |
+|---|---|---|
+| `GROUP_COMMIT` / `NEVER`, 50 clients | 0.206 | ~1.0, inside the band |
+| `EVERY_SECOND` / `NEVER`, 50 clients | 0.00336 | ~0.002 |
+| `GROUP_COMMIT` / `NEVER`, 1 client | 0.0318 | far below 1 |
+| `GROUP_COMMIT` / `EVERY_SECOND`, 50 clients | 61.3 | - |
+
+`EVERY_SECOND` at 500 and at 1500 requests measured 50.17, 49.43 against 49.60, 49.46, agreeing
+within 1.5 percent, which is inside the band. Its rate is bound by the fsync interval and not by
+the length of the pass, so computing its ratio across two request counts is sound, as the method
+claimed in advance.
 
 ## Result
 
-To be filled, against the predictions above.
+**Prediction 1 landed. The buffer reuse is a null**, reported as the prediction landing rather
+than as an absence of a result.
+
+**Prediction 2 failed, in the direction the report had already named as a finding.**
+`GROUP_COMMIT` over `NEVER` at fifty clients is 0.206, not near one. The prediction said what
+that would mean: "the force path costs more than the arithmetic allows, which is a finding". It
+is a finding, and it is not the force path.
+
+**The deadline is not 2 ms. It is one platform timer tick, about 15.9 ms.** Both rates are
+exactly clients divided by that tick:
+
+| | measured | clients / 15.86 ms |
+|---|---|---|
+| 1 client | 63.26 | 63.05 |
+| 50 clients | 3059.98 | 3152.6 |
+
+and the single-client p50, 15.791 and 15.807 ms, is that tick plus the round trip. That is
+prediction 3's p50 discriminator answering: the writer genuinely waits, so the deadline does
+bind. It binds at 15.9 ms rather than at the 2 ms it is configured with.
+
+The cause was measured, not assumed. A `ScheduledExecutorService` on this machine, asked for a
+2 ms fixed delay, fires with a median gap of **15.860 ms**: 127 ticks in two seconds, minimum
+15.225, maximum 16.712. That is the Windows default timer resolution of 15.625 ms. The log's
+deadline is driven by that scheduler, so no deadline shorter than a platform tick can be
+delivered through it. The 2 ms is what the policy asks for; 15.9 ms is what the platform grants.
+
+**What the ticket set out to do, it did.** Reply-after-durable holds and a durable write costs
+one fsync per batch rather than one second per write: `GROUP_COMMIT` answers 61 times faster than
+`EVERY_SECOND` on the same node, 3060 against 49.9, with C14 intact. Anomaly 1 of the 2026-09-06
+report is closed. What it does not do is reach `NEVER`, and the 2 ms in the ticket is not
+deliverable through a scheduled executor on this platform.
+
+**Follow-up, its own ticket rather than this one.** Making the deadline mean what it says needs
+the force off the platform scheduler: a parking thread on `LockSupport.parkNanos`, which has
+resolution the scheduler lacks, or forcing from the flush path aggressively enough that a
+scheduled tick is only the idle-writer backstop. Both are design changes. Until one lands, the
+honest description of `GROUP_COMMIT` is one fsync per platform timer tick, and its 2 ms constant
+should say so.
