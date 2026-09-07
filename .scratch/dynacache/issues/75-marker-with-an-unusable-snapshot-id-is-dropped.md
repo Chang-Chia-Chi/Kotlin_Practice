@@ -15,16 +15,16 @@ node kill. Found by T55, pre-existing since T36.
 
 **Nature:** validation at a trust boundary, C10 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache be51b192, merged into misc/ai_gen)
 
-- [ ] `snapshot_id_outside_the_safe_shape_is_refused_by_the_adapter`: `..`, a separator, an
+- [x] `snapshot_id_outside_the_safe_shape_is_refused_by_the_adapter`: `..`, a separator, an
       empty id, an over-long id and a control character are each refused without touching the
       filesystem, and an id of the safe shape is accepted
-- [ ] `marker_with_an_unusable_id_is_dropped_and_the_node_lives`: a marker carrying `../x`
+- [x] `marker_with_an_unusable_id_is_dropped_and_the_node_lives`: a marker carrying `../x`
       arrives on the in-memory transport; no directory is created or deleted, no part is
       recorded, and the next valid marker still starts a snapshot
-- [ ] The initiator generates ids of the safe shape; every existing Chandy-Lamport test passes
-- [ ] Progress entry appended
+- [x] The initiator generates ids of the safe shape; every existing Chandy-Lamport test passes
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

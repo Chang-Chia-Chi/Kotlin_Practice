@@ -19,7 +19,7 @@ import kotlinx.coroutines.sync.withLock
  * business: this class holds the marker rules and the channel bookkeeping, and hands the
  * adapter one channel's name and one envelope's bytes at a time.
  *
- * [initiate] is step 1, [receive] steps 2 and 3 fed by the router's demux, [complete] step 4
+ * [initiate] is step 1, [receive] steps 2 and 3 fed by the node's inbound loop, [complete] step 4
  * for this node; the whole snapshot is complete when every node's part is. A part starts by
  * cutting the state and only then opens its channels, and the demux waits out the cut, so an
  * envelope is in the state or on a channel, never both (C10, I12). Recording happens beside
@@ -30,14 +30,14 @@ import kotlinx.coroutines.sync.withLock
  * A node's part still open at [deadline] after it started is aborted: the whole set goes, the
  * engine is untouched, and a later marker for that id is ignored.
  *
- * @param demux the node's inbound handler (`Router.receive`), for the replay.
+ * @param demux the node's inbound loop (`InboundLoop.deliver`), for the replay.
  * @param scope the node's lifecycle scope; the deadline timer lives on it.
  * @param deadline how long this node waits for its channels to close (spec 2.8, default 30s).
  */
 class DistributedSnapshot(
     private val self: NodeId,
     private val peers: Collection<NodeId>,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val parts: SnapshotParts,
     private val demux: suspend (Envelope) -> Unit,
     private val scope: CoroutineScope,
@@ -58,7 +58,11 @@ class DistributedSnapshot(
      */
     private val cutting = Mutex()
 
-    /** Step 1: this node records its state and sends a marker on every outgoing channel. */
+    /**
+     * Step 1: this node records its state and sends a marker on every outgoing channel. [id] is
+     * an operator's, not the wire's, so an id [parts] refuses fails here rather than being
+     * dropped: what this node initiates always has the shape the adapter accepts.
+     */
     suspend fun initiate(id: String) = start(id)
 
     /** Step 4 for this node: a marker arrived on every incoming channel. */
@@ -80,7 +84,10 @@ class DistributedSnapshot(
             return false
         }
         val id = envelope.marker.snapshotId
-        if (id in aborted) return true
+        // The id came off the wire and is a name on [parts]' storage, so the adapter is asked
+        // before it is used. A refused id is dropped here and recorded nowhere: the inbound loop
+        // has no per-envelope catch, so throwing would answer a crafted id by killing the node.
+        if (!parts.accepts(id) || id in aborted) return true
         if (!open.containsKey(id)) start(id)
         open[id]?.remove(from)
         return true

@@ -6916,3 +6916,292 @@ happens first, exactly as it did for a refused conditional `SET` before this tic
   settled deadline, drop the `single()` and pass the codec a `now` on the forwarding side.
   `expires_at_millis` on `Replicate` is now redundant with the bytes; it stays only for
   `HintStore.pending`'s expiry sweep without a decode.
+
+## T72: The partition's store is split from its command interpreter
+
+**Built**
+
+- `PartitionStore` (engine, 299 lines): a kind-agnostic deep module owning the entry table, the
+  entries themselves, deadlines and the timer wheel, the running byte total and the eviction
+  policy. Six operations are what the interpreter asks for -- `get`, `put`, `forget`, `expireAt`,
+  `account`, `evictUntil` -- plus the keyspace walk `KEYS`, `SCAN`, `INFO`, `RANDOMKEY`,
+  `FLUSHDB` and the replication views need (`peek`, `entries`, `scan`, `purgeExpired`, `clear`,
+  `randomKey`, `tick`, `size`, `usedBytes`).
+- `Partition` fell from 772 to 574 lines and is now the command interpreter and its executor. It
+  holds no entry table, no used-bytes arithmetic, no wheel, no policy and no eviction step; the
+  command `when` stayed exactly where it was (spec 2.7, 5.4, 5.5, I6; ADR 0001 unchanged).
+- `evictUntil(now, keeping)` never takes the key the command was writing. Before this, a value
+  too big for the partition's share emptied the store and then deleted itself, having replied
+  `OK` as though it had been stored. The key is an ordinary candidate on every later step.
+- `EXPIRE` and `PERSIST` now go through `expireAt` rather than rewriting the entry, so a key
+  keeps its recency and its policy standing for having been given a new deadline.
+- The `SCAN` cursor loop became one top-level `walk`, shared by the store's key walk and the
+  interpreter's `HSCAN` and `ZSCAN` field walks. `ENTRY_BYTES`, `SAMPLE` and `MAX_EVICTIONS`
+  moved to the store's companion; nothing outside referenced them.
+
+**Tests**
+
+Full reactor, 460 tests, no failures: engine 167, cluster 87, cp 103, server 103.
+
+New `PartitionStoreTest` (5 tests, driving the store directly with no engine in front of it):
+
+- `store_used_bytes_equals_sum_of_entries_after_any_sequence`: 2000 seeded steps over all four
+  value kinds -- writes with and without a TTL, in-place growth and shrinkage of hash, list and
+  sorted set, deletions, deadline changes, lazy reads, wheel ticks and evictions -- recounting
+  the entries after every step and asserting the running total equals them. It also asserts the
+  sequence actually evicted, so the invariant is not proved on a store that never filled.
+- `eviction_never_evicts_the_key_being_written`, parameterized over both policies. Red first
+  against the extracted store with no protection (both policies deleted the new key), green with
+  `keeping`.
+- `tinylfu_admits_frequent` and `tinylfu_hit_ratio_beats_lru_on_zipf` moved out of the
+  1245-line `CommandEngineTest` and now run against the store. `CommandEngineTest` is 61 tests,
+  93 lines lighter, none of the remaining ones changed.
+
+**Deviations**
+
+- `INFO` still reads `store.usedBytes` to report it. The interpreter maintains no byte total and
+  makes no threshold decision, but a number that `INFO` exists to report has to be read
+  somewhere; putting a `Reply` inside a kind-agnostic store would have been the worse trade.
+- Sparing the key being written is a behaviour change, not a pure extraction. It is what the
+  ticket's named test asks for and the spec does not speak to it (5.5 fixes the order, not the
+  candidate set).
+- Progress written here rather than appended to `docs/dynamiccache/progress.md`, per the task.
+
+**For the next ticket**
+
+- `purgeExpired` is still the O(n) walk four keyspace commands pay for. It is now one method on
+  one class, so an expiry index would be a change to `PartitionStore` alone.
+- `Partition` at 574 lines is now almost entirely the command `when` and its Redis-shape helpers.
+  The next split there is by command family, not by concern.
+
+---
+
+## T68 - One inbound loop, and a send-only transport
+
+Plan 2.3's Transport seam split in two, and the node's handler order moved out of the router
+into a class of its own. Candidate 3 of the architecture review: the drop-on-unreachable promise
+and the demux chain each existed twice, once in the server's node wiring and once in the test
+kit, and SWIM kept a second inbound path alive for its own test.
+
+### The two seams
+
+```kotlin
+interface Outbound {                                  // the send-only seam
+    suspend fun send(to: NodeId, envelope: Envelope)  // an unreachable peer is a DROP, never a throw
+}
+
+interface Transport : Outbound {                      // a node's whole endpoint
+    val inbound: ReceiveChannel<Envelope>
+    fun close()
+}
+```
+
+The promise is stated in `Outbound`'s KDoc and owed by both adapters. `GrpcTransport.send` now
+catches what the gRPC call throws for a peer that is down and drops it, rethrowing
+`CancellationException`; `InMemoryTransport` already dropped. A peer this node was given no
+address for still raises, outside the catch: that is a wiring error, not an unreachable peer, and
+no gossip round repairs it.
+
+`Replication`, `AntiEntropy`, `DistributedSnapshot`, `Swim` and `Router` all take `Outbound`.
+Only the inbound loop takes a whole `Transport`.
+
+### The inbound module
+
+`dynacache-cluster/.../InboundLoop.kt`: one class, five handlers, one order.
+
+```kotlin
+class InboundLoop(
+    inbound: ReceiveChannel<Envelope>,
+    snapshots:   suspend (Envelope) -> Boolean = { false },  // DistributedSnapshot.receive
+    forwards:    suspend (Envelope) -> Boolean = { false },  // Router.receive
+    replication: suspend (Envelope) -> Boolean = { false },  // Replication.receive
+    antiEntropy: suspend (Envelope) -> Boolean = { false },  // AntiEntropy.receive
+    gossip:      suspend (Envelope) -> Unit    = {},         // Swim.deliver
+) {
+    suspend fun run()                       // every envelope, until the transport closes
+    suspend fun drain()                     // everything already waiting, then returns
+    suspend fun deliver(envelope: Envelope) // one envelope, offered in order until one claims it
+}
+```
+
+Markers first (C10, T36), then forwards (spec 5.1), then replication, then anti-entropy, then
+gossip last and total, because every envelope carries the piggybacked membership table (I8).
+Every handler defaults to deaf, so a node with no snapshot directory or a router test with
+nothing under the forward seam wires only what it has. `drain` is what a test that steps a node
+by rounds needs, and is exactly the loop SWIM's `tick` used to run on its own.
+
+### Deleted
+
+- `NodeTransport` in `ClusterNode.kt` (the five views, four "deaf on purpose", and the
+  throw-to-drop wrapper): 33 lines, gone. The node builds one `GrpcTransport` and one loop.
+- `Router.run`, `Router`'s `others` and `snapshots` constructor parameters, and its `else ->
+  others(envelope)` branch. `Router.receive` now returns `Boolean`, like the other three.
+- SWIM's second inbound path: the `while (true) handle(transport.inbound.tryReceive()...)` line
+  at the top of `tick`. `deliver` stays and is now SWIM's only way in.
+- The hand-built demux chain in `InProcessCluster`; it builds an `InboundLoop` like the server's.
+
+### Tests
+
+- `inbound_order_is_snapshots_forwards_replication_antientropy_gossip` (new `InboundLoopTest`):
+  five envelopes, one per handler, arrive together; the assertion is the full sequence of which
+  handler saw which, so both the order and the short-circuit are pinned.
+- `a_handler_that_claims_an_envelope_ends_it` (same file): a marker never reaches gossip.
+- `unreachable_peer_is_a_drop_on_both_adapters` (`GrpcTransportTest`, replacing
+  `grpc_peer_down_is_a_send_error`): a send to a port nothing listens on over gRPC and a send to
+  a killed peer in memory both return without throwing and leave no reply.
+- `SwimTest`'s `Gossip` now drains each node's `InboundLoop` before ticking it, which is the
+  order `tick` itself used to run; `RouterTest.Routers` and `InProcessCluster` run the loop.
+
+Counts: engine 173, cluster 89 (was 87), cp 113, server 107. 482 total, was 480. Net diff
++142 / -122 across 14 files, 20 lines net.
+
+### Deviations
+
+1. `GrpcTransport` still raises for a peer with no address (`requireNotNull(peers[to])`). The
+   seam's promise is about reachability; a missing address is a wiring bug that no runtime path
+   repairs, and swallowing it would make a mis-wired cluster look merely silent.
+2. `CONTEXT.md` gained an **Inbound loop** entry and a sentence in **Transport** about the
+   send-only half. The glossary is the vocabulary of record and this ticket named a new concept.
+3. `DistributedSnapshot` keeps its parameter named `demux`; only the two comments that named
+   `Router.receive` as the demux were corrected to name the loop. Renaming the parameter would
+   have widened the diff into T55's shape for no behaviour.
+
+### For the next ticket
+
+- `Replication`, `AntiEntropy` and `DistributedSnapshot` are now takers of `Outbound` and
+  suppliers of a `receive(Envelope): Boolean`. That pair is the shape a fifth handler would take.
+- `InProcessCluster.gossipOn(node)` still collects what the loop hands to gossip rather than
+  running a real `Swim`; a test kit that wants gossip in the loop would pass `swim::deliver`.
+- T65 is changing `Replication`'s constructor and the `Replicate`/`Read` protos in parallel. The
+  only line this ticket changed in `Replication.kt` is its transport parameter's type.
+
+## T75: A marker with an unusable snapshot id is dropped
+
+**Built**
+
+- `SnapshotParts.accepts(id): Boolean`, a new method on the persist seam: whether the adapter can
+  carry a set under that name. It answers with a value and never throws, because the caller's
+  inbound loop has no per-envelope catch (T36, T74) and a throw would answer a crafted id by
+  killing the node.
+- `FileSnapshotParts.accepts` is the safe shape: one path segment matching `[A-Za-z0-9._-]{1,64}`,
+  never `.` or `..`, and never a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0-9`,
+  `LPT0-9`, with or without an extension). A device name is of the shape and yet no directory can
+  carry it, so a marker holding one would have failed the cut and taken the node down.
+- Every path the adapter builds now goes through one private `set(id)` that `require`s the shape,
+  so `cut`, `record`, `restore`, `replay` and `delete` all refuse a bad id whichever way it
+  arrives; `delete` no longer resolves an unchecked id straight into `deleteRecursively`.
+- `DistributedSnapshot.receive` asks `parts.accepts(id)` before anything else on the marker path
+  and consumes the marker when the answer is false: no part started, nothing recorded, node lives.
+  `initiate` is unchanged and now documented as the operator's seam, where a bad id fails loudly.
+
+**Tests** (full reactor, all green)
+
+| Module | Tests |
+|---|---|
+| dynacache-engine | 175 |
+| dynacache-cluster | 89 |
+| dynacache-cp | 113 |
+| dynacache-server | 107 |
+
+New: `snapshot_id_outside_the_safe_shape_is_refused_by_the_adapter` (engine) and
+`marker_with_an_unusable_id_is_dropped_and_the_node_lives` (cluster, on the in-memory transport;
+red first as a node-kill, the router's inbound loop died on the crafted marker).
+
+**Deviations**
+
+1. The shape refuses Windows device names as well as the five cases the ticket lists. Same class
+   of bug from the same wire: an id-shaped `nul` fails `Files.createDirectories` and, with no
+   per-envelope catch above, kills the node. Three lines, no behaviour change for real ids.
+2. The adapter's internal guard throws `IllegalArgumentException` rather than returning a value.
+   The value-returning `accepts` is what the trust boundary uses; the throw is the loud failure
+   for a caller (the operator's `initiate`, a restore) that skipped the ask.
+
+**For the next ticket**
+
+- The marker path still has no cover for an `IOException` out of `cut` from an ordinary cause
+  (full disk, permissions). The inbound loop has no per-envelope catch, so that still kills the
+  node. A per-marker failure policy is its own ticket, larger than a shape check.
+- `record`'s `channel` argument also becomes a filename (`from-<peer>.wal`) and is not shape
+  checked. It is not reachable from the wire today: `receive` records only for a peer already in
+  the open channel set, which is the configured peer list. Guarding it would put node names under
+  the same alphabet, which is a naming decision, not this ticket's.
+- T66 edits `restoreFrom`; nothing here touched it. T49's cut-then-open order and T74's WAL
+  placement are untouched.
+
+---
+
+## T73 - Narrow the command engine seam to submit
+
+**The narrowed seam.** `CommandEngine` is now `submit(Command)` and `close()`. `atomically` left
+it: the seam is what every adapter can honestly do, and six of the seven implementations could
+not do a batch. Its KDoc says so and points at the capability.
+
+**The batch capability and who holds it.** A new `BatchEngine` interface in `dynacache.engine`,
+beside `CommandEngine`, carries the one method `atomically(keys) { ctx -> R }` with the doc that
+moved off the engine seam. Two real adapters:
+
+- `ApEngine`, which runs a batch (`ApEngine.atomically` itself is untouched: same C12 span check,
+  same `Batch` partition context, same I11 behaviour).
+- `ClusterNode`, which refuses a batch whose keys this node does not coordinate and otherwise
+  runs it on its own local AP engine.
+
+The connection handler is given one directly: `DynaCacheServer` gained a `batch: BatchEngine =
+engine` parameter (the single node's own AP engine by default; `ClusterNode` passes `batch =
+this` beside its existing `ap = this`), and `CommandHandler` holds it as a field beside the
+dispatcher it submits to. No cast anywhere. `evalScript` takes a `BatchEngine` rather than a
+`CommandEngine`.
+
+Both callers -- `EXEC` and `EVAL` -- go through one internal extension in `DynaCacheServer.kt`,
+`BatchEngine.runBatch(keys, block)`, which is where the dispatcher's `cp:` refusal (C16) now
+lives and where `orBatchError` is applied. `orBatchError` became private, since `runBatch` is its
+only caller.
+
+**Deleted.** The six dead `atomically` implementations: `CpEngine` and `ForwardingCpEngine`
+(threw `NotImplementedError`), `Router` and `Replication` (pass-throughs with a check and a
+comment respectively), `ClusterNode`'s pass-through to the router (replaced by the real check,
+see below) and `CommandDispatcher`'s AP-only branch. Plus the two test fakes: the cluster test
+kit's `RecordingEngine` (a `TODO`) and `CommandDispatcherTest`'s `Recording` (with its `batches`
+list and the one assertion that used it, which moved to `BatchTest`). Six now-unused imports of
+`Key` / `PartitionContext` went with them.
+
+**Cluster-mode batch behaviour and its test.** Unchanged, and deliberately so. The router refuses
+a batch whose keys this node does not coordinate; it never forwards one, because a forward would
+have to carry the caller's block, which is code. That check moved verbatim from `Router` to
+`ClusterNode.atomically` -- same `ring.preferenceList(key, n).first()` lookup, same
+`IllegalStateException("<key> is coordinated by <node>, not <self>")`, so the client still reads
+`ERR ... coordinated by ...`. `ClusterNode` now reaches its own `engine` rather than
+`router` -> `replication` -> `engine`; both intermediate hops were pass-throughs, so nothing about
+the batch changed, including that it is still unreplicated (T22 deviation 5). Its test is
+`P2AcceptanceTest.oneBatchNeedsOneCoordinator`, unchanged and passing.
+
+**Plan 2.3.** "Five seams" is now "Six seams". The `CommandEngine` row lists `submit` and `close`
+only, and says a batch is not part of it. A new `BatchEngine` row carries the batch's contract
+and names its two adapters. The paragraph under the table now says the dispatcher knows nothing
+of batches and that the `cp:` refusal is the connection handler's.
+
+**Tests.** One new file, `dynacache-server/src/test/kotlin/dynacache/server/BatchTest.kt`, over
+the capability's own test adapter: `C16_a_batch_naming_a_cp_key_never_reaches_the_engine` (the
+assertion that moved out of `CommandDispatcherTest`, now also pinning the exact reply the client
+reads) and `I11_a_batch_answers_what_its_block_returned`. Red first: both failed to compile
+against the unnarrowed seam. Everything else is unchanged and passing --
+`DynaCacheServerTest`'s MULTI/EXEC and CROSSSLOT cases, `LuaTest`, `P1AcceptanceTest`,
+`P2AcceptanceTest`, `P5AcceptanceTest`, `CommandEngineTest`'s C12 and I11 cases.
+
+Counts, `-pl dynacache-server -am test`: engine 177, cluster 91, cp 113, server 108, 489 total,
+green, no flakes and no rerun. Server is the base plus the two new `BatchTest` cases; no test
+method was deleted anywhere (the `cp:` batch assertion moved out of `CommandDispatcherTest`'s
+C16 test into `BatchTest`, and the cluster test kit lost a method on a fake, not a test). Diff: 13 files, net negative.
+
+**Deviations.** Two, both recorded rather than argued:
+
+1. The ticket's checklist says the router has no batch code and the goal line says a batch is a
+   capability "of the AP engine". Taken literally together, the cluster's coordinator check would
+   have had nowhere to live, and the brief's subtlety says to keep that behaviour exactly. So
+   `BatchEngine` has two adapters rather than one: the AP engine and the cluster node, which is
+   also what `codebase-design` asks of a seam. The router, replication, both CP engines, the
+   dispatcher and both recording fakes have no batch code, as asked.
+2. `CommandDispatcher` lost the `cp:` refusal along with its `atomically`, so the rule now lives
+   in `runBatch` beside the two callers rather than in the dispatcher. The client-visible answer
+   is byte-for-byte what it was (`ERR a batch cannot name a cp: key`): the dispatcher failed the
+   future with an `IllegalArgumentException` carrying that message and `orBatchError` unwrapped
+   it, which is the reply `runBatch` now returns directly.

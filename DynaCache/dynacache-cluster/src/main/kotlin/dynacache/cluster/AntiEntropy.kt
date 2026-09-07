@@ -44,7 +44,7 @@ class AntiEntropy(
     private val ring: Ring,
     n: Int,
     private val store: VersionedStore,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val membership: Membership,
     private val deadline: Duration = 1.seconds,
     private val interval: Duration = 60.seconds,

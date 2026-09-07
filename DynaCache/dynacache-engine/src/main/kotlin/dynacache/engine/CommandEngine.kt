@@ -15,7 +15,9 @@ import java.util.concurrent.CyclicBarrier
  * Runs commands. The engine owns one single-thread executor per partition, so a caller never
  * serializes anything itself and the single-writer rule C1 holds by construction (ADR 0001).
  *
- * Two adapters present this shape: the AP engine and, from T38, the CP engine.
+ * One command is all a caller must know: a batch is not here but in [BatchEngine], which only
+ * the AP engine offers (T73). Two adapters present this shape: the AP engine and, from T38, the
+ * CP engine.
  */
 interface CommandEngine {
 
@@ -25,15 +27,24 @@ interface CommandEngine {
      */
     fun submit(command: Command): CompletableFuture<Reply>
 
-    /**
-     * Runs [block] on the partition of [keys] with nothing interleaved: the batch behind
-     * MULTI/EXEC and EVAL. Keys on different partitions are rejected before [block] runs (C12),
-     * and a command inside the block touching an undeclared key answers with an error reply.
-     */
-    fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R>
-
     /** Shuts the partition executors down. */
     fun close()
+}
+
+/**
+ * The batch behind MULTI/EXEC and EVAL: a capability, not part of the engine seam. Only an
+ * engine with partitions of its own can run one, so the CP engine offers none -- its replicated
+ * log already serializes every entry -- and the connection handler is given this directly rather
+ * than asking every adapter for a method most of them refuse (T73).
+ */
+interface BatchEngine {
+
+    /**
+     * Runs [block] on the partition of [keys] with nothing interleaved. Keys on different
+     * partitions are rejected before [block] runs (C12), and a command inside the block touching
+     * an undeclared key answers with an error reply.
+     */
+    fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R>
 }
 
 /**
@@ -102,7 +113,7 @@ class ApEngine(
      * the same policy, so `INFO` reads it off any one of them.
      */
     policy: EvictionPolicy = EvictionPolicy.LRU,
-) : CommandEngine {
+) : CommandEngine, BatchEngine {
 
     /**
      * The write-ahead log every mutation is appended to before its reply completes (C14); null
