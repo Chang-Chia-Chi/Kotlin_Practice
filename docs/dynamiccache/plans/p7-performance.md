@@ -1,4 +1,4 @@
-# DynaCache P7 - Measured performance fixes (T77 to T79, T85, T86)
+# DynaCache P7 - Measured performance fixes (T77 to T79, T85 to T87)
 
 Companion to `../plan.md`. Source: the single-node benchmark of 2026-09-06
 (`../benchmarks/2026-09-06-single-node.md`, T47), whose four anomalies each name a code path.
@@ -130,14 +130,47 @@ because the other session committed T80 to T84 while this was still a draft.
   same pass moving by a factor of two. It is now stale twice, contended and describing a tree
   three fixes behind. Handed over by the other orchestrator session, which owns neither the
   benchmark area nor the three fixes.
-- **Deliverables:** the whole suite rerun on a quiet machine with T77, T78 and T79 in; a new
-  dated report; a pointer at the top of the old one; and a line per original anomaly saying
-  whether it closed, by which ticket, and what it costs now.
+- **Deliverables:** the whole suite rerun with T77, T78 and T79 in; a new dated report; a pointer
+  at the top of the old one; and a line per original anomaly saying whether it closed, by which
+  ticket, and what it costs now.
 - **Blocked by:** T77, T78, T79. It measures the tree with all three in, which is the number
   worth publishing; folding it into any one of them would measure a tree nobody will run.
 - **Fixed contracts:** none; measurement only, no change under `src/main`.
 - **Acceptance:** the four original anomalies each answered, an anomaly that did not improve as
   its ticket predicted reported with the prediction quoted, and the load recorded per pass.
-- **Window:** the longest of the phase, 35 to 40 minutes, and the one where the disk must be
-  quiet too, not only the CPU. The other session clears the machine rather than pausing dispatch.
+- **Window:** the longest of the phase, 35 to 40 minutes. A genuinely quiet machine is NOT
+  available: with both orchestrator sessions stopped, the floor on 2026-09-07 was still an IDE
+  Maven daemon, a Kotlin compile daemon and a three-container kind cluster, at 23 to 52 percent
+  CPU idle against the gate's floor of 70. Ask the user whether they will clear it; if not,
+  measure under load and let the DynaCache-to-Redis ratio carry the result, since both engines
+  are measured in one window and the environment cancels in a ratio while it wrecks a rate.
 - **Model:** Opus. **Size:** measurement only.
+
+
+### T87 - Group commit forces off the platform timer, not on it
+
+- **Goal:** T78 shipped `GROUP_COMMIT` with a 2 ms deadline and measured one fsync per platform
+  timer tick instead. A `ScheduledExecutorService` asked for 2 ms fires with a median gap of
+  15.860 ms here, the Windows resolution of 15.625, measured directly at 127 ticks in two seconds.
+  Every rate falls out of that number rather than the deadline (63.05 predicted against 63.26 at
+  one client; 3153 against 3060 at fifty), and the single-client p50 of 15.79 ms confirms the
+  writer waits a tick. Durable writes therefore run at 0.206 of no-sync where the arithmetic says
+  near parity.
+- **Deliverables:** force from the flush path under load so the scheduler is only an idle backstop,
+  falling back to a parked thread with sub-tick resolution if that is not enough; the ratio moves
+  from 0.206 towards 1.0; `GROUP_COMMIT`'s documentation states the tick limitation until it does.
+- **Blocked by:** T78.
+- **Fixed contracts:** C14 (reply-after-durable is not weakened to buy throughput); spec 2.8; the
+  WAL entry layout and record format, untouched as in T78.
+- **Acceptance:** `group_commit_deadline_is_not_bounded_by_the_platform_tick`, a test that no force
+  under load is attributable to the timer, and a before/after measurement in T78's shape with the
+  single-client p50 as the discriminator.
+- **Model:** Opus (tier 1 by shape; see the credit wall note in plan section 4).
+- **Size:** medium (200 to 600 lines).
+
+**Note for every later measurement in this phase.** A quiet machine is not available here. With
+the peer session's builds parked the floor is 78 to 96 percent CPU idle, which is workable; with
+them running it is 23 to 52. Intermittent load is worse than constant load of twice the size,
+because it lands across one pair of samples and not the other and fails by producing a plausible
+number. Park the other session, set `QUIET_BUDGET=60`, record the load per pass, and let ratios
+rather than rates carry the result.
