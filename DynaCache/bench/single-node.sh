@@ -244,13 +244,16 @@ three_passes() {
 # SECTIONS=t78: the write path only, DynaCache against its own earlier self rather than against
 # Redis, which is what a before-and-after pass on the log needs. Four write tests plain and
 # pipelined under NEVER (the flusher's buffer), the same pipelined pass on a node with no data
-# directory (the log's whole share, since that node has no log), and one SET pass per durability
-# policy named in T78_DURABILITY as POLICY:REQUESTS. GROUP_COMMIT wants many more requests than
-# EVERY_SECOND because it is expected to answer three orders of magnitude faster.
-T78_DURABILITY=${T78_DURABILITY:-NEVER:20000 GROUP_COMMIT:20000 EVERY_SECOND:500 EVERY_SECOND:1500}
+# directory (the log's whole share, since that node has no log), and one SET pass per entry in
+# T78_DURABILITY, written POLICY:REQUESTS:CLIENTS. GROUP_COMMIT wants many more requests than
+# EVERY_SECOND because it is expected to answer three orders of magnitude faster. The one-client
+# entries are the pass that tests the deadline: at fifty clients batches form continuously and the
+# writer is free constantly, so the force fires on the batch and the deadline almost never binds;
+# at one client nothing else can fire it, so the deadline is the whole of the wait.
+T78_DURABILITY=${T78_DURABILITY:-NEVER:20000:50 GROUP_COMMIT:20000:50 EVERY_SECOND:500:50 EVERY_SECOND:1500:50 NEVER:5000:1 GROUP_COMMIT:5000:1}
 
 t78_passes() {
-  local keep=$TESTS entry policy requests
+  local keep=$TESTS entry policy requests clients
   TESTS=set,incr,hset,zadd
 
   echo "=== T78 DynaCache (fsync NEVER, with a data directory)"

@@ -1,6 +1,6 @@
 # T78 - Group-commit WAL, before and after
 
-Measured by `DynaCache/bench/single-node.sh` with `BENCH_PLAN=t78`. Every number is a value
+Measured by `DynaCache/bench/single-node.sh` with `SECTIONS=t78`. Every number is a value
 `redis-benchmark --csv` printed; nothing is rounded, averaged or adjusted.
 
 ## What is compared
@@ -48,7 +48,21 @@ tell a prediction from a rationalisation.**
    reply-after-durable implies, so the next thing to check is whether the force really covers its
    waiters. No external number is used, and the 26,500 of 2026-09-06 anchors nothing: it was
    taken under contention and is provisional.
-3. **The no-data-directory pass states the log's share separately.** A node started with no data
+3. **At one client the same ratio will be far below one, and that pass is what tests the
+   deadline.** At fifty clients the two ceilings are a few percent apart, 25,000 from the 2 ms
+   arithmetic and about 26,000 from the round trip, so a ratio near one cannot separate "the
+   deadline has stopped binding" from "it binds at almost exactly the network rate by
+   coincidence". Prediction 2 alone cannot fail informatively. A second deadline value would not
+   separate them either: at fifty clients batches form continuously and the writer is free
+   constantly, so the force fires on the batch and the deadline is nearly irrelevant by
+   construction. Sweeping it there measures the wrong thing and returns a null meaning "wrong
+   experiment". The deadline exists for the lonely writer, where nothing else can fire the force,
+   so the concurrency changes instead: `-c 1`, where the arithmetic is one client per 2 ms, about
+   500 per second, against `NEVER` at one client bound by the round trip at several thousand. The
+   pair is the characterisation. Near one at fifty clients, the deadline does not bind; far below
+   one at one client, it does. The single-client pass is there for that, not a stray
+   low-concurrency data point.
+4. **The no-data-directory pass states the log's share separately.** A node started with no data
    directory has no log at all, so the gap between it and the `NEVER` node is everything the log
    costs a pipelined write, of which the buffer is one part.
 
@@ -66,7 +80,7 @@ To be filled.
 
 To be filled.
 
-## Pass 3: durability, `SET` under `NEVER`, `EVERY_SECOND` and `GROUP_COMMIT`
+## Pass 3: durability, `SET` under `NEVER`, `EVERY_SECOND` and `GROUP_COMMIT`, at 50 and 1 client
 
 Three policies, one node shape, one window. `NEVER` and `GROUP_COMMIT` run at the same request
 count, which is what makes their ratio the clean one.
