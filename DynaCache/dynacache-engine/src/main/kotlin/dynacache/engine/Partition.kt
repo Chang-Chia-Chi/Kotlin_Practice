@@ -2,7 +2,6 @@ package dynacache.engine
 
 // The skip list's entry, aliased because [PartitionStore.Entry] is the store's own.
 import dynacache.engine.ds.Entry as Scored
-import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
 import dynacache.engine.persist.RdbEntry
 import java.time.Clock
@@ -144,7 +143,7 @@ internal class Partition(
     private fun frozen(value: Value): Value = when (value) {
         is Value.Str -> value
         is Value.Hash -> Value.Hash().also { copy -> value.fields.entries().forEach { copy.fields.put(it.key, it.value) } }
-        is Value.List -> Value.List(ArrayDeque(value.items))
+        is Value.List -> Value.List(value.items)
         is Value.ZSet -> Value.ZSet(SkipList(random.nextLong())).also { copy ->
             value.order.forward().forEach { copy.writeScore(it.score, it.member) }
         }
@@ -259,7 +258,7 @@ internal class Partition(
             is Command.HScan -> {
                 val fields = hash(command.key, now) ?: return scanReply(0, emptyList())
                 val found = ArrayList<Reply>()
-                val next = walk(fields, command.cursor, command.count, { field, _ -> matches(command.pattern, fieldBytes(field)) }) { field, value ->
+                val next = fields.scan(command.cursor, command.count, { field, _ -> matches(command.pattern, fieldBytes(field)) }) { field, value ->
                     found += Reply.Bulk(fieldBytes(field))
                     found += Reply.Bulk(value)
                 }
@@ -368,23 +367,14 @@ internal class Partition(
             }
             is Command.ZRem -> {
                 val zset = zset(command.key, now)
-                // The score map says whether the member was there; the list is then told the same
-                // thing. Counting off the map keeps one index from silently disagreeing with the
-                // other about what was removed.
-                val removed = zset?.let {
-                    command.members.count { member ->
-                        val score = it.scores.remove(fieldName(member)) ?: return@count false
-                        it.order.remove(score, member)
-                        true
-                    }
-                } ?: 0
+                val removed = zset?.let { command.members.count(it::removeMember) } ?: 0
                 if (zset != null && zset.scores.size == 0) store.forget(command.key)
                 Reply.Integer(removed.toLong())
             }
             is Command.ZScan -> {
                 val scores = zset(command.key, now)?.scores ?: return scanReply(0, emptyList())
                 val found = ArrayList<Reply>()
-                val next = walk(scores, command.cursor, command.count, { member, _ -> matches(command.pattern, fieldBytes(member)) }) { member, score ->
+                val next = scores.scan(command.cursor, command.count, { member, _ -> matches(command.pattern, fieldBytes(member)) }) { member, score ->
                     found += Reply.Bulk(fieldBytes(member))
                     found += Reply.Bulk(scoreText(score).toByteArray())
                 }
@@ -463,14 +453,14 @@ internal class Partition(
     }
 
     /** The fields under [key], or null when the key is absent. */
-    private fun hash(key: Key, now: Instant): HashTable<String, ByteArray>? =
+    private fun hash(key: Key, now: Instant): ElementTable<ByteArray>? =
         (store.get(key, now)?.value as Value.Hash?)?.fields
 
     /** `MATCH`: no pattern matches everything. */
     private fun matches(pattern: ByteArray?, bytes: ByteArray): Boolean = pattern == null || globMatches(pattern, bytes)
 
     /** The elements under [key], or null when the key is absent. */
-    private fun items(key: Key, now: Instant): ArrayDeque<ByteArray>? =
+    private fun items(key: Key, now: Instant): ElementList? =
         (store.get(key, now)?.value as Value.List?)?.items
 
     /** The sorted set under [key], or null when the key is absent. */
@@ -528,7 +518,7 @@ internal class Partition(
      * `LREM`'s count: the matches are collected in the direction the sign asks for and dropped
      * back to front, so the positions found stay valid while they are removed.
      */
-    private fun remove(items: ArrayDeque<ByteArray>, count: Long, value: ByteArray): Int {
+    private fun remove(items: ElementList, count: Long, value: ByteArray): Int {
         val order = if (count < 0) items.indices.reversed() else items.indices
         // Zero means every match, and so does any magnitude the list cannot reach; clamping to
         // the size also disarms Long.MIN_VALUE, whose absolute value does not fit in a Long.
@@ -540,7 +530,7 @@ internal class Partition(
     }
 
     /** Redis keeps no empty aggregate: the last element taken out takes the key with it. */
-    private fun dropIfEmpty(key: Key, items: ArrayDeque<ByteArray>) {
+    private fun dropIfEmpty(key: Key, items: ElementList) {
         if (items.isEmpty()) store.forget(key)
     }
 

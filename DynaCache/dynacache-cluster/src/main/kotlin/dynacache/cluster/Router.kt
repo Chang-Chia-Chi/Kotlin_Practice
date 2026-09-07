@@ -65,16 +65,28 @@ class Router(
     }
 
     /**
-     * ADR 0002 across nodes: each part is routed like the single-key command it is, one after
-     * the previous one answered so a repeated key keeps its last value, and the replies join in
-     * argument order. Nothing is atomic across parts.
+     * ADR 0002 across nodes: each part is routed like the single-key command it is, every part
+     * goes out before any of them answers, and the replies join in argument order. A ten-key
+     * command therefore costs one round trip and not ten (T79). Nothing is atomic across parts.
+     *
+     * The group is the key, not the coordinator: one key's arguments stay a chain, so a key
+     * named twice still keeps the value of its later argument, while different keys go at once.
+     * Two forwards to one coordinator were already unordered there -- it runs each on its own
+     * coroutine -- so this takes no ordering away that a caller had.
+     *
+     * `allOf` completes only once every part has settled, so a part that fails never answers
+     * for a command whose other parts are still in flight.
      */
     private fun split(command: Command.Fanned): CompletableFuture<Reply> {
-        var parts = CompletableFuture.completedFuture(emptyList<Reply>())
-        for (index in command.keys.indices) {
-            parts = parts.thenCompose { replies -> submit(command.single(index)).thenApply { replies + it } }
+        val joined = arrayOfNulls<Reply>(command.keys.size)
+        val parts = command.keys.indices.groupBy { command.keys[it] }.values.map { positions ->
+            var chain = CompletableFuture.completedFuture(Unit)
+            for (position in positions) {
+                chain = chain.thenCompose { submit(command.single(position)).thenApply { joined[position] = it } }
+            }
+            chain
         }
-        return parts.thenApply(command::join)
+        return CompletableFuture.allOf(*parts.toTypedArray()).thenApply { command.join(joined.map { it!! }) }
     }
 
     override fun close() = local.close()

@@ -14,19 +14,19 @@ cost of the charge changes. Source: benchmark anomaly 2, `docs/dynamiccache/benc
 
 **Nature:** memory accounting, spec 2.7, 5.4, 5.5, I6 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache bf7212d6, measured 18d6c291, merged into misc/ai_gen)
 
-- [ ] `list_charge_is_constant_in_list_length`: recharging a 1-element and a 100,000-element
+- [x] `list_charge_is_constant_in_list_length`: recharging a 1-element and a 100,000-element
       list visits the same number of elements, counted through a test double or a counter, never
       timed; the same for a hash and a sorted set
-- [ ] `I6_used_bytes_equals_sum_of_entries_after_any_sequence` (T72's invariant test) stays green
+- [x] `I6_used_bytes_equals_sum_of_entries_after_any_sequence` (T72's invariant test) stays green
       unchanged, and a new seeded sequence that pushes, pops, trims and sets ranges on lists keeps
       the running total equal to a from-scratch recount after every step
-- [ ] Every existing engine, eviction, expiry and P1 acceptance test passes unchanged
-- [ ] Before/after `-t lpush,rpush,lpop,rpop,lrange` plain and `-P 16` passes recorded in
+- [x] Every existing engine, eviction, expiry and P1 acceptance test passes unchanged
+- [x] Before/after `-t lpush,rpush,lpop,rpop,lrange` plain and `-P 16` passes recorded in
       `docs/dynamiccache/benchmarks/<date>-t77-list-accounting.md`, with the machine load the
       script recorded per pass
-- [ ] Progress entry written
+- [x] Progress entry written
 
 Ground rules for every ticket: implement only this ticket; JUnit 5 + Mockito only, no AssertJ or
 MockK; no sleeps, time is an injected Clock; spec-named tests keep their names, constraint tests

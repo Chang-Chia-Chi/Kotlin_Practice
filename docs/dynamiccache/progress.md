@@ -7402,3 +7402,166 @@ inside T72's split `Partition`/`PartitionStore`; `Replication` and `AntiEntropy`
 `ClusterNode` builds the store beside the one transport and the `BatchEngine` capability;
 `RecordingEngine.kt` was deleted (T66 removed its last use, T73 had only stripped its batch
 method). Verified green on the merged tree: 497 tests, engine 181, cluster 95, cp 113, server 108.
+
+## T79: Fan-out runs the partition groups concurrently
+
+Commits `f39f1dd0` (code) and `d91efbc8` (measurement) on branch `t79`, base `ca75415f`.
+Source: benchmark anomaly 4.
+
+**Built**
+
+- `ApEngine.fanOut` groups by partition as before, submits every group with
+  `Partition.submitAll` before awaiting any, and joins with `CompletableFuture.allOf` into an
+  array indexed by argument position. A ten-key command is one executor hop, not ten. No
+  thread, executor or queue added (ADR 0001): the partitions are still the only executors.
+- `Router.split` does the same across nodes, grouping by **key** rather than coordinator, so a
+  key named twice keeps its later value while different keys go at once even under one hash
+  tag. Two forwards to one coordinator were already unordered there, so nothing is taken away.
+- ADR 0002 unchanged: one partition group still runs as one task, nothing is atomic across
+  groups, reply bytes identical. `everyPartition` stays sequential, an administrative walk.
+
+**Tests**
+
+Full reactor green: engine 181, cluster 93, cp 113, server 108.
+
+- `fan_out_submits_every_group_before_any_completes` (engine): a `PartitionGate` clock parks
+  every partition thread on its first command, so four permits mean four groups went out first.
+- `fan_out_reply_preserves_argument_order` (engine): eight keys, two per partition; `MSET`
+  names the first key again last and the later value stands, `MGET` answers in argument order.
+- `fan_out_one_failed_group_fails_the_command_and_settles_the_rest` (engine): one partition
+  throws, another parks; the future waits for both, then fails, and the parked write landed.
+- `router_split_submits_every_part_before_any_answers` (cluster): a `HoldingEngine` holds every
+  future, so both parts arriving proves the router did not wait for the first.
+- `mget_across_partitions_is_not_atomic` rewritten, name and assertion kept (see Deviations).
+
+**Measured**
+
+Two samples per side, full tables in `docs/dynamiccache/benchmarks/2026-09-07-t79-fan-out.md`.
+
+- Pipelined MSET 2.17x, 31845 to 69134 rps, p50 10.73 to 6.89 ms, p99 35.04 to 22.84 ms, against
+  a 6 to 10 percent spread: 30 to 65 percent of redis:7, own pipelining gain 1.9x to 4.4x next
+  to Redis's 4.8x. Anomaly 4 answered, and the change lands on this pass alone.
+- MGET 0.95 to 1.10 at every key count while the same passes varied 1 to 32 percent between
+  samples; recorded as within the noise, not as support. MSET plain 0.93 on an 18 to 21 percent
+  spread, also noise.
+- p99 under -P 16 grew at no key count, so the bounded-queue ticket this pass conditions is not
+  triggered.
+
+**Deviations**
+
+1. `mget_across_partitions_is_not_atomic` (T03 acceptance) keeps its name and assertion but
+   changes mechanism. Parking a partition thread caught the old fan-out between two groups;
+   with the groups submitted together, per-partition FIFO orders one reader consistently
+   against one writer and that gap is gone -- T03's entry predicted exactly this repair and
+   said it would need a different test. The gap is now made on the submitting side, with a
+   `GatedKeys` list that holds the fan-out after the first group is in and before the second,
+   while a whole `MSET` lands on the partition it has not reached. Still `[old, new]`. It
+   depends on `fanOut` reading `command.keys[i]` per group; if that changes the gate fails
+   loudly rather than hanging.
+2. `router_split_submits_every_part_before_any_answers` is not ticket-named; the router's
+   concurrency claim otherwise had no check. `ParkingClock` deleted, nothing else used it.
+3. The ticket's `-r 100000 -t mset,mget` cannot be run: redis-benchmark has no mget test and an
+   arbitrary command replaces -t rather than joining it. The write side is `-t mset`, the read
+   side an arbitrary MGET, which is also the only way to vary the key count. Said in the report.
+4. Every pass on both sides is marked taken under contention: one foreign idle java.exe was
+   present throughout and the gate requires none. CPU idle stayed at 85 to 94 percent and the
+   condition was identical on both sides.
+
+**For the next ticket**
+
+- The router now issues one forward per distinct key at once: a 1000-key `MGET` is 1000
+  in-flight forwards. The single-node pass cannot see this, and the engine's own defence, one
+  executor per partition, does not cover it. That is where a bulkhead would go.
+- Why the write side moved and the read side did not is a hypothesis, not a measurement: a
+  fanned write's chain serialized the WAL append per group as well as the executor hops.
+  Separating the log's share from the executor's is T78's pass.
+
+## T77: List accounting is incremental
+
+**Built**
+
+- `ElementList` (engine, in `Value.kt`): a list's elements over Kotlin's `ArrayDeque`, keeping the
+  running byte total its own mutations book. `AbstractMutableList`, so every existing read of
+  `Value.List.items` still compiles; the deque is private, so no caller can grow a list without
+  booking its bytes. Both ends still push and pop in O(1) and every index still reads in O(1).
+- `ElementTable<V>` (same file): a hash's fields and a sorted set's scored members over the same
+  `HashTable` as before, keeping the same running total. One class for both, because a hash and a
+  sorted set cost the same shape -- a name, a value and `ELEMENT_BYTES` -- and differ only in what
+  one value costs, which is the constructor's one argument. `scan` carries the `HSCAN`/`ZSCAN` walk.
+- `Value.approximateBytes()` reads those totals: `PartitionStore.charge` after every keyed command
+  is now O(1) for every kind. Its `ponytail:` note naming this as the upgrade path is gone.
+- `Value.ZSet.removeMember` joins `writeScore` as the second and last way in or out of the dual
+  index; `ZREM` calls it instead of writing the score map and the skip list itself.
+- `PartitionStore` is untouched: the interface T72 gave it keeps its shape and `charge` keeps its
+  arithmetic; only what `approximateBytes()` costs changed.
+
+**Tests**
+
+Full reactor, 496 tests, no failures: engine 183, cluster 92, cp 113, server 108. Five new:
+
+- `list_charge_is_constant_in_list_length`, `hash_charge_is_constant_in_field_count`,
+  `zset_charge_is_constant_in_member_count` (`PartitionStoreTest`): recharging a 100,000-element
+  aggregate reads the same number of elements as recharging a 1-element one, counted off a
+  `visits` counter on the container and never timed. Each asserts the counter is live by walking
+  the same aggregate from scratch and seeing all 100,000.
+- `list_running_total_matches_a_recount_after_every_step`,
+  `hash_and_zset_running_totals_match_a_recount_after_every_step` (new `ValueTest`): a seeded
+  sequence of pushes at both ends, pops at both ends, sets in place, removals and trims, with
+  `approximateBytes()` checked against a from-scratch recount after every step. Verified to bite:
+  dropping the delta from `ElementList.set` fails it at step 8.
+- `store_used_bytes_equals_sum_of_entries_after_any_sequence` (T72's, I6) is unchanged and green.
+
+**Measured**
+
+`docs/dynamiccache/benchmarks/2026-09-07-t77-list-accounting.md`, both passes on one reserved
+machine at 90 to 97 percent CPU idle. Plain, RPUSH 1373.21 to 25239.78 and LPOP 2745.97 to
+23849.27; pipelined, RPUSH 1803.56 to 145348.83 with its p50 down from 445.183 ms to 5.255 ms.
+The reading is the convergence rather than the multiplier: before, the four list tests spread
+8.80x and their order was explained entirely by how long `mylist` was; after, they sit within
+7.6 percent of their mean and the two tests on the 150,000-element key are the two fastest.
+Pipelined they now sit in the band `SET` and `HSET` already occupied, so the anomaly is closed
+rather than reduced. The 40 percent still separating them from Redis is the per-command WAL,
+which is anomaly 3 and T78's. The surviving LRANGE slope is the reply size and is correct.
+
+**Deviations**
+
+- The `visits` counters on `ElementList` and `ElementTable` are production fields read only by
+  tests. They follow `SkipList.comparisons`, which exists in this codebase for the same reason: a
+  complexity property proved by counting rather than by timing.
+- T72's invariant test now compares the store's total against the values' own totals rather than
+  against a walk, because the walk is what this ticket removed. The value-level walk it lost is
+  the new `ValueTest` recount, and the two tests say so in each other's terms.
+- `Value.Hash` lost its `HashTable` constructor argument (only `Merge` and `MergeTest` passed one)
+  so that no caller holds a reference to a table whose byte total it could bypass.
+
+**Merged** (`937ac2c9`, `misc/ai_gen` at `1bf5fc55`)
+
+No conflict, and the two changes compose rather than merely compile. T66's `StoreAccess` writes
+through `install`, which calls `PartitionStore.put`, and through `execute`, which is the command
+interpreter: both charge through the running totals. Every value reaching `install` was built by
+`Merge`, `Rdb.decode` or `frozen`, all of which go through the accounted methods, because this
+ticket made the containers private and left no other way in. `VersionedStore` orders values by
+their RDB encoding, not by `approximateBytes`, so its decisions do not read the totals at all.
+
+**For the next ticket**
+
+- `~/.m2` holds an installed `dynacache-engine` from another session's branch, so
+  `mvn -rf :dynacache-cp` resolves a stale engine and fails to compile. Build the whole reactor.
+- `CpSnapshotTest.lagging_member_is_brought_up_by_snapshot` flaked once and passed on the rerun.
+
+---
+
+## T82 - Delete the two pass-through aliases
+
+Both aliases are gone; nothing was kept.
+
+- `DistributedSnapshot.initiate(id)` deleted. It was `= start(id)` and the only reason `start` was private, so `start` is now public and carries the KDoc `initiate` had. The doc line about an operator's id failing rather than being dropped was kept and sharpened: it now also says an id off the wire is checked by `receive` (`parts.accepts`) before it reaches `start`, which the old KDoc's "an operator's, not the wire's" left implicit. Callers changed: `ClusterNode.snapshot` (1) and `DistributedSnapshotTest` (10 calls, plus two local `Job` vals renamed `initiate` to `starting` and three doc references).
+- `TimerWheel.reschedule(key, deadline)` deleted. It was `= schedule(key, deadline)`, called only by `TimerWheelTest` (2 calls, now `schedule`). `schedule`'s own KDoc already promises "an existing entry for [key] is replaced", so the alias's KDoc added nothing.
+
+Call sites touched: 13 in tests, 1 in main (`ClusterNode`), plus 3 in-file doc/comment references.
+
+Kept: nothing. Neither call site showed an intent the KDoc did not already state.
+
+Tests: engine 179, cluster 97, cp 113, server 108, 497 total, all green, no test names changed. The brief predicted engine 181 / cluster 95; the base commit `1bf5fc55` already had 179 / 97, and the 497 total matches.
+
+Commit: `b210c606` on branch `t82`.

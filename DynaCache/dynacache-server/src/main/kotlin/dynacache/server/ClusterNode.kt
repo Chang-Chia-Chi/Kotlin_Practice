@@ -251,7 +251,7 @@ class ClusterNode(
      */
     fun snapshot(id: String) {
         val part = checkNotNull(distributed) { "$self was given no snapshot directory" }
-        scope.launch { part.initiate(id) }
+        scope.launch { part.start(id) }
     }
 
     /** Whether every incoming channel of [id] has closed here; the set is done when all nodes say so. */
