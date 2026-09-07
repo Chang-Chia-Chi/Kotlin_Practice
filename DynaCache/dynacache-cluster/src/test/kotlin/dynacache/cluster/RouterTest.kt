@@ -206,7 +206,10 @@ class RouterTest {
         }
 
         init {
-            routers.values.forEach { router -> scope.launch { router.run() } }
+            for (node in nodes) {
+                val loop = InboundLoop(network.endpoint(node).inbound, forwards = routers.getValue(node)::receive)
+                scope.launch { loop.run() }
+            }
         }
 
         fun router(node: NodeId): Router = routers.getValue(node)

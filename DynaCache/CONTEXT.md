@@ -92,7 +92,16 @@ _Avoid_: dispatcher, actor, worker
 **Transport**:
 The seam through which nodes exchange cluster messages; the messages are the protobuf types
 themselves. Two adapters exist: in-memory (tests, with partition, drop, delay, kill) and gRPC.
+Its send half stands alone as `Outbound`, which every module that only talks to peers takes,
+and whose one promise both adapters owe: an unreachable peer is a dropped envelope, never a
+throw.
 _Avoid_: channel, bus, network layer
+
+**Inbound loop**:
+A node's one reader of its transport, and the one place its handler order lives: snapshot
+markers, then forwards, then replication, then anti-entropy, then gossip. One channel has one
+reader, so nothing else on the node reads the transport.
+_Avoid_: dispatcher, event loop
 
 **Membership**:
 The gossip's current view of which nodes are alive, suspect or dead, and its change events.

@@ -9,6 +9,7 @@ import io.grpc.InsecureServerCredentials
 import io.grpc.ManagedChannel
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 
@@ -24,8 +25,10 @@ data class HostPort(val host: String, val port: Int)
  * time, not at construction, so a caller holding a mutable map may fill in addresses once every
  * node has bound - which is how two nodes on ephemeral ports learn each other.
  *
- * [send] returns when the peer has accepted the envelope. So a peer that is down is a send
- * error rather than a hang, and sequential sends to one peer arrive in the order they were sent.
+ * [send] returns when the peer has accepted the envelope, so sequential sends to one peer arrive
+ * in the order they were sent. A peer that is down reports out of the gRPC call rather than
+ * hanging, and this adapter turns that into the seam's drop (T68): the in-memory adapter every
+ * cluster test was written against simply drops, and this makes gRPC agree.
  */
 class GrpcTransport(
     private val self: NodeId,
@@ -55,12 +58,20 @@ class GrpcTransport(
     }
 
     override suspend fun send(to: NodeId, envelope: Envelope) {
+        // An address this node was never given is a wiring error, not an unreachable peer, so it
+        // is raised rather than dropped: no gossip round will ever repair a missing address.
         val channel = channels.computeIfAbsent(to) {
             val address = requireNotNull(peers[to]) { "$self has no address for $to" }
             Grpc.newChannelBuilder("${address.host}:${address.port}", InsecureChannelCredentials.create())
                 .build()
         }
-        ClusterServiceGrpcKt.ClusterServiceCoroutineStub(channel).deliver(envelope)
+        try {
+            ClusterServiceGrpcKt.ClusterServiceCoroutineStub(channel).deliver(envelope)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (unreachable: Exception) {
+            // The peer is down or going down. Gossip will notice; a quorum waits for the rest.
+        }
     }
 
     override fun close() {

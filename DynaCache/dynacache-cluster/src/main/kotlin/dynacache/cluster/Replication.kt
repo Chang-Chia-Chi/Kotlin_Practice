@@ -69,7 +69,7 @@ class Replication(
     private val ring: Ring,
     private val config: ReplicationConfig,
     private val engine: CommandEngine,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val membership: Membership,
     private val counter: DotCounter,
     private val clock: Clock,
