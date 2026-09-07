@@ -57,7 +57,7 @@ class TimerWheelTest {
     fun wheel_replace_ttl() {
         val w = wheel()
         w.schedule("k", at(2000))
-        w.reschedule("k", at(8000))
+        w.schedule("k", at(8000))
 
         w.advanceTo(at(7999))
         assertEquals(emptyList<String>(), fired)
@@ -146,7 +146,7 @@ class TimerWheelTest {
             now += tick
             w.advanceTo(at(now))
             if (now < 3000 && now % 250 == 0L) scheduleSome(100)
-            if (now == 500L) w.reschedule(0, at(now + 700)).also { due[0] = now + 700 }
+            if (now == 500L) w.schedule(0, at(now + 700)).also { due[0] = now + 700 }
         }
 
         assertEquals(due.keys, firedAt.keys)

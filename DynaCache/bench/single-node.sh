@@ -9,6 +9,10 @@
 #
 # Run it from anywhere in Git Bash:  bash DynaCache/bench/single-node.sh
 #
+# SECTIONS=t78 runs the write-path subset, DynaCache against its own earlier self: see
+# t78_passes below. BENCH_ROOT names the tree to build and measure when this script is run from a
+# copy of itself, which is how a before pass measures an older checkout with the newer script.
+#
 # Why the node runs with fsync NEVER: DynaCache answers a write only once its WAL entry is
 # durable (C14). Under EVERY_SECOND that means every write waits for the next second's fsync,
 # so write throughput is (clients / 1s) and a 100k-request SET pass would take hours. The
@@ -28,7 +32,22 @@ CLIENTS=50
 REQUESTS=${REQUESTS:-100000}
 # The redis-benchmark tests DynaCache's parser has commands for. SADD, SPOP and ZPOPMIN are
 # the ones it does not; they are reported as skipped rather than left out silently.
-TESTS=ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,lrange_100,hset,zadd,mset
+#
+# TESTS, PASSES and SECTIONS narrow the run. The whole suite is the default and is what a
+# release measurement takes; a ticket that changed one code path measures that path and pays
+# for nothing else. To take one before-and-after pair on the list commands, for example:
+#   TESTS=lpush,rpush,lpop,rpop,lrange PASSES=plain,pipelined SECTIONS=dynacache bash ...
+TESTS=${TESTS:-ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,lrange_100,hset,zadd,mset}
+# Which of the four passes each target gets. `fanout` (T79) is off by default: it is one
+# ticket's measurement, not part of what a release run takes.
+PASSES=${PASSES:-plain,pipelined,1024b,spread}
+# The key counts the T79 MGET sweep walks.
+MGET_KEYS=${MGET_KEYS:-2 8 16 64}
+# One arbitrary command for `pass` to run instead of the -t list; empty is the -t list.
+# redis-benchmark ignores -t when a command is given, so it is one or the other, never both.
+COMMAND=
+# Which sections of the run happen at all.
+SECTIONS=${SECTIONS:-dynacache,durability,listgrowth,redis}  # plus t78, off by default
 # A short SET pass under EVERY_SECOND. It runs at about (clients / second), so keep it small.
 DURABILITY_REQUESTS=${DURABILITY_REQUESTS:-500}
 # One round of the list-length confirmation: LPUSH this many elements onto the same key.
@@ -43,7 +62,9 @@ QUIET_SECONDS=${QUIET_SECONDS:-10}
 IDLE_FLOOR=${IDLE_FLOOR:-70}
 QUIET_BUDGET=${QUIET_BUDGET:-600}
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The tree to build and measure, which is the one this script lives in unless it is run from a
+# copy: a before pass runs this version of the script against an older checkout of the tree.
+ROOT=${BENCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 OUT=${BENCH_OUT:-"$(cygpath -u "${TEMP:-/tmp}")/dynacache-bench"}
 DATA="$OUT/data"
 JAVA_HOME=${JAVA_HOME:-/c/Users/maxch/.jdks/openjdk-22.0.1}
@@ -56,6 +77,9 @@ NODE_PID=
 OWN_JAVA=0
 
 fail() { echo "FAILED: $*" >&2; exit 1; }
+
+# True when $2 is one of the comma-separated names in $1.
+selected() { case ",$1," in *",$2,"*) return 0 ;; *) return 1 ;; esac; }
 
 cleanup() {
   stop_node
@@ -74,17 +98,24 @@ build() {
 }
 
 # One node in single-node mode: no --peers, no CP group, 16 partitions, a throwaway data dir.
+# A second argument of "none" starts it with no data directory at all, which is a node with no
+# write-ahead log: the difference between that and a NEVER node is what the log costs (T78).
 start_node() {
-  local fsync=$1
-  rm -rf "$DATA"
-  mkdir -p "$DATA"
+  local fsync=$1 data=${2:-$DATA} args
+  if [ "$data" = none ]; then
+    args=("$PORT" 16)
+  else
+    rm -rf "$DATA"
+    mkdir -p "$DATA"
+    args=("$PORT" 16 "$(cygpath -w "$DATA")" "$fsync")
+  fi
   "$JAVA_HOME/bin/java" \
     -cp "$(cat "$CP_FILE");$(cygpath -w "$SERVER_JAR")" \
-    dynacache.server.DynaCacheServerKt "$PORT" 16 "$(cygpath -w "$DATA")" "$fsync" \
-    >"$OUT/node-$fsync.log" 2>&1 &
+    dynacache.server.DynaCacheServerKt "${args[@]}" \
+    >"$OUT/node-$fsync-${data##*/}.log" 2>&1 &
   NODE_PID=$!
   OWN_JAVA=1
-  echo "node started (pid $NODE_PID, fsync $fsync), log $OUT/node-$fsync.log"
+  echo "node started (pid $NODE_PID, fsync $fsync, data $data), log $OUT/node-$fsync-${data##*/}.log"
 }
 
 stop_node() {
@@ -148,8 +179,14 @@ pass() {
   shift 2
   wait_for_quiet "$name" "$OWN_JAVA"
   echo "-- $name"
+  # The command, when there is one, goes last: redis-benchmark takes every word after it as
+  # its arguments, so a flag placed behind it is swallowed rather than read.
+  # A command goes last: redis-benchmark reads every word after it as its own argument, so a
+  # flag placed behind one is swallowed rather than read.
+  local what=(-t "$TESTS")
+  [ -n "$COMMAND" ] && what=($COMMAND)
   timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
-    -h "$HOST_FROM_CONTAINER" -p "$port" -c "$CLIENTS" -n "$REQUESTS" -t "$TESTS" --csv "$@" \
+    -h "$HOST_FROM_CONTAINER" -p "$port" -c "$CLIENTS" -n "$REQUESTS" --csv "$@" "${what[@]}" \
     >"$OUT/$name.csv" 2>"$OUT/$name.err"
   local status=$?
   [ "$status" -eq 0 ] || { cat "$OUT/$name.err" >&2; fail "$name (exit $status)"; }
@@ -165,15 +202,89 @@ pass() {
 # nothing here crosses a partition boundary and DynaCache's multi-key fan-out is never
 # exercised. With -r the ten keys of an MSET land on up to ten partitions, which is the
 # measurement ApEngine.fanOut's marked ceiling actually needs.
+# The fan-out passes (T79, benchmark anomaly 4). MSET runs first, so the MGET sweep reads keys
+# that are there; both under -r 100000, without which every key of a multi-key command is the
+# same key, one partition serves the whole command and the fan-out is never exercised.
+#
+# redis-benchmark has no mget test, and an arbitrary command replaces -t rather than joining
+# it, so the read side is spelled out: K copies of key:__rand_int__, which -r expands to K
+# different keys and so to up to K partitions.
+fanout_passes() {
+  local target=$1 port=$2 k i keys
+  local keep=$TESTS
+  TESTS=mset
+  pass "$target-mset-spread" "$port" -d 3 -r 100000
+  pass "$target-mset-spread-P16" "$port" -d 3 -r 100000 -P 16
+  TESTS=$keep
+  for k in $MGET_KEYS; do
+    keys=
+    for i in $(seq "$k"); do keys="$keys key:__rand_int__"; done
+    COMMAND="MGET$keys"
+    pass "$target-mget-$k" "$port" -r 100000
+    pass "$target-mget-$k-P16" "$port" -r 100000 -P 16
+    COMMAND=
+  done
+}
+
 three_passes() {
   local target=$1 port=$2
-  pass "$target-plain" "$port" -d 3
-  pass "$target-pipelined" "$port" -d 3 -P 16
-  pass "$target-1024b" "$port" -d 1024
-  local keep=$TESTS
-  TESTS=set,get,incr,mset
-  pass "$target-spread" "$port" -d 3 -r 100000
+  selected "$PASSES" plain && pass "$target-plain" "$port" -d 3
+  selected "$PASSES" pipelined && pass "$target-pipelined" "$port" -d 3 -P 16
+  selected "$PASSES" 1024b && pass "$target-1024b" "$port" -d 1024
+  selected "$PASSES" fanout && fanout_passes "$target" "$port"
+  if selected "$PASSES" spread; then
+    local keep=$TESTS
+    TESTS=set,get,incr,mset
+    pass "$target-spread" "$port" -d 3 -r 100000
+    TESTS=$keep
+  fi
+  return 0
+}
+
+# SECTIONS=t78: the write path only, DynaCache against its own earlier self rather than against
+# Redis, which is what a before-and-after pass on the log needs. Four write tests plain and
+# pipelined under NEVER (the flusher's buffer), the same pipelined pass on a node with no data
+# directory (the log's whole share, since that node has no log), and one SET pass per entry in
+# T78_DURABILITY, written POLICY:REQUESTS:CLIENTS. GROUP_COMMIT wants many more requests than
+# EVERY_SECOND because it is expected to answer three orders of magnitude faster. The one-client
+# entries are the pass that tests the deadline: at fifty clients batches form continuously and the
+# writer is free constantly, so the force fires on the batch and the deadline almost never binds;
+# at one client nothing else can fire it, so the deadline is the whole of the wait.
+T78_DURABILITY=${T78_DURABILITY:-NEVER:20000:50 GROUP_COMMIT:20000:50 EVERY_SECOND:500:50 EVERY_SECOND:1500:50 NEVER:5000:1 GROUP_COMMIT:5000:1}
+
+t78_passes() {
+  local keep=$TESTS entry policy requests clients
+  TESTS=set,incr,hset,zadd
+
+  echo "=== T78 DynaCache (fsync NEVER, with a data directory)"
+  start_node NEVER
+  wait_for_ping "$PORT" DynaCache
+  pass t78-never-plain "$PORT" -d 3
+  pass t78-never-pipelined "$PORT" -d 3 -P 16
+  stop_node
+
+  echo "=== T78 DynaCache (no data directory, so no log at all)"
+  start_node NEVER none
+  wait_for_ping "$PORT" DynaCache
+  pass t78-nolog-pipelined "$PORT" -d 3 -P 16
+  stop_node
   TESTS=$keep
+
+  for entry in $T78_DURABILITY; do
+    IFS=: read -r policy requests clients <<<"$entry"
+    # Named by count as well as policy: EVERY_SECOND runs at two counts, to show that its rate is
+    # bound by the fsync interval rather than by how long the pass is.
+    local name=t78-$policy-set-$requests-c$clients
+    echo "=== T78 durability ($policy, SET only, $requests requests, $clients clients)"
+    start_node "$policy"
+    wait_for_ping "$PORT" DynaCache
+    wait_for_quiet "$name" "$OWN_JAVA"
+    timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
+      -h "$HOST_FROM_CONTAINER" -p "$PORT" -c "$clients" -n "$requests" -d 3 -t set --csv \
+      >"$OUT/$name.csv" 2>&1 || fail "durability pass $policy at $requests on $clients clients"
+    cat "$OUT/$name.csv"
+    stop_node
+  done
 }
 
 command -v docker >/dev/null || fail "docker is not on PATH"
@@ -192,13 +303,20 @@ echo "=== environment"
   echo "flags: -c $CLIENTS -n $REQUESTS -t $TESTS"
 } | tee "$OUT/environment.txt"
 
+if selected "$SECTIONS" t78; then
+t78_passes
+fi
+
+if selected "$SECTIONS" dynacache; then
 echo "=== DynaCache (fsync NEVER)"
 start_node NEVER
 wait_for_ping "$PORT" DynaCache
 three_passes dynacache "$PORT"
-
-echo "=== DynaCache durability cost (fsync EVERY_SECOND, SET only, $DURABILITY_REQUESTS requests)"
 stop_node
+fi
+
+if selected "$SECTIONS" durability; then
+echo "=== DynaCache durability cost (fsync EVERY_SECOND, SET only, $DURABILITY_REQUESTS requests)"
 start_node EVERY_SECOND
 wait_for_ping "$PORT" DynaCache
 wait_for_quiet dynacache-every-second-set "$OWN_JAVA"
@@ -207,11 +325,13 @@ timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
   >"$OUT/dynacache-every-second-set.csv" 2>&1 || fail "durability pass"
 cat "$OUT/dynacache-every-second-set.csv"
 stop_node
+fi
 
 # The list tests are the ones that fall furthest behind Redis, and the suspect is the
 # per-command memory recount, which is O(elements) of the key the command touched. Four
 # identical LPUSH passes against one fresh node push onto the same growing key, so the only
 # thing that changes between rounds is how long that key is.
+if selected "$SECTIONS" listgrowth; then
 echo "=== DynaCache list-length confirmation (fsync NEVER, four LPUSH passes on one key)"
 start_node NEVER
 wait_for_ping "$PORT" DynaCache
@@ -223,13 +343,16 @@ for round in 1 2 3 4; do
   echo "round $round (mylist reaches $((round * LIST_STEP))): $(tail -1 "$OUT/dynacache-listgrowth-$round.csv")"
 done
 stop_node
+fi
 
+if selected "$SECTIONS" redis; then
 echo "=== redis:7"
 docker rm -f "$CONTAINER" >/dev/null 2>&1
 docker run -d --name "$CONTAINER" -p "$REDIS_PORT:6379" "$IMAGE" >/dev/null || fail "starting $CONTAINER"
 wait_for_ping "$REDIS_PORT" redis:7
 three_passes redis "$REDIS_PORT"
 docker rm -f "$CONTAINER" >/dev/null
+fi
 
 echo
 echo "=== load at each pass"

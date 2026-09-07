@@ -2,8 +2,8 @@ package dynacache.engine
 
 // The skip list's entry, aliased because [PartitionStore.Entry] is the store's own.
 import dynacache.engine.ds.Entry as Scored
-import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
+import dynacache.engine.persist.KeyVersions
 import dynacache.engine.persist.RdbEntry
 import java.time.Clock
 import java.time.Duration
@@ -20,7 +20,7 @@ import java.util.concurrent.Executors
  * deadlines and which key goes under pressure are the store's, not its.
  */
 internal class Partition(
-    id: PartitionId,
+    private val id: PartitionId,
     private val clock: Clock,
     private val random: Random,
     tickMillis: Long,
@@ -37,6 +37,12 @@ internal class Partition(
      * durability of the entry it appended, or null when the command changed nothing (C14).
      */
     private val log: (Command, Reply, Instant) -> CompletableFuture<*>?,
+    /**
+     * The versions this partition's keys are held under (T67), read on this thread so a snapshot
+     * never pairs one install's value with another's version. A function, not a value: the
+     * engine's store is attached after the partitions are built.
+     */
+    private val versions: () -> KeyVersions,
 ) {
 
     /**
@@ -92,15 +98,20 @@ internal class Partition(
      * executor so it sits between two commands or batches and never inside one (C9). The
      * entries are copied, not referenced: a Hash, List or Sorted Set is mutated in place by the
      * next command, and the writer serializes off this thread. A String's bytes are shared,
-     * since no command mutates that array. The DVV is empty until replication stamps one (T22).
+     * since no command mutates that array. Each entry carries the version the key is held under,
+     * empty on a node that versions nothing, and a version with no live value goes in as a
+     * tombstone row: a restart that forgot one would let anti-entropy resurrect a delete (T67).
      * The task waits at [cut] first, so every partition's view is taken at the same moment.
      */
     fun snapshotView(now: Instant, cut: CyclicBarrier): CompletableFuture<List<RdbEntry>> =
         CompletableFuture.supplyAsync({
             cut.await()
-            store.entries().filterNot { it.value.expired(now) }
-                .map { RdbEntry(it.key, frozen(it.value.value), it.value.expiresAt, EMPTY) }
+            val held = versions().on(id)
+            val live = store.entries().filterNot { it.value.expired(now) }
+                .map { RdbEntry(it.key, frozen(it.value.value), it.value.expiresAt, held[it.key] ?: EMPTY) }
                 .toList()
+            val alive = live.mapTo(HashSet()) { it.key }
+            live + held.entries.filter { it.key !in alive }.map { RdbEntry(it.key, null, null, it.value) }
         }, executor)
 
     /** [work] as one task on this thread with the store at hand (T66): what [StoreAccess] promises. */
@@ -134,17 +145,24 @@ internal class Partition(
         override fun execute(command: Command): Reply = this@Partition.execute(command)
     }
 
-    /** Writes restored [entries] in, through the same funnel a command uses, skipping the already expired. */
+    /**
+     * Writes restored [entries] in, through the same funnel a command uses, skipping the already
+     * expired. A tombstone has no value to write: it is a version alone, and the version table is
+     * where it lands (T67).
+     */
     fun restore(entries: List<RdbEntry>): CompletableFuture<Void> =
         CompletableFuture.runAsync({
             val now = clock.instant()
-            for (entry in entries) if (!entry.expired(now)) store.put(entry.key, now, entry.value, entry.expiresAt)
+            for (entry in entries) {
+                val value = entry.value ?: continue
+                if (!entry.expired(now)) store.put(entry.key, now, value, entry.expiresAt)
+            }
         }, executor)
 
     private fun frozen(value: Value): Value = when (value) {
         is Value.Str -> value
         is Value.Hash -> Value.Hash().also { copy -> value.fields.entries().forEach { copy.fields.put(it.key, it.value) } }
-        is Value.List -> Value.List(ArrayDeque(value.items))
+        is Value.List -> Value.List(value.items)
         is Value.ZSet -> Value.ZSet(SkipList(random.nextLong())).also { copy ->
             value.order.forward().forEach { copy.writeScore(it.score, it.member) }
         }
@@ -259,7 +277,7 @@ internal class Partition(
             is Command.HScan -> {
                 val fields = hash(command.key, now) ?: return scanReply(0, emptyList())
                 val found = ArrayList<Reply>()
-                val next = walk(fields, command.cursor, command.count, { field, _ -> matches(command.pattern, fieldBytes(field)) }) { field, value ->
+                val next = fields.scan(command.cursor, command.count, { field, _ -> matches(command.pattern, fieldBytes(field)) }) { field, value ->
                     found += Reply.Bulk(fieldBytes(field))
                     found += Reply.Bulk(value)
                 }
@@ -368,23 +386,14 @@ internal class Partition(
             }
             is Command.ZRem -> {
                 val zset = zset(command.key, now)
-                // The score map says whether the member was there; the list is then told the same
-                // thing. Counting off the map keeps one index from silently disagreeing with the
-                // other about what was removed.
-                val removed = zset?.let {
-                    command.members.count { member ->
-                        val score = it.scores.remove(fieldName(member)) ?: return@count false
-                        it.order.remove(score, member)
-                        true
-                    }
-                } ?: 0
+                val removed = zset?.let { command.members.count(it::removeMember) } ?: 0
                 if (zset != null && zset.scores.size == 0) store.forget(command.key)
                 Reply.Integer(removed.toLong())
             }
             is Command.ZScan -> {
                 val scores = zset(command.key, now)?.scores ?: return scanReply(0, emptyList())
                 val found = ArrayList<Reply>()
-                val next = walk(scores, command.cursor, command.count, { member, _ -> matches(command.pattern, fieldBytes(member)) }) { member, score ->
+                val next = scores.scan(command.cursor, command.count, { member, _ -> matches(command.pattern, fieldBytes(member)) }) { member, score ->
                     found += Reply.Bulk(fieldBytes(member))
                     found += Reply.Bulk(scoreText(score).toByteArray())
                 }
@@ -463,14 +472,14 @@ internal class Partition(
     }
 
     /** The fields under [key], or null when the key is absent. */
-    private fun hash(key: Key, now: Instant): HashTable<String, ByteArray>? =
+    private fun hash(key: Key, now: Instant): ElementTable<ByteArray>? =
         (store.get(key, now)?.value as Value.Hash?)?.fields
 
     /** `MATCH`: no pattern matches everything. */
     private fun matches(pattern: ByteArray?, bytes: ByteArray): Boolean = pattern == null || globMatches(pattern, bytes)
 
     /** The elements under [key], or null when the key is absent. */
-    private fun items(key: Key, now: Instant): ArrayDeque<ByteArray>? =
+    private fun items(key: Key, now: Instant): ElementList? =
         (store.get(key, now)?.value as Value.List?)?.items
 
     /** The sorted set under [key], or null when the key is absent. */
@@ -528,7 +537,7 @@ internal class Partition(
      * `LREM`'s count: the matches are collected in the direction the sign asks for and dropped
      * back to front, so the positions found stay valid while they are removed.
      */
-    private fun remove(items: ArrayDeque<ByteArray>, count: Long, value: ByteArray): Int {
+    private fun remove(items: ElementList, count: Long, value: ByteArray): Int {
         val order = if (count < 0) items.indices.reversed() else items.indices
         // Zero means every match, and so does any magnitude the list cannot reach; clamping to
         // the size also disarms Long.MIN_VALUE, whose absolute value does not fit in a Long.
@@ -540,7 +549,7 @@ internal class Partition(
     }
 
     /** Redis keeps no empty aggregate: the last element taken out takes the key with it. */
-    private fun dropIfEmpty(key: Key, items: ArrayDeque<ByteArray>) {
+    private fun dropIfEmpty(key: Key, items: ElementList) {
         if (items.isEmpty()) store.forget(key)
     }
 

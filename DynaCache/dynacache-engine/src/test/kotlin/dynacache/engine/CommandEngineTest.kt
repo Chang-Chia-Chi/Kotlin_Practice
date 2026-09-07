@@ -19,11 +19,14 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Collections
 import java.util.Random
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class CommandEngineTest {
 
@@ -137,24 +140,94 @@ class CommandEngineTest {
         assertEquals(Reply.Integer(0), run(Command.ExistsKeys(listOf(here, elsewhere))))
     }
 
-    /** Parks the first command that runs on one named partition thread, until [release]. */
-    private class ParkingClock : Clock() {
-        val entered = Semaphore(0)
+    /**
+     * A fanned command's key list, which parks the fan-out the second time it is asked for the
+     * key at [at]. The grouping reads every key once and each group reads its own again while
+     * it builds its commands, so parking on the last key's second read catches the fan-out with
+     * the earlier group already submitted and this one not yet. Since T79 the groups go out
+     * together, and this is the only gap a concurrent write can deliberately be placed in.
+     */
+    private class GatedKeys(private val keys: List<Key>, private val at: Int) : AbstractList<Key>() {
+
+        /** A permit once the fan-out has parked, so the test knows the earlier group is in. */
+        val parked = Semaphore(0)
+
+        private val reads = AtomicInteger()
         private val gate = CountDownLatch(1)
 
-        @Volatile
-        private var parked: String? = null
+        fun release() = gate.countDown()
 
-        fun park(threadName: String) {
-            parked = threadName
+        override val size: Int get() = keys.size
+
+        override fun get(index: Int): Key {
+            if (index == at && reads.incrementAndGet() == 2) {
+                parked.release()
+                check(gate.await(5, TimeUnit.SECONDS)) { "never released" }
+            }
+            return keys[index]
         }
+    }
+
+    /**
+     * Pins ADR 0002. The fan-out is held between its two groups, and a whole MSET lands on the
+     * partition it has not reached yet. The reply then mixes the value of one key from before
+     * that write with the other from after it: an outcome neither an atomic MGET nor an atomic
+     * MSET could produce. T03 wrote this with a parked partition thread, which worked only
+     * while the groups went out one at a time; T79 makes them go out together, so the gap is
+     * now made on the submitting side instead.
+     */
+    @Test
+    fun mget_across_partitions_is_not_atomic() {
+        val engine = ApEngine(partitionCount = 2, clock = clock)
+        try {
+            val x = Key("x")
+            val y = otherPartitionThan(x, engine)
+            engine.submit(Command.MSet(listOf(x to "old".toByteArray(), y to "old".toByteArray()))).get()
+
+            // On another thread, so the test thread is free to write while the fan-out is held.
+            val keys = GatedKeys(listOf(x, y), at = 1)
+            val read = CompletableFuture.supplyAsync { engine.submit(Command.MGet(keys)) }.thenCompose { it }
+            assertTrue(keys.parked.tryAcquire(5, TimeUnit.SECONDS), "the fan-out is between its two groups")
+
+            // y first, so this write reaches y's partition before the MGET's y group is submitted.
+            engine.submit(Command.MSet(listOf(y to "new".toByteArray(), x to "new".toByteArray())))
+                .get(5, TimeUnit.SECONDS)
+            keys.release()
+
+            assertEquals(
+                Reply.Array(listOf(Reply.Bulk("old".toByteArray()), Reply.Bulk("new".toByteArray()))),
+                read.get(5, TimeUnit.SECONDS),
+                "x from before the write, y from after it",
+            )
+        } finally {
+            engine.close()
+        }
+    }
+
+    /**
+     * Holds every partition thread at its first command, so a test sees how many of a fan-out's
+     * groups were submitted before any of them answered. The thread named by [failing] throws
+     * there instead of parking, which is how one group's task fails while another still runs.
+     */
+    private class PartitionGate : Clock() {
+
+        /** One permit per partition thread that has reached its first command. */
+        val entered = Semaphore(0)
+
+        /** The partition thread whose first command throws; null is a gate that only parks. */
+        @Volatile
+        var failing: String? = null
+
+        private val gate = CountDownLatch(1)
+        private val seen = ConcurrentHashMap.newKeySet<String>()
 
         fun release() = gate.countDown()
 
         override fun instant(): Instant {
-            if (Thread.currentThread().name == parked) {
-                parked = null
+            val thread = Thread.currentThread().name
+            if (thread.startsWith("partition-") && seen.add(thread)) {
                 entered.release()
+                check(thread != failing) { "$thread refuses this command" }
                 check(gate.await(5, TimeUnit.SECONDS)) { "never released" }
             }
             return Instant.EPOCH
@@ -165,41 +238,79 @@ class CommandEngineTest {
     }
 
     /**
-     * Pins ADR 0002. The gate parks the MGET's first part, and the fan-out has not reached the
-     * other partition yet, so a whole MSET lands there in the gap. The reply then mixes the
-     * value of one key from before that write with the other from after it: an outcome neither
-     * an atomic MGET nor an atomic MSET could produce.
+     * T79: the groups go out together, not one after the previous one answered. Every partition
+     * thread parks on its first command, so four permits can only appear if all four groups were
+     * submitted while the first was still holding its future.
      */
     @Test
-    fun mget_across_partitions_is_not_atomic() {
-        val gate = ParkingClock()
-        val engine = ApEngine(partitionCount = 2, clock = gate)
+    fun fan_out_submits_every_group_before_any_completes() {
+        val gate = PartitionGate()
+        val engine = ApEngine(partitionCount = 4, clock = gate)
         try {
-            val x = Key("x")
-            val y = otherPartitionThan(x, engine)
-            engine.submit(Command.MSet(listOf(x to "old".toByteArray(), y to "old".toByteArray()))).get()
+            val keys = (0..99).map { Key("k$it") }.groupBy { engine.partitionOf(it).index }
+                .values.map { it.first() }
+            assertEquals(4, keys.size, "one key on each of the four partitions")
 
-            gate.park("partition-${engine.partitionOf(x).index}")
-            val read = engine.submit(Command.MGet(listOf(x, y)))
-            assertTrue(gate.entered.tryAcquire(5, TimeUnit.SECONDS), "the MGET parked on x's partition")
+            val reply = engine.submit(Command.MGet(keys))
 
-            // y first, so this write reaches y's partition while the MGET is still parked on x's.
-            val write = engine.submit(Command.MSet(listOf(y to "new".toByteArray(), x to "new".toByteArray())))
-            assertEquals(
-                Reply.Bulk("new".toByteArray()),
-                engine.submit(Command.Get(y)).get(5, TimeUnit.SECONDS),
-                "the write reached y's partition",
-            )
-            assertFalse(read.isDone, "the MGET has not reached y's partition yet")
-
+            assertTrue(gate.entered.tryAcquire(keys.size, 5, TimeUnit.SECONDS), "every group reached its partition")
+            assertFalse(reply.isDone, "no group has answered yet")
             gate.release()
-            assertEquals(
-                Reply.Array(listOf(Reply.Bulk("old".toByteArray()), Reply.Bulk("new".toByteArray()))),
-                read.get(5, TimeUnit.SECONDS),
-                "x from before the write, y from after it",
-            )
-            write.get(5, TimeUnit.SECONDS)
+            assertEquals(Reply.Array(keys.map { Reply.Bulk(null) }), reply.get(5, TimeUnit.SECONDS))
         } finally {
+            gate.release()
+            engine.close()
+        }
+    }
+
+    /** ADR 0002: the per-key results are in argument order, whichever partitions they came from. */
+    @Test
+    fun fan_out_reply_preserves_argument_order() {
+        // Two keys on each partition, laid out so no two neighbouring arguments share one: the
+        // argument order and the partition grouping disagree at every position.
+        val perPartition = (0..99).map { Key("k$it") }.groupBy { engine.partitionOf(it).index }
+        val keys = (0..1).flatMap { round -> perPartition.values.map { it[round] } }
+        assertEquals(8, keys.size, "four partitions, two keys each")
+
+        // The same key first and last: with the order kept, the later argument is the one that stands.
+        val pairs = keys.mapIndexed { at, key -> key to "v$at".toByteArray() } + (keys[0] to "last".toByteArray())
+        assertEquals(Reply.Simple("OK"), run(Command.MSet(pairs)))
+        assertEquals(Reply.Bulk("last".toByteArray()), run(Command.Get(keys[0])), "MSET kept the later argument")
+
+        val expected = keys.mapIndexed { at, _ -> Reply.Bulk((if (at == 0) "last" else "v$at").toByteArray()) }
+        assertEquals(Reply.Array(expected), run(Command.MGet(keys)), "MGET answers in argument order")
+        assertEquals(Reply.Integer(8), run(Command.DelKeys(keys)))
+        assertEquals(Reply.Integer(0), run(Command.ExistsKeys(keys)), "DEL took every one of them")
+    }
+
+    /**
+     * T79: a group that throws does not answer for the command while another group is still
+     * running against the same reply. The command fails only once every group has settled.
+     */
+    @Test
+    fun fan_out_one_failed_group_fails_the_command_and_settles_the_rest() {
+        val gate = PartitionGate()
+        val engine = ApEngine(partitionCount = 4, clock = gate)
+        try {
+            val refused = Key("a")
+            val parked = otherPartitionThan(refused, engine)
+            gate.failing = "partition-${engine.partitionOf(refused).index}"
+
+            val write = engine.submit(
+                Command.MSet(listOf(refused to "va".toByteArray(), parked to "vb".toByteArray()))
+            )
+
+            assertTrue(gate.entered.tryAcquire(2, 5, TimeUnit.SECONDS), "both groups were submitted")
+            assertFalse(write.isDone, "the failed group does not answer while the other one runs")
+            gate.release()
+            assertThrows(ExecutionException::class.java) { write.get(5, TimeUnit.SECONDS) }
+            assertEquals(
+                Reply.Bulk("vb".toByteArray()),
+                engine.submit(Command.Get(parked)).get(5, TimeUnit.SECONDS),
+                "the other group settled rather than being abandoned",
+            )
+        } finally {
+            gate.release()
             engine.close()
         }
     }

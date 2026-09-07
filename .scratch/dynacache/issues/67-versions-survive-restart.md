@@ -14,18 +14,18 @@ counter is also exact.
 
 **Nature:** durability of versions, C2 and I2 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 9871b817, merged into misc/ai_gen; RDB 3 rejects older files, WAL trailer bit reads older logs)
 
-- [ ] `I2_versions_survive_restart`: write under versions, snapshot, write more, crash,
+- [x] `I2_versions_survive_restart`: write under versions, snapshot, write more, crash,
       recover; every key's version equals the pre-crash version, including keys written after
       the snapshot
-- [ ] `restarted_replica_answers_quorum_read_with_its_version`: a restarted replica's answer
+- [x] `restarted_replica_answers_quorum_read_with_its_version`: a restarted replica's answer
       carries a version, and read repair neither reverts it nor pushes to it needlessly
-- [ ] `dvv_no_counter_reuse` holds across restart with the counter derived from the table
-- [ ] The RDB and WAL format versions are bumped; a file from before this ticket is either
+- [x] `dvv_no_counter_reuse` holds across restart with the counter derived from the table
+- [x] The RDB and WAL format versions are bumped; a file from before this ticket is either
       read with empty versions or rejected with a clear error, and the progress entry says which
-- [ ] Every existing persistence and P4 acceptance test passes
-- [ ] Progress entry appended
+- [x] Every existing persistence and P4 acceptance test passes
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

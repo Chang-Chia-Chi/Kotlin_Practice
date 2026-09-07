@@ -1,6 +1,7 @@
 package dynacache.engine
 
 import dynacache.engine.persist.CommandCodec
+import dynacache.engine.persist.KeyVersions
 import dynacache.engine.persist.RdbEntry
 import dynacache.engine.persist.RdbSnapshot
 import dynacache.engine.persist.WalWriter
@@ -124,6 +125,15 @@ class ApEngine(
     var wal: WalWriter? = null
         internal set
 
+    /**
+     * The versions this node's keys are held under, opaque here (T67): the cluster's versioned
+     * store registers itself when there is one, and a single node holds [KeyVersions.NONE] and
+     * versions nothing. A snapshot writes them down beside the values, the log carries each
+     * behind the command that moved it, and recovery hands them all back.
+     */
+    @Volatile
+    var versions: KeyVersions = KeyVersions.NONE
+
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
     internal val partitions = List(partitionCount) {
@@ -135,6 +145,7 @@ class ApEngine(
             maxMemoryBytes?.let { bytes -> bytes / partitionCount } ?: Long.MAX_VALUE,
             policy,
             ::log,
+            versions = { versions },
         )
     }
 
@@ -143,7 +154,10 @@ class ApEngine(
         val wal = wal ?: return null
         val changed = whatChanged(command, reply) ?: return null
         val (op, payload) = CommandCodec.encode(changed, now)
-        return wal.append(op, payload).durable
+        // The version the store moved before it ran this command, read on this same thread, so
+        // the entry carries the version the write happened under (T67).
+        val trailer = (changed as? Command.Keyed)?.let { versions.of(it.key) } ?: KeyVersions.NO_VERSION
+        return wal.append(op, payload, trailer).durable
     }
 
     /**
@@ -191,8 +205,9 @@ class ApEngine(
     }
     /**
      * A keyless command run on every partition, one after the previous one finished, and joined
-     * in partition order. Sequential for the same reason fan-out is: a caller sees the same
-     * partition-by-partition view either way, and no partition is asked to know about another.
+     * in partition order. Sequential on purpose, unlike fan-out (T79): these commands are the
+     * administrative ones, not a client's hot path, and a partition-at-a-time walk costs the
+     * node one partition's thread rather than all of them.
      */
     private fun everyPartition(command: Command.EveryPartition): CompletableFuture<Reply> {
         var replies = CompletableFuture.completedFuture(emptyList<Reply>())
@@ -203,24 +218,25 @@ class ApEngine(
     }
 
     /**
-     * ADR 0002: the command is split by partition and run partition by partition, one part after
-     * the previous one finished, then joined in argument order. Nothing is atomic across
-     * partitions: a concurrent write lands between two parts, and a test pins that.
+     * ADR 0002: the command is split by partition, every group is submitted at once, and the
+     * replies are joined in argument order. A ten-key command therefore costs one executor hop
+     * and not ten (T79). Nothing is atomic across partitions: a concurrent write lands between
+     * two groups, and a test pins that. The keys of one group still run as a single task, so a
+     * key named twice keeps the value of its later argument.
      *
-     * Sequential on purpose; if fan-out latency ever matters, submit the parts together and
-     * gather them with `allOf` instead.
+     * `allOf` adds no thread and no queue: the partitions are the only executors there are
+     * (ADR 0001), and it completes only once every group has settled, so a group that fails
+     * never answers for a command another group is still running against.
      */
     private fun fanOut(command: Command.Fanned): CompletableFuture<Reply> {
         val joined = arrayOfNulls<Reply>(command.keys.size)
-        var parts = CompletableFuture.completedFuture(Unit)
-        for ((index, positions) in command.keys.indices.groupBy { partitionOf(command.keys[it]).index }) {
-            parts = parts.thenCompose {
+        val parts = command.keys.indices.groupBy { partitionOf(command.keys[it]).index }
+            .map { (index, positions) ->
                 partitions[index].submitAll(positions.map(command::single)).thenApply { replies ->
                     positions.forEachIndexed { at, position -> joined[position] = replies[at] }
                 }
             }
-        }
-        return parts.thenApply { command.join(joined.map { it!! }) }
+        return CompletableFuture.allOf(*parts.toTypedArray()).thenApply { command.join(joined.map { it!! }) }
     }
 
     /**
