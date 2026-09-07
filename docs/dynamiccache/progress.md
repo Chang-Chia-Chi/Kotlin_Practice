@@ -7074,3 +7074,56 @@ Counts: engine 173, cluster 89 (was 87), cp 113, server 107. 482 total, was 480.
   running a real `Swim`; a test kit that wants gossip in the loop would pass `swim::deliver`.
 - T65 is changing `Replication`'s constructor and the `Replicate`/`Read` protos in parallel. The
   only line this ticket changed in `Replication.kt` is its transport parameter's type.
+
+## T75: A marker with an unusable snapshot id is dropped
+
+**Built**
+
+- `SnapshotParts.accepts(id): Boolean`, a new method on the persist seam: whether the adapter can
+  carry a set under that name. It answers with a value and never throws, because the caller's
+  inbound loop has no per-envelope catch (T36, T74) and a throw would answer a crafted id by
+  killing the node.
+- `FileSnapshotParts.accepts` is the safe shape: one path segment matching `[A-Za-z0-9._-]{1,64}`,
+  never `.` or `..`, and never a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0-9`,
+  `LPT0-9`, with or without an extension). A device name is of the shape and yet no directory can
+  carry it, so a marker holding one would have failed the cut and taken the node down.
+- Every path the adapter builds now goes through one private `set(id)` that `require`s the shape,
+  so `cut`, `record`, `restore`, `replay` and `delete` all refuse a bad id whichever way it
+  arrives; `delete` no longer resolves an unchecked id straight into `deleteRecursively`.
+- `DistributedSnapshot.receive` asks `parts.accepts(id)` before anything else on the marker path
+  and consumes the marker when the answer is false: no part started, nothing recorded, node lives.
+  `initiate` is unchanged and now documented as the operator's seam, where a bad id fails loudly.
+
+**Tests** (full reactor, all green)
+
+| Module | Tests |
+|---|---|
+| dynacache-engine | 175 |
+| dynacache-cluster | 89 |
+| dynacache-cp | 113 |
+| dynacache-server | 107 |
+
+New: `snapshot_id_outside_the_safe_shape_is_refused_by_the_adapter` (engine) and
+`marker_with_an_unusable_id_is_dropped_and_the_node_lives` (cluster, on the in-memory transport;
+red first as a node-kill, the router's inbound loop died on the crafted marker).
+
+**Deviations**
+
+1. The shape refuses Windows device names as well as the five cases the ticket lists. Same class
+   of bug from the same wire: an id-shaped `nul` fails `Files.createDirectories` and, with no
+   per-envelope catch above, kills the node. Three lines, no behaviour change for real ids.
+2. The adapter's internal guard throws `IllegalArgumentException` rather than returning a value.
+   The value-returning `accepts` is what the trust boundary uses; the throw is the loud failure
+   for a caller (the operator's `initiate`, a restore) that skipped the ask.
+
+**For the next ticket**
+
+- The marker path still has no cover for an `IOException` out of `cut` from an ordinary cause
+  (full disk, permissions). The inbound loop has no per-envelope catch, so that still kills the
+  node. A per-marker failure policy is its own ticket, larger than a shape check.
+- `record`'s `channel` argument also becomes a filename (`from-<peer>.wal`) and is not shape
+  checked. It is not reachable from the wire today: `receive` records only for a peer already in
+  the open channel set, which is the configured peer list. Guarding it would put node names under
+  the same alphabet, which is a naming decision, not this ticket's.
+- T66 edits `restoreFrom`; nothing here touched it. T49's cut-then-open order and T74's WAL
+  placement are untouched.
