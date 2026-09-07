@@ -7676,3 +7676,82 @@ actually engine 179 / cluster 97, same 497 total.)
    editing; a later sweep can drop them.
 4. **The commit was amended once**, after the C10 failure above, so the branch carries the single
    commit the brief asked for rather than a fixup on top.
+
+## T78: Group-commit WAL with a short fsync deadline
+
+**Built:** `FsyncPolicy` is now an enum with a `deadline: Duration?` and a fourth constant,
+`GROUP_COMMIT` (2 ms). Under it `writeBatch` writes the batch at once and parks its waiters, and
+the batch is forced by whichever comes first: the caller's `tick()`, or the end of a flush, once
+its oldest waiter has aged past the deadline on the injected clock. A waiter still completes only
+inside `fsyncAndComplete`, after `sink.fsync()` returned, so reply-after-durable is unchanged
+(C14). `EVERY_SECOND` keeps its own anchor, one second from the last fsync rather than from the
+oldest waiter, so its behaviour is untouched; `ALWAYS` and `NEVER` never reach the new code. A
+batch ages from `awaitingSince`, the instant its first waiter was parked, guarded and cleared
+with `awaitingFsync`; `rotate` and `close` still force everything parked whatever its age.
+`writeBatch` fills one growable buffer the flusher reuses instead of
+allocating per batch, published from one flusher to the next by the `flushing` flag. The entry
+layout, record format, `CommandCodec` and recovery's parsing are untouched (T67 owns those).
+
+**Tests:** at the merge, engine 191, cluster 98, cp 113, server 108, all green, nothing existing
+changed. Five new in `WalFsyncTest`, which now runs 8: `C14_group_commit_replies_only_after_fsync`
+(the sink double fails the test if a waiter is done when a force begins),
+`group_commit_forces_at_the_deadline_when_the_batch_stays_open` (no force a nanosecond before the
+deadline, one at it), `group_commit_forces_once_per_batch_not_per_write` (fifty writes, one force,
+asserted before `close` can force anything), `reused_batch_buffer_writes_each_batch_whole` (a
+96 KB entry grows the buffer, the next batch carries only its own bytes).
+
+**Findings:** three. The first two are about code this ticket wrote, so nothing landed broken.
+1. The deadline force was first written after `flushIfIdle`'s loop, with `flushing` released and
+   `pending` drained, which is the state `rotate` accepts as a quiet log: a force there could land
+   on the sink `rotate` had just closed, completing waiters whose bytes were never forced.
+   Unreachable today, because the cut parks every partition and the deadline tick shares the
+   server's scheduler thread with `rotate`, but both are properties of callers rather than of the
+   log. Moved inside the flag, restoring the rule that every sink touch is under the flag or on
+   the tick thread; the rule is now written where the flag is taken. The three named tests do not
+   cover this and are unaffected by construction: they drive one thread and force through `tick()`.
+2. A waiter is parked only once its bytes have reached the sink, so any fsync starting after it
+   has covered it. Now stated in `writeBatch`.
+3. Measured, not in the code: the 2 ms deadline is unreachable through a `ScheduledExecutorService`
+   on Windows, which fires a 2 ms fixed delay every 15.86 ms. See the report.
+
+**Measured:** `docs/dynamiccache/benchmarks/2026-09-07-t78-group-commit.md`, before `d24c4699`
+against after `1add9a48`, two samples a side, every pass contended and marked. Buffer reuse is a
+null, as predicted before the run: a 9 to 14 percent plain difference inside a 25 to 28 percent
+band, and -4.3 to +0.1 percent on the pipelined pass whose band is 1.2 percent. `GROUP_COMMIT`
+answers 61 times faster than `EVERY_SECOND`, 3060 against 49.9, with C14 intact, closing anomaly
+1. But it reaches 0.206 of `NEVER`, not the predicted 1.0, and the cause is not the force path:
+the deadline is one platform timer tick, not 2 ms. Both rates are clients over 15.86 ms, 63.26 at
+one client and 3060 at fifty, and the one-client p50 of 15.79 ms is that tick plus the round
+trip. Measured directly: a `ScheduledExecutorService` asked for a 2 ms fixed delay fires with a
+median gap of 15.860 ms here, the Windows default resolution. Taking the force off the platform
+scheduler is a follow-up ticket, not this one.
+
+**Deviations:**
+0. The before pass is not the ticket's base `ca75415f` but the `misc/ai_gen` head this branch
+   merged, against the merge itself: two parents whose trees differ by this ticket alone. A delta
+   against `ca75415f` would carry another session's versioned store, inbound loop and narrowed
+   engine seam too. The report names both hashes.
+1. **Exception to the phase rule, agreed rather than assumed.** The rule is that a ticket whose
+   measured gain is inside the noise lands nothing, and the buffer reuse measured a null. It is
+   kept. The rule exists to stop unmeasurable complexity arriving on a plausible story, and this
+   is the opposite: one fewer allocation and one fewer copy per batch, in less code than it
+   replaced. Reverting a simplification because its benefit is too small to measure would invert
+   the rule. The report claims no gain for it.
+2. The 2 ms deadline is a property of the policy, not a `WalWriter` argument, so nothing is
+   plumbed through `SnapshotEngine` and the CLI keeps one positional argument for the policy.
+3. `DynaCacheServer` takes the fsync policy and gives a sub-tick deadline a schedule. Neither
+   half is to be moved. The schedule is the server's because the server owns the schedulers (plan
+   2.3) and the engine owns no thread; a log forced once per engine tick is forced once a second,
+   leaving `GROUP_COMMIT` as slow as `EVERY_SECOND` for a closed-loop client, whose every waiter
+   is blocked so no appender is left to notice the deadline. And it runs on the server's
+   *existing* scheduler thread, because that thread also runs a checkpoint's `rotate`: one thread
+   is what stops a deadline force interleaving with the sink being closed and swapped.
+4. `flushIfIdle` checks the deadline after each batch, so a busy log forces at the rate its
+   writers arrive rather than at the scheduler's cadence. The flusher pays the fsync on its own
+   thread, which is what `ALWAYS` already did.
+
+**For the next ticket:** `DynaCache/bench/single-node.sh` carries both tickets' knobs, kept whole
+through the merge because they compose: T77's `TESTS`, `PASSES` and `SECTIONS` choose what runs,
+T78's `BENCH_ROOT` chooses the tree, which is what lets a before pass measure an older checkout
+with the newer script. The write-path subset is a `SECTIONS` value, since that concept was T77's.
+T85 owns the shutdown finding; the platform-timer finding needs a ticket of its own.

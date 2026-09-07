@@ -64,6 +64,10 @@ import java.util.concurrent.TimeUnit
  * part of the engine seam (T73), so nothing between the socket and a partition has to implement
  * a batch it cannot run. A [ClusterNode] passes itself, which refuses a batch whose keys it does
  * not coordinate before running it on its own engine.
+ *
+ * [fsync] is the log's policy, which the server needs for one reason: a policy whose durability
+ * deadline is shorter than the engine's tick gets a second schedule of its own, since a log
+ * forced once per tick is a log forced once a second (T78).
  */
 class DynaCacheServer(
     private val port: Int,
@@ -72,6 +76,7 @@ class DynaCacheServer(
     ap: CommandEngine = engine,
     private val batch: BatchEngine = engine,
     private val clock: Clock = Clock.systemUTC(),
+    private val fsync: FsyncPolicy = FsyncPolicy.NEVER,
     private val tick: () -> Unit = { engine.tick() },
 ) : AutoCloseable {
 
@@ -106,6 +111,17 @@ class DynaCacheServer(
             engine.tickMillis,
             TimeUnit.MILLISECONDS,
         )
+        // A durability deadline shorter than the engine's tick needs its own cadence, on this same
+        // one thread: a deadline force still cannot interleave with a checkpoint's rotate, which
+        // the tick above runs (T78).
+        fsync.deadline?.toMillis()?.takeIf { it in 1 until engine.tickMillis }?.let { deadline ->
+            scheduler.scheduleWithFixedDelay(
+                { runCatching { engine.wal?.tick() } },
+                deadline,
+                deadline,
+                TimeUnit.MILLISECONDS,
+            )
+        }
     }
 
     /** Stops accepting, stops ticking and releases the event loops. The engine is not ours to close. */
@@ -393,12 +409,12 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
     }
 
 /**
- * `dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER] [cp-self] [cp-members]`,
- * defaulting to Redis's own port, sixteen partitions and `EVERY_SECOND`. With a [dir], the last
- * snapshot there and the log after it are restored before the port opens, a snapshot is saved on
- * the engine's default interval from the tick thread (which is also the log's checkpoint), the
- * log is forced by the same thread once a second, and one more snapshot is saved at shutdown
- * (spec 2.8). With a CP group named, this node either holds the replicated log or forwards to
+ * `dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER|GROUP_COMMIT] [cp-self]
+ * [cp-members]`, defaulting to Redis's own port, sixteen partitions and `EVERY_SECOND`. With a
+ * [dir], the last snapshot there and the log after it are restored before the port opens, a
+ * snapshot is saved on the engine's default interval from the tick thread (which is also the
+ * log's checkpoint), the log is forced by the same thread once a second (or on the policy's own
+ * deadline under `GROUP_COMMIT`), and one more snapshot is saved at shutdown (spec 2.8). With a CP group named, this node either holds the replicated log or forwards to
  * whoever leads it; without one it has no CP engine and every `cp:` key answers `-NOTCP`. The
  * engine outlives nothing here: the shutdown hook closes the socket, then the log, then the
  * engine.
@@ -423,7 +439,7 @@ fun main(args: Array<String>) {
     val snapshots = dir?.let { SnapshotEngine(engine, it, clock, fsync = fsync) }
     snapshots?.restore()
     val cp = cpNodeFromArgs(positional.getOrNull(4), positional.getOrNull(5), dir, clock)
-    val server = DynaCacheServer(port, engine, cp?.engine, clock = clock) {
+    val server = DynaCacheServer(port, engine, cp?.engine, clock = clock, fsync = fsync) {
         engine.tick()
         engine.wal?.tick()
         cp?.runtime?.tick()
