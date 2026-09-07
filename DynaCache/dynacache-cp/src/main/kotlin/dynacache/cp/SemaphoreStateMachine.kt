@@ -12,7 +12,9 @@ import dynacache.engine.Reply
  * A key that was never initialised is a semaphore of no permits: acquiring from it fails and
  * draining it yields nothing, rather than being a separate kind of answer.
  */
-class SemaphoreStateMachine {
+class SemaphoreStateMachine : CpPrimitive {
+
+    override val id = CpPrimitive.SEMAPHORES
 
     private val semaphores = HashMap<Key, Semaphore>()
 
@@ -54,16 +56,20 @@ class SemaphoreStateMachine {
     }
 
     /** A session's death gives back every permit it holds, in the one entry that ends it (C18, I15). */
-    fun releaseAllOf(session: Long) = semaphores.replaceAll { _, semaphore ->
+    override fun releaseAllOf(session: Long) = semaphores.replaceAll { _, semaphore ->
         val held = semaphore.holders[session] ?: return@replaceAll semaphore
         Semaphore(semaphore.available + held, semaphore.holders - session)
     }
 
-    fun snapshot(): Map<Key, Semaphore> = HashMap(semaphores)
+    override fun snapshot(): ByteArray = CpWire.encodeTable(semaphores) { semaphore ->
+        writeInt(semaphore.available)
+        writeInt(semaphore.holders.size)
+        // Sorted, so two members holding the same semaphore write the same bytes.
+        semaphore.holders.toSortedMap().forEach { (session, permits) -> writeLong(session); writeInt(permits) }
+    }
 
-    fun restore(state: Map<Key, Semaphore>) {
-        semaphores.clear()
-        semaphores.putAll(state)
+    override fun restore(bytes: ByteArray) = CpWire.decodeTable(bytes, semaphores) {
+        Semaphore(readInt(), List(readInt()) { readLong() to readInt() }.toMap())
     }
 
     /** Taking nothing writes nothing, so draining a key nobody initialised leaves no semaphore behind. */

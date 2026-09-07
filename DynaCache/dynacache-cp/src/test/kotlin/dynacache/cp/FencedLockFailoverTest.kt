@@ -132,7 +132,7 @@ class FencedLockFailoverTest {
 
     /** STATE as the leader's state machine sees it at its applied index, without appending an entry. */
     private fun stateOnLeader(leader: RaftRuntime): Reply =
-        leader.stateMachine.let { it.locks.apply(Command.Cp.LockState(lock), it.lastAppliedTs) }
+        leader.stateMachine.read(Command.Cp.LockState(lock))
 
     private companion object {
         const val REPLY_TIMEOUT_SECS = 10L

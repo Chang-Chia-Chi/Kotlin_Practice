@@ -10,7 +10,9 @@ import dynacache.engine.Reply
  * entry, so no reader ever sees a half state (I21). A TTL is measured against the log time passed
  * in with every call, exactly as the counter's is (CP spec 9.4); nothing here reads a clock.
  */
-class AtomicReferenceStateMachine {
+class AtomicReferenceStateMachine : CpPrimitive {
+
+    override val id = CpPrimitive.REFERENCES
 
     private val references = HashMap<Key, Reference>()
 
@@ -59,15 +61,15 @@ class AtomicReferenceStateMachine {
     }
 
     /** A tick drops every reference whose TTL has run out. */
-    fun sweep(now: Long) {
+    override fun sweep(now: Long) {
         references.values.removeIf { it.expired(now) }
     }
 
-    fun snapshot(): Map<Key, Reference> = HashMap(references)
+    override fun snapshot(): ByteArray =
+        CpWire.encodeTable(references) { writeBlob(it.value); writeLong(it.expiresAt ?: CpWire.NO_TTL) }
 
-    fun restore(state: Map<Key, Reference>) {
-        references.clear()
-        references.putAll(state)
+    override fun restore(bytes: ByteArray) = CpWire.decodeTable(bytes, references) {
+        Reference(readBlob(), readLong().takeIf { it != CpWire.NO_TTL })
     }
 
     /** A reference's bytes and, when it has a TTL, the log time at which it stops existing. */

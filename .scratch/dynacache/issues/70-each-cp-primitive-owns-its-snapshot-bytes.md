@@ -13,14 +13,14 @@ clear error (the project is pre-release; no migration).
 
 **Nature:** codec, snapshot format (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache a0e5cdb4, merged into misc/ai_gen; snapshot format version 2, older snapshots refused)
 
-- [ ] Each primitive has a snapshot round-trip test of its own table through its own bytes
-- [ ] The composite's snapshot and restore are a loop over its primitives; no primitive table
+- [x] Each primitive has a snapshot round-trip test of its own table through its own bytes
+- [x] The composite's snapshot and restore are a loop over its primitives; no primitive table
       is public
-- [ ] `cp_snapshot_install_preserves_tokens_and_sessions` and every existing snapshot, chaos
+- [x] `cp_snapshot_install_preserves_tokens_and_sessions` and every existing snapshot, chaos
       and failover test passes; an old-format snapshot is rejected with a named error
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
