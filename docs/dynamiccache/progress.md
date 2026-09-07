@@ -7565,3 +7565,114 @@ Kept: nothing. Neither call site showed an intent the KDoc did not already state
 Tests: engine 179, cluster 97, cp 113, server 108, 497 total, all green, no test names changed. The brief predicted engine 181 / cluster 95; the base commit `1bf5fc55` already had 179 / 97, and the 497 total matches.
 
 Commit: `b210c606` on branch `t82`.
+
+---
+
+## T81 - File operations leave the server module
+
+Commit `468719ab` on branch `t81` (base `1bf5fc55`). 41 insertions, 12 deletions across 6 files.
+
+### What moved, and behind which interface
+
+The server module had exactly two `Files` call sites in its main sources, and both were a
+caller preparing a directory that the thing it was about to construct could prepare itself.
+
+- `ClusterNode` did `Files.createDirectories(dataDir)` immediately before building its
+  `SnapshotEngine`. The operation moved into `SnapshotEngine`'s own `init`, which is the persist
+  package's existing seam for local persistence (spec 2.8, T74). The `init` is deliberately the
+  first initializer in the class, ahead of `lastSave = clock.instant()`; see the deviation below.
+- `DynaCacheServer.cpNode` did `FileRaftStore(Files.createDirectories(storeDir))`. Nothing moved
+  here at all: `FileRaftStore.init` has always called `Files.createDirectories(dir)` itself, so
+  the server's call was redundant and the fix was to delete it. The CP module already owned this.
+
+No new interface was created. `SnapshotEngine` is the interface that absorbed the operation, and
+the pattern it now follows is the one `DotCeilingStore.inFile` (T51) and `FileSnapshotParts`
+already used: the persist adapter makes the directory it is going to write into.
+
+The same reflex was applied one level down. `FileSnapshotParts.cut` created the part directory
+before constructing a `SnapshotEngine` over it; that line is now redundant and was removed, so
+the directory has exactly one owner rather than two.
+
+**A latent bug fixed on the way.** Single-node `main` never created its data directory: it built
+`SnapshotEngine` straight from the command-line path, and `restore()` under any non-null fsync
+policy reaches `logs()` -> `Files.list(dir)`, which throws `NoSuchFileException` on a directory
+that does not exist. Only the cluster path had the `createDirectories` call, so `dynacache 6379
+16 /fresh/dir` failed at startup. Fixing the root cause in `SnapshotEngine` fixed all four
+callers (ClusterNode, single-node main, FileSnapshotParts.cut, and the two cluster tests that
+had each written their own `createDirectories`) rather than the one the ticket named.
+
+### The rule's new wording
+
+Plan 2.2's sentence was:
+
+> `java.nio.file` appears only in `dynacache.engine.persist` and `dynacache.cp`.
+
+It now reads:
+
+> Every file *operation* -- creating a directory, testing existence, listing, reading, writing,
+> deleting -- lives in `dynacache.engine.persist` or `dynacache.cp`, which own the layout on
+> disk; a `Path` may be carried as a configuration *value* anywhere, since the composition root
+> reads a data directory from the command line and hands it to what persists (T81). The test is
+> `Files`, not `Path`: a module outside those two that reaches for `java.nio.file.Files`,
+> `java.io.File` or `kotlin.io.path` is the violation.
+
+Why: the old rule banned an import, and an import is the wrong unit. The intent was always that
+the two packages own the *layout on disk* -- what a file is called, where it goes, what a
+directory holds -- and a composition root that parses `--dir` and passes it down learns none of
+that. Naming `Files` rather than `java.nio.file` also gives the rule a grep that decides it.
+
+### What `Path` the server still carries
+
+Only configuration, and only as values:
+
+- `ClusterNode`'s `dataDir` and `snapshotDir` parameters, and `clusterMain`'s `dataDir`.
+- `DynaCacheServer.main`'s `Path::of` on positional argument 2, plus `cpNode`'s `storeDir` and
+  `cpNodeFromArgs`'s `dir` parameters.
+- Four `resolve` calls building the sub-paths those are handed on as (`dots`, `cp`, `snapshots`).
+  `Path.resolve` is string arithmetic on a path and touches no filesystem, so it stays.
+
+`grep -rn "Files\.\|java\.io\.File\|kotlin\.io\.path\|\.toFile()" dynacache-server/src/main/kotlin/`
+is empty.
+
+### Tests
+
+TDD at the persist seam, red before green. New test in `SnapshotEngineTest`:
+`a_data_directory_that_does_not_exist_yet_is_the_engine_s_to_create`, which builds a
+`SnapshotEngine` over a two-deep path that does not exist and asserts the directory is there
+before anything else happens, that `restore` answers 0 rather than throwing, and that the
+shutdown save writes `dump.rdb` into it. It failed on the first assertion at the base commit.
+
+"A node still creates its data directory on first start" was already covered and still passes:
+`P4AcceptanceTest` gives three `ClusterNode`s directories under a `@TempDir` that do not exist,
+and asserts `dump.rdb` is in the first one after shutdown.
+
+| Module | Before | After |
+|---|---|---|
+| engine | 179 | 180 |
+| cluster | 97 | 97 |
+| cp | 113 | 113 |
+| server | 108 | 108 |
+| total | 497 | 498 |
+
+Green with no reruns and no flakes. (The brief predicted engine 181 / cluster 95; the base was
+actually engine 179 / cluster 97, same 497 total.)
+
+### Deviations
+
+1. **The `init` block's position is load-bearing.** Putting `Files.createDirectories(dir)` after
+   the `lastSave = clock.instant()` field initializer broke
+   `DistributedSnapshotTest.C10_state_is_cut_before_any_channel_opens`, which stalls the node
+   inside its state save with a `Clock` that parks on its first reading and then lists the part
+   directory from another coroutine. Parked inside the constructor, the engine had read the clock
+   but not yet made the directory, so the test's `listDirectoryEntries` hit
+   `NoSuchFileException`. The `init` block now precedes every property, so the directory exists
+   before the clock is read. Worth knowing that C10 is what guards this ordering.
+2. **`FileSnapshotParts.cut` was touched**, one line beyond the ticket's two server files. It is
+   in the persist package and its `createDirectories` became dead the moment `SnapshotEngine`
+   took ownership; leaving it would have left the ownership the ticket establishes ambiguous.
+3. **Two cluster tests were left alone.** `ReplicationTest:274` and `DistributedSnapshotTest:374`
+   still call `createDirectories` before constructing a `SnapshotEngine`. Both are now redundant
+   and both still pass. They were left as they are to keep the diff off files other worktrees are
+   editing; a later sweep can drop them.
+4. **The commit was amended once**, after the C10 failure above, so the branch carries the single
+   commit the brief asked for rather than a fixup on top.

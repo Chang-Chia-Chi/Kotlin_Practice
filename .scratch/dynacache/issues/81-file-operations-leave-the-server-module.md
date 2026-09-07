@@ -19,17 +19,17 @@ which is why the review flagged it as "either amend it or the rule is dead".
 
 **Nature:** module graph and wiring, plan 2.2 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 468719ab, merged into misc/ai_gen; plan 2.2 restated, latent single-node startup bug fixed)
 
-- [ ] No `Files`, `java.io.File` or `kotlin.io.path` operation remains in the server module's
+- [x] No `Files`, `java.io.File` or `kotlin.io.path` operation remains in the server module's
       main sources; a `Path` carried as configuration is what remains, if anything
-- [ ] Whatever the server did to prepare a data directory now happens behind a persist-package
+- [x] Whatever the server did to prepare a data directory now happens behind a persist-package
       interface, with its own test at that seam
-- [ ] Plan 2.2's `java.nio.file` sentence is rewritten to state the intent, and says which
+- [x] Plan 2.2's `java.nio.file` sentence is rewritten to state the intent, and says which
       package owns file operations
-- [ ] Every existing server, cluster and acceptance test passes; a node still creates its data
+- [x] Every existing server, cluster and acceptance test passes; a node still creates its data
       directory on first start
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Size budget: 200 to 600 lines including tests; the diff may be net negative. If moving an
 operation down would force the persist package to learn something about the server's command
