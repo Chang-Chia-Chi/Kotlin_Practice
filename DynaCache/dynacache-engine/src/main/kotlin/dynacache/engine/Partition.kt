@@ -150,25 +150,35 @@ internal class Partition(
                 .toList()
         }, executor)
 
+    /** [work] as one task on this thread with the store at hand (T66): what [StoreAccess] promises. */
+    fun <R> withStore(work: (StoreAccess) -> R): CompletableFuture<R> = task { work(access) }
+
     /**
-     * Frozen copies of the live keys [holds] selects, as one task on the executor: what a
-     * replica hashes and ships for one ring range (T28). A walk of the whole store, since keys
-     * are not indexed by ring position; a range is a small slice of it.
+     * The store as one task sees it. A range view walks the whole store, since keys are not
+     * indexed by ring position and a range is a small slice of it (T28); an install goes
+     * through the same funnel a restore does.
      */
-    fun view(holds: (Key) -> Boolean): CompletableFuture<List<Stored>> =
-        CompletableFuture.supplyAsync({
+    private val access = object : StoreAccess {
+        override fun view(keys: Collection<Key>): List<Stored> {
             val now = clock.instant()
-            store.entries().filter { holds(it.key) && !it.value.expired(now) }
+            return keys.mapNotNull { key -> store.get(key)?.takeUnless { it.expired(now) }?.let { Stored(key, frozen(it.value), it.expiresAt) } }
+        }
+
+        override fun view(holds: (Key) -> Boolean): List<Stored> {
+            val now = clock.instant()
+            return store.entries().filter { holds(it.key) && !it.value.expired(now) }
                 .map { Stored(it.key, frozen(it.value.value), it.value.expiresAt) }
                 .toList()
-        }, executor)
+        }
 
-    /** Frozen copies of the live keys among [keys], as one task on the executor. */
-    fun view(keys: Collection<Key>): CompletableFuture<List<Stored>> =
-        CompletableFuture.supplyAsync({
+        override fun install(stored: Stored) {
             val now = clock.instant()
-            keys.mapNotNull { key -> store.get(key)?.takeUnless { it.expired(now) }?.let { Stored(key, frozen(it.value), it.expiresAt) } }
-        }, executor)
+            val entry = Entry(stored.value, stored.expiresAt)
+            if (entry.expired(now)) drop(stored.key) else write(stored.key, now, entry)
+        }
+
+        override fun execute(command: Command): Reply = this@Partition.execute(command)
+    }
 
     /** Writes restored [entries] in, through the same funnel a command uses, skipping the already expired. */
     fun restore(entries: List<RdbEntry>): CompletableFuture<Void> =

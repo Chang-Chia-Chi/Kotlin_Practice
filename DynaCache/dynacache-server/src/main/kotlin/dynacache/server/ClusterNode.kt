@@ -10,6 +10,7 @@ import dynacache.cluster.Replication
 import dynacache.cluster.ReplicationConfig
 import dynacache.cluster.Ring
 import dynacache.cluster.Router
+import dynacache.cluster.VersionedStore
 import dynacache.cluster.Swim
 import dynacache.cluster.Transport
 import dynacache.cluster.proto.Envelope
@@ -20,12 +21,10 @@ import dynacache.engine.EvictionPolicy
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
-import dynacache.engine.install
 import dynacache.engine.persist.DotCeilingStore
 import dynacache.engine.persist.FileSnapshotParts
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
-import dynacache.engine.view
 import io.microraft.RaftConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -117,17 +116,18 @@ class ClusterNode(
         period = gossipPeriod,
     )
 
+    /** The node's (value, version) pairs over its engine (T66): what replication and anti-entropy read and install. */
+    private val store = VersionedStore(engine, counter)
+
     private val replication = Replication(
         self = self,
         ring = ring,
         config = config,
         engine = engine,
+        store = store,
         transport = NodeTransport(wire, reads = false),
         membership = swim,
-        counter = counter,
         clock = clock,
-        view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
-        install = engine::install,
         scope = scope,
     )
 
@@ -135,11 +135,9 @@ class ClusterNode(
         self = self,
         ring = ring,
         n = config.n,
-        engine = engine,
-        replication = replication,
+        store = store,
         transport = NodeTransport(wire, reads = false),
         membership = swim,
-        counter = counter,
     )
 
     private val router = Router(
