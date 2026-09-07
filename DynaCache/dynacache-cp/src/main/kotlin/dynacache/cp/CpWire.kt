@@ -35,6 +35,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.time.Duration
+import java.util.Arrays
 import dynacache.cp.proto.AppendEntriesRequest as WireAppendEntries
 import dynacache.cp.proto.InstallSnapshotRequest as WireInstallSnapshotRequest
 import dynacache.cp.proto.InstallSnapshotResponse as WireInstallSnapshotResponse
@@ -237,60 +238,55 @@ object CpWire {
         .setGroupMembersView(decode(chunk.members))
         .build()
 
-    /** Log time, then every primitive's table in the order the state machine holds them. */
+    /**
+     * The version, log time, then each primitive's table as the bytes that primitive wrote for
+     * itself: nothing here reads inside a table, so a new primitive changes nothing in this codec.
+     */
     internal fun encodeSnapshot(snapshot: CpStateMachine.Snapshot): ByteArray = bytes {
+        writeByte(SNAPSHOT_VERSION)
         writeLong(snapshot.lastAppliedTs)
-        writeTable(snapshot.counters) { writeLong(it.value); writeLong(it.expiresAt ?: NO_TTL) }
-        writeTable(snapshot.locks) {
-            writeLong(it.owner ?: NO_OWNER)
-            writeLong(it.token)
-            writeLong(it.leaseUntil)
-            writeInt(it.holds)
-        }
-        writeTable(snapshot.semaphores) { semaphore ->
-            writeInt(semaphore.available)
-            writeInt(semaphore.holders.size)
-            semaphore.holders.forEach { (session, permits) -> writeLong(session); writeInt(permits) }
-        }
-        writeTable(snapshot.latches) { writeInt(it) }
-        writeTable(snapshot.references) { writeBlob(it.value); writeLong(it.expiresAt ?: NO_TTL) }
-        writeLong(snapshot.sessions.lastId)
-        writeInt(snapshot.sessions.sessions.size)
-        snapshot.sessions.sessions.forEach { (id, session) ->
-            writeLong(id)
-            writeLong(session.lastHeartbeat)
-            writeLong(session.timeoutMs)
-        }
+        writeInt(snapshot.tables.size)
+        snapshot.tables.forEach { writeByte(it.id); writeBlob(it.bytes) }
     }
 
     internal fun decodeSnapshot(encoded: ByteArray): CpStateMachine.Snapshot = read(encoded) {
+        val version = readByte().toInt()
+        if (version != SNAPSHOT_VERSION) throw UnsupportedSnapshotVersion(version)
         CpStateMachine.Snapshot(
             lastAppliedTs = readLong(),
-            counters = readTable { AtomicLongStateMachine.Counter(readLong(), readLong().takeIf { it != NO_TTL }) },
-            locks = readTable {
-                FencedLockStateMachine.Lock(readLong().takeIf { it != NO_OWNER }, readLong(), readLong(), readInt())
-            },
-            semaphores = readTable {
-                SemaphoreStateMachine.Semaphore(readInt(), List(readInt()) { readLong() to readInt() }.toMap())
-            },
-            latches = readTable { readInt() },
-            references = readTable {
-                AtomicReferenceStateMachine.Reference(readBlob(), readLong().takeIf { it != NO_TTL })
-            },
-            sessions = SessionRegistry.State(
-                readLong(),
-                List(readInt()) { readLong() to SessionRegistry.Session(readLong(), readLong()) }.toMap(),
-            ),
+            tables = List(readInt()) { CpStateMachine.Table(readByte().toInt(), readBlob()) },
         )
     }
 
-    private inline fun <V> DataOutputStream.writeTable(table: Map<Key, V>, value: DataOutputStream.(V) -> Unit) {
+    /**
+     * A snapshot this build cannot read. The layout of T70 gave every primitive its own bytes and
+     * bumped [SNAPSHOT_VERSION]; the project is pre-release, so an older snapshot is refused here
+     * rather than migrated.
+     */
+    class UnsupportedSnapshotVersion(version: Int) : IllegalStateException(
+        "CP snapshot format version $version, not $SNAPSHOT_VERSION: this build cannot read snapshots " +
+            "written before each primitive owned its own bytes",
+    )
+
+    /**
+     * One primitive's table: its keys, each with the bytes [value] writes. Rows are sorted, so two
+     * members holding the same table write the same snapshot and a difference in the bytes is a
+     * difference in the state.
+     */
+    internal inline fun <V> encodeTable(table: Map<Key, V>, value: DataOutputStream.(V) -> Unit): ByteArray = bytes {
         writeInt(table.size)
-        table.forEach { (key, v) -> writeBlob(key.bytes); value(v) }
+        table.entries.sortedWith(BY_KEY).forEach { (key, v) -> writeBlob(key.bytes); value(v) }
     }
 
-    private inline fun <V> DataInputStream.readTable(value: DataInputStream.() -> V): Map<Key, V> =
-        List(readInt()) { Key(readBlob()) to value() }.toMap()
+    /** Replaces [table] with the rows [encodeTable] wrote; a decode that throws leaves it alone. */
+    internal inline fun <V> decodeTable(encoded: ByteArray, table: MutableMap<Key, V>, value: DataInputStream.() -> V) {
+        val rows = read(encoded) { List(readInt()) { Key(readBlob()) to value() } }
+        table.clear()
+        table.putAll(rows)
+    }
+
+    internal val BY_KEY: Comparator<Map.Entry<Key, *>> =
+        Comparator { a, b -> Arrays.compareUnsigned(a.key.bytes, b.key.bytes) }
 
     // --- Log entry operations ----------------------------------------------
 
@@ -518,25 +514,14 @@ object CpWire {
 
     // --- Streams -----------------------------------------------------------
 
-    private inline fun bytes(write: DataOutputStream.() -> Unit): ByteArray {
+    internal inline fun bytes(write: DataOutputStream.() -> Unit): ByteArray {
         val sink = ByteArrayOutputStream()
         DataOutputStream(sink).use(write)
         return sink.toByteArray()
     }
 
-    private inline fun <T> read(encoded: ByteArray, parse: DataInputStream.() -> T): T =
+    internal inline fun <T> read(encoded: ByteArray, parse: DataInputStream.() -> T): T =
         DataInputStream(ByteArrayInputStream(encoded)).use(parse)
-
-    private fun DataOutputStream.writeBlob(value: ByteArray) {
-        writeInt(value.size)
-        write(value)
-    }
-
-    private fun DataInputStream.readBlob(): ByteArray {
-        val value = ByteArray(readInt())
-        readFully(value)
-        return value
-    }
 
     private fun DataInputStream.readTtl(): Duration? = readLong().takeIf { it != NO_TTL }?.let(Duration::ofMillis)
 
@@ -605,12 +590,31 @@ object CpWire {
     private const val CMD_REF_TTL = 32
     private const val CMD_REF_PERSIST = 33
     private const val CMD_GET_ADD = 34
-    private const val NO_TTL = -1L
-    private const val NO_OWNER = -1L
+    internal const val NO_TTL = -1L
+    internal const val NO_OWNER = -1L
+
+    /**
+     * The CP snapshot layout. Bumped by T70, which gave every primitive its own bytes; the layout
+     * before it opened with the log-time long, so its first byte reads as a version this build
+     * refuses.
+     */
+    internal const val SNAPSHOT_VERSION = 2
 
     private const val REPLY_SIMPLE = 1
     private const val REPLY_ERROR = 2
     private const val REPLY_INTEGER = 3
     private const val REPLY_BULK = 4
     private const val REPLY_ARRAY = 5
+}
+
+/** A length-prefixed blob: the one framing every table, key and reference value is written with. */
+internal fun DataOutputStream.writeBlob(value: ByteArray) {
+    writeInt(value.size)
+    write(value)
+}
+
+internal fun DataInputStream.readBlob(): ByteArray {
+    val value = ByteArray(readInt())
+    readFully(value)
+    return value
 }

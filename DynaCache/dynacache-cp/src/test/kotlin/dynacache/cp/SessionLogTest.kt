@@ -113,7 +113,7 @@ class SessionLogTest {
 
     /** STATE as [member] sees it at its own applied index; a follower cannot answer through its engine. */
     private fun stateOn(member: NodeId, key: Key): Reply =
-        kit.runtime(member).stateMachine.let { it.locks.apply(Command.Cp.LockState(key), it.lastAppliedTs) }
+        kit.runtime(member).stateMachine.read(Command.Cp.LockState(key))
 
     private companion object {
         const val REPLY_TIMEOUT_SECS = 10L
