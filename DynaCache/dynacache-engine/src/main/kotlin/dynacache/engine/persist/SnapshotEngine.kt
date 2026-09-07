@@ -46,7 +46,7 @@ class SnapshotEngine(
     private val fsync: FsyncPolicy? = null,
 ) : AutoCloseable {
 
-    private val file = dir.resolve("dump.rdb")
+    private val file = stateFile(dir)
     private val temp = dir.resolve("dump.rdb.tmp")
     private var lastSave: Instant = clock.instant()
 
@@ -140,4 +140,13 @@ class SnapshotEngine(
     /** Every log file, oldest first. */
     private fun logs(): List<Path> =
         Files.list(dir).use { paths -> paths.filter { it.fileName.toString().startsWith("wal.") }.toList() }.sortedBy(::seqOf)
+
+    companion object {
+        /**
+         * The snapshot file under [dir]: what [save] renames into place and [restore] reads. The
+         * name lives here because it is this class's format, and a caller that has to know
+         * whether a directory holds a state at all ([SnapshotParts.holds]) asks through it.
+         */
+        fun stateFile(dir: Path): Path = dir.resolve("dump.rdb")
+    }
 }

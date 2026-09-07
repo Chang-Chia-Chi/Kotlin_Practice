@@ -45,7 +45,7 @@ class RouterTest {
     @Test
     fun router_executes_locally_when_coordinator() = runTest {
         val coordinator = ring.preferenceList(key, N).first()
-        val engine = RecordingEngine(Reply.Simple("OK"))
+        val engine = ApEngine(partitionCount = 1, clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC))
         val network = InMemoryTransport()
         val router = Router(
             self = coordinator,
@@ -59,7 +59,9 @@ class RouterTest {
         val reply = router.submit(Command.Set(key, "v1".toByteArray())).await()
 
         assertEquals(Reply.Simple("OK"), reply)
-        assertEquals(1, engine.submitted.size)
+        assertEquals(Reply.Bulk("v1".toByteArray()), engine.submit(Command.Get(key)).await(), "ran on the local engine")
+        assertEquals(emptyList<Envelope>(), network.sent, "nothing crossed the network")
+        engine.close()
     }
 
     /** N = 1 so the contact is no replica of the key: what lands on its engine got there by not forwarding. */

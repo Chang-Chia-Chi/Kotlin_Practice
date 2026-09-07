@@ -8,17 +8,12 @@ import dynacache.cluster.proto.Leaf
 import dynacache.cluster.proto.MerkleRoot
 import dynacache.cluster.proto.MerkleRootReply
 import dynacache.cluster.proto.Version
-import dynacache.engine.ApEngine
 import dynacache.engine.Key
-import dynacache.engine.Stored
 import dynacache.engine.Value
-import dynacache.engine.install
 import dynacache.engine.persist.decodeValue
 import dynacache.engine.persist.encodeValue
-import dynacache.engine.view
 import java.security.MessageDigest
 import java.time.Instant
-import java.util.Arrays
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -32,12 +27,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Spec 2.4's anti-entropy on one node: a background process that, one [tick] at a time, takes
  * the next vnode range this node replicates and one live replica of it, compares Merkle roots
  * (T27, C6), and on a mismatch exchanges the divergent keys with their versions so both sides
- * apply spec 5.3: a dominated version is replaced, a dominating one kept, concurrent ones
- * merged by type (T29) under a version descending from both.
+ * apply spec 5.3, which the [store] decides: a dominated version is replaced, a dominating one
+ * kept, concurrent ones merged by type (T29) under a version descending from both.
  *
- * A leaf is `(key, SHA-256 of the engine's value encoding, version)`; a key the replication
- * layer holds no version for is invisible here, since it has nothing to compare. Nothing is
- * ever deleted: the side that holds a key hands it to the side that lost it.
+ * A leaf is `(key, SHA-256 of the engine's value encoding, version)`; a key the store holds no
+ * version for is invisible here, since it has nothing to compare. A tombstone (a version whose
+ * value is gone) is a leaf over no bytes and crosses as a version with no value, so a `DEL`
+ * one replica missed reaches it here rather than being undone (T66).
  *
  * Plan 2.5: one step touches one range, sends at most two requests and waits at most
  * [deadline] for each. [run] is the node's one coroutine, ticking every [interval]; tests
@@ -47,11 +43,9 @@ class AntiEntropy(
     private val self: NodeId,
     private val ring: Ring,
     n: Int,
-    private val engine: ApEngine,
-    private val replication: Replication,
+    private val store: VersionedStore,
     private val transport: Outbound,
     private val membership: Membership,
-    private val counter: DotCounter,
     private val deadline: Duration = 1.seconds,
     private val interval: Duration = 60.seconds,
 ) {
@@ -148,34 +142,21 @@ class AntiEntropy(
     }
 
     /**
-     * Spec 5.3 for one key. Answers what this node holds of its own afterwards: [mine] when it
-     * stood, the merged version when the two were concurrent, null when [remote] was installed
-     * as it came. Two versions equal by DVV but not by bytes (a value that rotted under its
-     * version) have no writer to ask; the greater encoding wins on both sides, so they converge.
+     * Spec 5.3 for one key, decided by the store. Answers what this node holds of its own
+     * afterwards: [mine] when it stood, the merged value when the two were concurrent, null
+     * when [remote] was installed as it came. Bytes that do not decode leave [mine] standing.
      */
-    private suspend fun reconcile(mine: Held?, remote: Version): Held? {
+    private suspend fun reconcile(mine: Entry?, remote: Version): Entry? {
         val theirs = runCatching { decode(remote) }.getOrNull() ?: return mine
-        val merged = if (mine == null || mine.dvv == theirs.dvv) null else merge(mine.versioned, theirs.versioned, counter)
-        val next = when {
-            mine == null -> theirs
-            merged == null -> if (Arrays.compareUnsigned(theirs.bytes, mine.bytes) > 0) theirs else mine
-            merged === mine.versioned -> mine
-            merged === theirs.versioned -> theirs
-            else -> Held(mine.key, merged.value, encodeValue(merged.value), merged.dvv, later(mine.expiresAt, theirs.expiresAt))
-        }
-        if (next === mine) return mine
-        replication.installVersion(next.key, next.dvv)
-        engine.install(Stored(next.key, next.value, next.expiresAt)).await()
-        keysSynced.incrementAndGet()
-        return if (next === theirs) null else next
+        val installed = store.install(theirs.key, theirs.value, theirs.expiresAt, theirs.dvv).await()
+        if (installed.outcome != Outcome.KEPT) keysSynced.incrementAndGet()
+        return if (installed.outcome == Outcome.TAKEN) null else Entry(installed.held)
     }
 
-    /** A merged value's deadline: the later of the two, and no deadline at all if either side had none. */
-    private fun later(a: Instant?, b: Instant?): Instant? = if (a == null || b == null) null else maxOf(a, b)
+    /** One key as this node holds it: the value (null for a tombstone), its encoding (hashed and shipped), its version and its deadline. */
+    private class Entry(val key: Key, val value: Value?, val bytes: ByteArray, val dvv: Dvv, val expiresAt: Instant?) {
+        constructor(held: Held) : this(held.key, held.value, held.value?.let(::encodeValue) ?: NO_VALUE, held.dvv, held.expiresAt)
 
-    /** One key as this node holds it: the value, its encoding (hashed and shipped), its version and its deadline. */
-    private class Held(val key: Key, val value: Value, val bytes: ByteArray, val dvv: Dvv, val expiresAt: Instant?) {
-        val versioned = Versioned(value, dvv)
         val leaf = MerkleLeaf(key, MessageDigest.getInstance("SHA-256").digest(bytes), dvv)
 
         fun wire(): Version.Builder = Version.newBuilder()
@@ -183,18 +164,15 @@ class AntiEntropy(
             .setDvv(ByteString.copyFrom(dvv.encode())).setExpiresAtMillis(expiresAt?.toEpochMilli() ?: 0L)
     }
 
-    private suspend fun held(range: Vnode): Map<Key, Held> = held(engine.view { range.holds(ring.positionOf(it)) }.await())
-    private suspend fun held(keys: List<Key>): Map<Key, Held> = held(engine.view(keys).await())
+    private suspend fun held(range: Vnode): Map<Key, Entry> = store.held { range.holds(ring.positionOf(it)) }.await().map(::Entry).associateBy { it.key }
+    private suspend fun held(keys: List<Key>): Map<Key, Entry> = store.held(keys).await().map(::Entry).associateBy { it.key }
 
-    private fun held(stored: List<Stored>): Map<Key, Held> = stored.mapNotNull { held ->
-        replication.version(held.key)?.let { Held(held.key, held.value, encodeValue(held.value), it, held.expiresAt) }
-    }.associateBy { it.key }
-
-    private fun decode(version: Version): Held {
+    private fun decode(version: Version): Entry {
         val dvv = Dvv.decode(version.dvv.toByteArray())
         val bytes = version.value.toByteArray()
         val expiresAt = if (version.expiresAtMillis == 0L) null else Instant.ofEpochMilli(version.expiresAtMillis)
-        return Held(Key(version.key.toByteArray()), decodeValue(bytes, Random(dvv.dot.counter)), bytes, dvv, expiresAt)
+        val value = if (bytes.isEmpty()) null else decodeValue(bytes, Random(dvv.dot.counter))
+        return Entry(Key(version.key.toByteArray()), value, bytes, dvv, expiresAt)
     }
 
     private fun leaf(leaf: Leaf) = MerkleLeaf(Key(leaf.key.toByteArray()), leaf.valueHash.toByteArray(), Dvv.decode(leaf.dvv.toByteArray()))
@@ -214,4 +192,9 @@ class AntiEntropy(
 
     private suspend fun send(to: NodeId, envelope: Envelope.Builder) =
         transport.send(to, envelope.setFrom(self.name).setTo(to.name).build())
+
+    private companion object {
+        /** A tombstone's encoding on the wire and under its leaf: no bytes at all. */
+        val NO_VALUE = ByteArray(0)
+    }
 }

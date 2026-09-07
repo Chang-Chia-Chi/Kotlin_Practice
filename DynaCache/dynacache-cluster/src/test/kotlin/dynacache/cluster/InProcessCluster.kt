@@ -8,8 +8,6 @@ import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
 import dynacache.engine.Value
-import dynacache.engine.view
-import dynacache.engine.install
 import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.DotCeilingStore
 import dynacache.engine.persist.FileSnapshotParts
@@ -56,6 +54,7 @@ class InProcessCluster(
     private val transports = nodes.associateWith { network.endpoint(it) }
     private val gossiped = nodes.associateWith { mutableListOf<Envelope>() }
     private val ceilings = nodes.associateWith { DotCeilingStore.inMemory() }
+    private val stores = HashMap<NodeId, VersionedStore>()
     private val replications = HashMap<NodeId, Replication>()
     private val antiEntropies = HashMap<NodeId, AntiEntropy>()
     private val routers = HashMap<NodeId, Router>()
@@ -78,28 +77,25 @@ class InProcessCluster(
         val engine = engines.getValue(node)
         val transport = transports.getValue(node)
         val counter = DotCounter.of(node, emptyList(), ceilings.getValue(node))
+        val store = VersionedStore(engine, counter)
         val replication = Replication(
             self = node,
             ring = ring,
             config = config,
             engine = engine,
+            store = store,
             transport = transport,
             membership = membership,
-            counter = counter,
             clock = clock,
-            view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
-            install = engine::install,
             scope = scope,
         )
         val antiEntropy = AntiEntropy(
             self = node,
             ring = ring,
             n = n,
-            engine = engine,
-            replication = replication,
+            store = store,
             transport = transport,
             membership = membership,
-            counter = counter,
         )
         val router = Router(
             self = node,
@@ -117,6 +113,7 @@ class InProcessCluster(
             antiEntropy = antiEntropy::receive,
             gossip = { gossiped.getValue(node).add(it) },
         )
+        stores[node] = store
         replications[node] = replication
         antiEntropies[node] = antiEntropy
         routers[node] = router
@@ -136,6 +133,7 @@ class InProcessCluster(
 
     fun engine(node: NodeId): ApEngine = engines.getValue(node)
     fun transport(node: NodeId): Transport = transports.getValue(node)
+    fun store(node: NodeId): VersionedStore = stores.getValue(node)
     fun replication(node: NodeId): Replication = replications.getValue(node)
     fun router(node: NodeId): Router = routers.getValue(node)
     fun antiEntropy(node: NodeId): AntiEntropy = antiEntropies.getValue(node)
@@ -235,9 +233,10 @@ class InProcessCluster(
      * I1 (spec 4): heals every network partition, brings every node back alive, drains messages
      * and hints, runs one full anti-entropy cycle on every node, drains again, and asserts that
      * every replica of every key in [written] holds the same value, deadline and version. The first
-     * divergent key fails with both sides. A key absent on a replica compares as absent alone:
-     * anti-entropy carries no tombstones (progress T28 deviation 3), so the version a delete
-     * leaves behind is never synced to a replica that holds none, and no client can see it.
+     * divergent key fails with both sides. The pair is read from each node's store as one, and
+     * a deleted key is compared by the tombstone's version too, since anti-entropy carries it
+     * (T66). A value the store holds no version for compares as absent: anti-entropy cannot
+     * see it either.
      */
     suspend fun assertConverged() {
         network.heal()
@@ -258,8 +257,8 @@ class InProcessCluster(
         drainMessages()
         for (key in written) {
             val held = ring.preferenceList(key, n).associateWith { node ->
-                val stored = engine(node).view(listOf(key)).await().firstOrNull()
-                Triple(stored?.let { canon(it.value) }, stored?.expiresAt, stored?.let { replication(node).version(key) })
+                val pair = store(node).held(key).await()
+                Triple(pair?.value?.let(::canon), pair?.expiresAt, pair?.dvv)
             }
             val (reference, expected) = held.entries.first()
             for ((node, actual) in held) assertEquals(expected, actual, "$key on $node differs from $reference")

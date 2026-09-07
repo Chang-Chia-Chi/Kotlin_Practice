@@ -6,8 +6,6 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
-import dynacache.engine.install
-import dynacache.engine.view
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -130,17 +128,17 @@ class ReadRepairTest {
             ring = ring,
             config = ReplicationConfig(n = 2, w = 1, r = 2),
             engine = engine,
+            store = VersionedStore(engine, DotCounter.of(coordinator, emptyList())),
             transport = network.endpoint(coordinator),
             membership = ScriptedMembership(nodes),
-            counter = DotCounter.of(coordinator, emptyList()),
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
-            view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
-            install = engine::install,
             scope = backgroundScope,
         )
         backgroundScope.launch { for (envelope in network.endpoint(coordinator).inbound) replication.receive(envelope) }
         suspend fun arrived(body: Envelope.BodyCase): Envelope {
             repeat(10) {
+                // Waits out the partition thread the store's task runs on, as the kit's drain does.
+                engine.submit(Command.DbSize).get()
                 network.drain()
                 yield()
                 replica.inbound.tryReceive().getOrNull()?.let { if (it.bodyCase == body) return it }
