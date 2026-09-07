@@ -26,19 +26,19 @@ unbounded number of requests before its deadline.
 
 **Nature:** background convergence protocol, C6 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 3f845639, merged into misc/ai_gen; 300 leaves down to 16 for one divergent key, budget 12 requests per step)
 
-- [ ] `a_single_divergent_key_costs_a_descent_not_the_range`: with a range of many keys and one
+- [x] `a_single_divergent_key_costs_a_descent_not_the_range`: with a range of many keys and one
       key differing, the exchange carries a number of hashes that grows with the tree's depth,
       and leaves only for the subtree that differs; the test asserts the count, not just the
       outcome
-- [ ] `a_matching_range_still_costs_one_comparison`: unchanged from today
-- [ ] The keys the exchange decides to sync are exactly those the local diff decides today, so
+- [x] `a_matching_range_still_costs_one_comparison`: unchanged from today
+- [x] The keys the exchange decides to sync are exactly those the local diff decides today, so
       `anti_entropy_heals_divergence`, `convergence_after_partition` and every existing
       anti-entropy and convergence test pass unchanged, tombstones included
-- [ ] The request budget per step is bounded and stated, in the class's documentation and the
+- [x] The request budget per step is bounded and stated, in the class's documentation and the
       progress entry
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Size budget: 200 to 600 lines including tests. C6 still binds: the tree is a pure function of
 the range's triples and two nodes holding the same data produce the same root, so the descent

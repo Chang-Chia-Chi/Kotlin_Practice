@@ -8,6 +8,8 @@ import dynacache.cluster.proto.KeySync
 import dynacache.cluster.proto.KeySyncReply
 import dynacache.cluster.proto.Leaf
 import dynacache.cluster.proto.Marker
+import dynacache.cluster.proto.MerkleLevel
+import dynacache.cluster.proto.MerkleLevelReply
 import dynacache.cluster.proto.MerkleRoot
 import dynacache.cluster.proto.MerkleRootReply
 import dynacache.cluster.proto.Ping
@@ -123,7 +125,13 @@ class GrpcTransportTest {
                 MerkleRoot.newBuilder().setId(7).setVnode(3).setRoot(ByteString.copyFromUtf8("root"))
             )
             Envelope.BodyCase.MERKLE_ROOT_REPLY -> envelope.setMerkleRootReply(
-                MerkleRootReply.newBuilder().setId(7).setRoot(ByteString.copyFromUtf8("root")).addLeaf(
+                MerkleRootReply.newBuilder().setId(7).setRoot(ByteString.copyFromUtf8("root")).setFanout(16).setLeafCount(3)
+            )
+            Envelope.BodyCase.MERKLE_LEVEL -> envelope.setMerkleLevel(
+                MerkleLevel.newBuilder().setId(7).setVnode(3).setLevel(1).addAllPosition(listOf(0, 1, 2))
+            )
+            Envelope.BodyCase.MERKLE_LEVEL_REPLY -> envelope.setMerkleLevelReply(
+                MerkleLevelReply.newBuilder().setId(7).addHash(ByteString.copyFromUtf8("h")).addLeaf(
                     Leaf.newBuilder().setKey(ByteString.copyFromUtf8("k")).setValueHash(ByteString.copyFromUtf8("h")).setDvv(ByteString.copyFromUtf8("dvv"))
                 )
             )

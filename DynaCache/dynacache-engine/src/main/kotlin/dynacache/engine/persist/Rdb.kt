@@ -34,7 +34,13 @@ import java.util.zip.CheckedOutputStream
  * `ttl_abs` is epoch millis, -1 when the key never expires; TTLs travel as absolute instants so
  * a replica's clock skew cannot move a deadline (spec 5.4). The DVV is opaque here: version
  * vectors live in the cluster module and the engine cannot depend on it, so the codec carries
- * the bytes it is handed and hands them back.
+ * the bytes it is handed and hands them back ([KeyVersions]).
+ *
+ * `type` [TOMBSTONE] is a version with no value (T66): the key was deleted, the cluster still
+ * holds the version that deleted it, and a snapshot that forgot it would let anti-entropy
+ * resurrect the delete after a restart. Such an entry carries no deadline and no value bytes.
+ * That is what version 3 added, so a version 2 file -- every snapshot written before T67, which
+ * held no tombstone and an empty version on every entry -- is refused rather than read.
  *
  * The checksum covers everything before it, so a corrupted length field is caught by the same
  * check as a corrupted payload.
@@ -44,7 +50,7 @@ import java.util.zip.CheckedOutputStream
 internal const val RDB_MAGIC = "DYNARDB"
 
 /** The one format this codec writes and the only one it reads. */
-internal const val RDB_VERSION: Byte = 2
+internal const val RDB_VERSION: Byte = 3
 
 /** Why a file was refused. */
 internal enum class RdbFault(val detail: String) {
@@ -59,6 +65,9 @@ internal class RdbFormatException(val fault: RdbFault) : IOException(fault.detai
 
 /** What a `ttl_abs` of -1 means: this key has no deadline. */
 private const val NO_TTL = -1L
+
+/** The `type` of an entry that is a version and nothing else: the key's tombstone. */
+private const val TOMBSTONE: Byte = -1
 
 /**
  * The type byte, fixed here by the format rather than taken from the enum's order: reordering
@@ -77,11 +86,12 @@ internal val CODE_BY_KIND = KIND_BY_CODE.entries.associate { (code, kind) -> kin
  * One key as a snapshot holds it: what it is, when it dies, and the opaque version vector the
  * cluster stamped it with.
  *
- * [expiresAt] is null when the key has no TTL.
+ * [expiresAt] is null when the key has no TTL; [value] is null for a tombstone, a version whose
+ * value is gone, which has no deadline either.
  */
 internal class RdbEntry(
     val key: Key,
-    val value: Value,
+    val value: Value?,
     val expiresAt: Instant?,
     val dvv: ByteArray,
 ) {
@@ -115,11 +125,11 @@ internal object RdbWriter {
 
     private fun writeEntry(out: DataOutputStream, entry: RdbEntry) {
         writeBytes(out, entry.key.bytes)
-        out.writeByte(CODE_BY_KIND.getValue(entry.value.kind).toInt())
+        val value = entry.value
+        out.writeByte((if (value == null) TOMBSTONE else CODE_BY_KIND.getValue(value.kind)).toInt())
         writeBytes(out, entry.dvv)
         out.writeLong(entry.expiresAt?.toEpochMilli() ?: NO_TTL)
-        val value = encode(entry.value)
-        writeBytes(out, value)
+        writeBytes(out, if (value == null) ByteArray(0) else encode(value))
     }
 
     /**
@@ -192,11 +202,13 @@ internal class RdbReader(private val seeds: Random) {
 
     private fun readEntry(input: DataInputStream): RdbEntry {
         val key = Key(readBytes(input))
-        val kind = KIND_BY_CODE[input.readByte()] ?: throw RdbFormatException(RdbFault.TRUNCATED)
+        val code = input.readByte()
+        val kind = if (code == TOMBSTONE) null else KIND_BY_CODE[code] ?: throw RdbFormatException(RdbFault.TRUNCATED)
         val dvv = readBytes(input)
         val ttl = input.readLong()
-        val value = DataInputStream(ByteArrayInputStream(readBytes(input)))
-        return RdbEntry(key, decode(kind, value), if (ttl == NO_TTL) null else Instant.ofEpochMilli(ttl), dvv)
+        val body = DataInputStream(ByteArrayInputStream(readBytes(input)))
+        val value = kind?.let { decode(it, body) }
+        return RdbEntry(key, value, if (ttl == NO_TTL) null else Instant.ofEpochMilli(ttl), dvv)
     }
 
     internal fun decode(kind: Value.Kind, input: DataInputStream): Value = when (kind) {

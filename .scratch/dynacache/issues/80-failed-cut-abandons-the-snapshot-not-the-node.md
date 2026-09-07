@@ -20,17 +20,17 @@ choice visible in the code rather than implied.
 
 **Nature:** failure semantics at a trust boundary, C10 and availability (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 2a6f1f83, merged into misc/ai_gen; policy in the snapshot handler, not the loop)
 
-- [ ] `a_cut_that_cannot_write_abandons_the_set_and_the_node_lives`: with the snapshot
+- [x] `a_cut_that_cannot_write_abandons_the_set_and_the_node_lives`: with the snapshot
       directory made unwritable, a marker arrives, the node records no part for that snapshot,
       and the next ordinary command on the same node still answers
-- [ ] `a_failed_cut_leaves_no_half_written_part`: nothing of the abandoned set remains that a
+- [x] `a_failed_cut_leaves_no_half_written_part`: nothing of the abandoned set remains that a
       later restore could read as complete
-- [ ] A programming error inside a handler still fails loudly rather than being swallowed; a
+- [x] A programming error inside a handler still fails loudly rather than being swallowed; a
       test pins whichever boundary the chosen policy draws
-- [ ] Every existing Chandy-Lamport, inbound-loop and P4 acceptance test passes
-- [ ] Progress entry appended
+- [x] Every existing Chandy-Lamport, inbound-loop and P4 acceptance test passes
+- [x] Progress entry appended
 
 Size budget: 200 to 600 lines including tests. Making the directory unwritable is a filesystem
 fact, not a mock; if Windows makes that awkward in a test, inject a failing sink through the

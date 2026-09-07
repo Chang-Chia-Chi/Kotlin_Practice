@@ -1,6 +1,7 @@
 package dynacache.engine
 
 import dynacache.engine.persist.CommandCodec
+import dynacache.engine.persist.KeyVersions
 import dynacache.engine.persist.RdbEntry
 import dynacache.engine.persist.RdbSnapshot
 import dynacache.engine.persist.WalWriter
@@ -124,6 +125,15 @@ class ApEngine(
     var wal: WalWriter? = null
         internal set
 
+    /**
+     * The versions this node's keys are held under, opaque here (T67): the cluster's versioned
+     * store registers itself when there is one, and a single node holds [KeyVersions.NONE] and
+     * versions nothing. A snapshot writes them down beside the values, the log carries each
+     * behind the command that moved it, and recovery hands them all back.
+     */
+    @Volatile
+    var versions: KeyVersions = KeyVersions.NONE
+
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
     internal val partitions = List(partitionCount) {
@@ -135,6 +145,7 @@ class ApEngine(
             maxMemoryBytes?.let { bytes -> bytes / partitionCount } ?: Long.MAX_VALUE,
             policy,
             ::log,
+            versions = { versions },
         )
     }
 
@@ -143,7 +154,10 @@ class ApEngine(
         val wal = wal ?: return null
         val changed = whatChanged(command, reply) ?: return null
         val (op, payload) = CommandCodec.encode(changed, now)
-        return wal.append(op, payload).durable
+        // The version the store moved before it ran this command, read on this same thread, so
+        // the entry carries the version the write happened under (T67).
+        val trailer = (changed as? Command.Keyed)?.let { versions.of(it.key) } ?: KeyVersions.NO_VERSION
+        return wal.append(op, payload, trailer).durable
     }
 
     /**

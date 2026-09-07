@@ -94,6 +94,37 @@ class RdbTest {
         }
     }
 
+    /**
+     * T67: a version with no value is a tombstone, and it has to reach the file too -- a restart
+     * that forgot one resurrects through anti-entropy what a peer deleted. It carries its key and
+     * its version and nothing else, and it is never filtered as expired, having no deadline.
+     */
+    @Test
+    fun rdb_tombstone_roundtrip() {
+        val tombstone = RdbEntry(Key(bytes("gone")), null, null, byteArrayOf(9, 8, 7))
+        val live = entry("here", Value.Str(bytes("v")), null, byteArrayOf(1))
+
+        val back = load(save(listOf(live, tombstone)))
+
+        assertEquals(listOf(shape(live), shape(tombstone)), back.map(::shape))
+        assertEquals(null, back[1].value)
+        assertEquals(listOf<Byte>(9, 8, 7), back[1].dvv.toList())
+    }
+
+    /**
+     * The version this ticket bumped to: a file written before T67 held no tombstone and no
+     * version, so it is refused by name rather than read as a node that never versioned anything.
+     */
+    @Test
+    fun rdb_pre_tombstone_version_rejected() {
+        val old = save(emptyList()).also { it[RDB_MAGIC.length] = (RDB_VERSION - 1).toByte() }
+
+        val thrown = assertThrows(RdbFormatException::class.java) { load(old) }
+
+        assertEquals(RdbFault.UNSUPPORTED_VERSION, thrown.fault)
+        assertEquals("RDB version is not $RDB_VERSION", thrown.message)
+    }
+
     @Test
     fun rdb_not_an_rdb_rejected() {
         val alien = "not a snapshot at all, no".toByteArray()
@@ -107,7 +138,7 @@ class RdbTest {
 
     private fun bytes(text: String) = text.toByteArray(Charsets.ISO_8859_1)
 
-    private fun entry(key: String, value: Value, expiresAt: Instant?, dvv: ByteArray) =
+    private fun entry(key: String, value: Value?, expiresAt: Instant?, dvv: ByteArray) =
         RdbEntry(Key(bytes(key)), value, expiresAt, dvv)
 
     private fun hash(vararg fields: Pair<String, String>) =
@@ -124,6 +155,7 @@ class RdbTest {
      */
     private fun shape(entry: RdbEntry): String {
         val value = when (val v = entry.value) {
+            null -> "tombstone"
             is Value.Str -> "str ${v.bytes.toList()}"
             is Value.Hash -> "hash " + v.fields.entries().map { "${it.key}=${it.value.toList()}" }.sorted().toList()
             is Value.List -> "list " + v.items.map { it.toList() }

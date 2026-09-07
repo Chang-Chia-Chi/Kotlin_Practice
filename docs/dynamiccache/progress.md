@@ -7676,3 +7676,409 @@ actually engine 179 / cluster 97, same 497 total.)
    editing; a later sweep can drop them.
 4. **The commit was amended once**, after the C10 failure above, so the branch carries the single
    commit the brief asked for rather than a fixup on top.
+
+## T78: Group-commit WAL with a short fsync deadline
+
+**Built:** `FsyncPolicy` is now an enum with a `deadline: Duration?` and a fourth constant,
+`GROUP_COMMIT` (2 ms). Under it `writeBatch` writes the batch at once and parks its waiters, and
+the batch is forced by whichever comes first: the caller's `tick()`, or the end of a flush, once
+its oldest waiter has aged past the deadline on the injected clock. A waiter still completes only
+inside `fsyncAndComplete`, after `sink.fsync()` returned, so reply-after-durable is unchanged
+(C14). `EVERY_SECOND` keeps its own anchor, one second from the last fsync rather than from the
+oldest waiter, so its behaviour is untouched; `ALWAYS` and `NEVER` never reach the new code. A
+batch ages from `awaitingSince`, the instant its first waiter was parked, guarded and cleared
+with `awaitingFsync`; `rotate` and `close` still force everything parked whatever its age.
+`writeBatch` fills one growable buffer the flusher reuses instead of
+allocating per batch, published from one flusher to the next by the `flushing` flag. The entry
+layout, record format, `CommandCodec` and recovery's parsing are untouched (T67 owns those).
+
+**Tests:** at the merge, engine 191, cluster 98, cp 113, server 108, all green, nothing existing
+changed. Five new in `WalFsyncTest`, which now runs 8: `C14_group_commit_replies_only_after_fsync`
+(the sink double fails the test if a waiter is done when a force begins),
+`group_commit_forces_at_the_deadline_when_the_batch_stays_open` (no force a nanosecond before the
+deadline, one at it), `group_commit_forces_once_per_batch_not_per_write` (fifty writes, one force,
+asserted before `close` can force anything), `reused_batch_buffer_writes_each_batch_whole` (a
+96 KB entry grows the buffer, the next batch carries only its own bytes).
+
+**Findings:** three. The first two are about code this ticket wrote, so nothing landed broken.
+1. The deadline force was first written after `flushIfIdle`'s loop, with `flushing` released and
+   `pending` drained, which is the state `rotate` accepts as a quiet log: a force there could land
+   on the sink `rotate` had just closed, completing waiters whose bytes were never forced.
+   Unreachable today, because the cut parks every partition and the deadline tick shares the
+   server's scheduler thread with `rotate`, but both are properties of callers rather than of the
+   log. Moved inside the flag, restoring the rule that every sink touch is under the flag or on
+   the tick thread; the rule is now written where the flag is taken. The three named tests do not
+   cover this and are unaffected by construction: they drive one thread and force through `tick()`.
+2. A waiter is parked only once its bytes have reached the sink, so any fsync starting after it
+   has covered it. Now stated in `writeBatch`.
+3. Measured, not in the code: the 2 ms deadline is unreachable through a `ScheduledExecutorService`
+   on Windows, which fires a 2 ms fixed delay every 15.86 ms. See the report.
+
+**Measured:** `docs/dynamiccache/benchmarks/2026-09-07-t78-group-commit.md`, before `d24c4699`
+against after `1add9a48`, two samples a side, every pass contended and marked. Buffer reuse is a
+null, as predicted before the run: a 9 to 14 percent plain difference inside a 25 to 28 percent
+band, and -4.3 to +0.1 percent on the pipelined pass whose band is 1.2 percent. `GROUP_COMMIT`
+answers 61 times faster than `EVERY_SECOND`, 3060 against 49.9, with C14 intact, closing anomaly
+1. But it reaches 0.206 of `NEVER`, not the predicted 1.0, and the cause is not the force path:
+the deadline is one platform timer tick, not 2 ms. Both rates are clients over 15.86 ms, 63.26 at
+one client and 3060 at fifty, and the one-client p50 of 15.79 ms is that tick plus the round
+trip. Measured directly: a `ScheduledExecutorService` asked for a 2 ms fixed delay fires with a
+median gap of 15.860 ms here, the Windows default resolution. Taking the force off the platform
+scheduler is a follow-up ticket, not this one.
+
+**Deviations:**
+0. The before pass is not the ticket's base `ca75415f` but the `misc/ai_gen` head this branch
+   merged, against the merge itself: two parents whose trees differ by this ticket alone. A delta
+   against `ca75415f` would carry another session's versioned store, inbound loop and narrowed
+   engine seam too. The report names both hashes.
+1. **Exception to the phase rule, agreed rather than assumed.** The rule is that a ticket whose
+   measured gain is inside the noise lands nothing, and the buffer reuse measured a null. It is
+   kept. The rule exists to stop unmeasurable complexity arriving on a plausible story, and this
+   is the opposite: one fewer allocation and one fewer copy per batch, in less code than it
+   replaced. Reverting a simplification because its benefit is too small to measure would invert
+   the rule. The report claims no gain for it.
+2. The 2 ms deadline is a property of the policy, not a `WalWriter` argument, so nothing is
+   plumbed through `SnapshotEngine` and the CLI keeps one positional argument for the policy.
+3. `DynaCacheServer` takes the fsync policy and gives a sub-tick deadline a schedule. Neither
+   half is to be moved. The schedule is the server's because the server owns the schedulers (plan
+   2.3) and the engine owns no thread; a log forced once per engine tick is forced once a second,
+   leaving `GROUP_COMMIT` as slow as `EVERY_SECOND` for a closed-loop client, whose every waiter
+   is blocked so no appender is left to notice the deadline. And it runs on the server's
+   *existing* scheduler thread, because that thread also runs a checkpoint's `rotate`: one thread
+   is what stops a deadline force interleaving with the sink being closed and swapped.
+4. `flushIfIdle` checks the deadline after each batch, so a busy log forces at the rate its
+   writers arrive rather than at the scheduler's cadence. The flusher pays the fsync on its own
+   thread, which is what `ALWAYS` already did.
+
+**For the next ticket:** `DynaCache/bench/single-node.sh` carries both tickets' knobs, kept whole
+through the merge because they compose: T77's `TESTS`, `PASSES` and `SECTIONS` choose what runs,
+T78's `BENCH_ROOT` chooses the tree, which is what lets a before pass measure an older checkout
+with the newer script. The write-path subset is a `SECTIONS` value, since that concept was T77's.
+T85 owns the shutdown finding; the platform-timer finding needs a ticket of its own.
+---
+
+## T80 - A failed snapshot cut abandons the snapshot, not the node
+
+An `IOException` out of the cut's file work (a full disk, a permission the process lost, a
+directory taken from under it) used to leave `DistributedSnapshot`, cross an inbound loop that
+has no per-envelope catch (T68), and end that loop. The node then answered nothing at all: one
+node's disk problem became an availability problem for the third of the keyspace it coordinates.
+T75 found it; it had been there since T36. A cut that fails for an environmental reason now
+abandons that snapshot set on this node and the node reads its next envelope.
+
+**Where the policy sits, and why.** In the snapshot handler, not in the inbound loop. The loop's
+want of a catch is deliberate: a catch there, even one narrowed to `IOException`, would stand over
+every handler, and a handler that has no disk to fail on would have its bugs quietly absorbed on
+the way past. Only this handler knows what to do about a storage failure, and what it does is not
+"ignore" -- it drops the set: the part deleted, the id refused afterwards, exactly what a set that
+times out already gets. So the catch is at the two places that touch the adapter, `start`'s cut
+and `receive`'s record, and `initiate` gets it too: a cut it fails is fire-and-forget on the
+node's own scope (`ClusterNode.snapshot` launches it), so throwing there would cancel that scope
+and take the inbound loop with it anyway. The boundary is drawn by exception type, and the
+adapter's contract is what makes the type mean something: `SnapshotParts` now says in words that
+`cut` and `record` fail with an `IOException` when the environment refuses, and `FileSnapshotParts`
+unwraps the `CompletionException` the WAL append's `join` used to leak, so the future's wrapper
+stops at the seam instead of travelling to a caller that would not recognise it.
+
+**What an operator sees.** `INFO`'s `# Cluster` section, which is this node's whole observability
+(plan 2.4), gained `cluster_snapshots_abandoned` and, when there has been one,
+`cluster_snapshot_last_failure` with the set's id and the platform's own words. The reason's
+whitespace is collapsed, since the section's lines are joined by CRLF.
+
+**What still fails loudly.** Anything that is not an `IOException`. A bug inside a handler ends
+the inbound loop as before, which is what a broken build should do; `a_bug_in_the_cut_is_not_swallowed`
+pins it at the snapshot handler and `a_handler_that_throws_ends_the_loop` pins it at the loop.
+An id the adapter refuses is still dropped by value (T75) and an operator's typo at `restoreFrom`
+still fails. `restoreFrom` also refuses an id this node aborted or abandoned, by name rather than
+by what survives on disk, so whatever a half-finished cut left behind can never be read back as a
+complete part.
+
+**Tests.** Five new, all green: `a_cut_that_cannot_write_abandons_the_set_and_the_node_lives`
+(three-node cluster, one node's `dump.rdb.tmp` is a directory so its state save fails: it abandons
+the set, records no part, and still takes a write and answers a read),
+`a_failed_cut_leaves_no_half_written_part`, `a_channel_that_cannot_be_recorded_abandons_the_set_and_the_envelope_is_handled`
+(the envelope still gets its ordinary handling; recording is beside the write path),
+`a_bug_in_the_cut_is_not_swallowed`, and `a_handler_that_throws_ends_the_loop` in
+`InboundLoopTest`. Making the failure a filesystem fact needed no mock and no platform-specific
+permission call: a `dump.rdb.tmp` that is a directory refuses the save's first write on Windows
+and on POSIX alike. The two tests that need the adapter itself to refuse (a record that fails, a
+cut with a bug in it) inject through `SnapshotParts` at the `Lone` harness's new `wrap` seam.
+Counts, `-pl dynacache-server -am`: engine 179, cluster 102, cp 113, server 108, 502 total, from
+497 at the base (engine 179, cluster 97). Diff 229 insertions, 13 deletions across five files.
+
+**Deviations.**
+1. Model: plan section 4 routes this ticket to Fable 5.1 as failure-semantics work. Fable is out
+   of usage credits, so it was done by Opus 5.
+2. The brief's seams name the snapshot module, the loop, the adapter and tests. One more file was
+   touched: `ClusterNode`'s `# Cluster` section, two lines, because "records the failure where an
+   operator can see it" has nowhere else to go -- this build has no logger, and `INFO` is the
+   observability the plan gives it.
+3. The brief's base counts (engine 181, cluster 95) do not match what is at `1bf5fc55`: the total
+   is right at 497, the split is engine 179 and cluster 97.
+4. Red was taken once for the four snapshot tests together rather than one slice at a time. Each
+   build here costs about two minutes, and the four are one behaviour at one seam. The red was
+   behavioural and not a compile error: the counter field was added first, so the run showed the
+   node's loop dying silently and the exceptions escaping `demux`, which is the bug this ticket
+   names.
+
+**Merge note (orchestrator).** Landing this against `misc/ai_gen` hit a conflict worth recording,
+because a textual resolution would have shipped the fix disabled. T82 had deleted
+`DistributedSnapshot.initiate` as a pass-through alias, correctly at the time, and repointed
+`ClusterNode.snapshot` at `start`. This ticket gives that same name real behaviour: it wraps the
+cut so an `IOException` is abandoned rather than propagating into the node scope that launched
+it. Git conflicted on the method and auto-merged the call site clean, so the obvious resolution
+compiles, passes every test this ticket wrote, and leaves the availability fix bypassed at its
+only production call site. Resolved by keeping the method and putting the caller back on it.
+Verified on the merged tree: 516 tests, engine 192, cluster 103, cp 113, server 108.
+
+---
+
+## T67 - Versions survive restart
+
+**Built:** a node's versions now outlive its process. The versioned store of T66 is what
+persists: it implements a new engine seam and registers itself with the engine it is built over,
+so a snapshot writes every version down beside its value, the write-ahead log carries each
+version behind the command that moved it, and recovery hands them all back before the node
+serves anyone. A restarted replica therefore answers a quorum read under the version it always
+had, read repair finds nothing to fix, and anti-entropy sees the same tombstones it saw before
+the crash (I2). The dot counter takes each restored version as a floor on the way in, so it
+resumes above every dot the node ever gave a write (C2) and is now exact rather than a block
+high: T51's persisted ceiling is still the other floor, and the larger of the two wins.
+
+**The seam.** `dynacache.engine.persist.KeyVersions`, in the engine's persist package for the
+same reason `DotCeilingStore` is (plan 2.2: that package and cp are the only ones that touch
+persistence, and version vectors live in the cluster module the engine cannot depend on). Three
+methods, all handing plain bytes the engine never looks inside: `on(partition)` is one
+partition's whole table, read inside the snapshot's cut; `of(key)` is one key's version, read
+right after the command that moved it; `restored(key, version)` is recovery's hand-back. Two
+implementations: `KeyVersions.NONE` for a single node, which versions nothing, and
+`VersionedStore`, whose `init` sets `engine.versions = this`. Registering in the constructor
+rather than at each assembly is deliberate: there is one store per engine and nothing else for
+the engine to persist versions for, so `ClusterNode`, `InProcessCluster` and every test wire it
+by building the store they already build.
+
+**What the RDB carries now, and its version bump (2 -> 3).** The entry's `dvv` slot, which the
+format has always had and nothing has ever filled, is filled on save from the partition's own
+table, read on the partition thread inside the cut so a value is never paired with a later
+install's version. The format's new part is the tombstone: `type` 255 is a version with no value,
+no deadline and no value bytes. Tombstones had to reach the file or a restart would resurrect
+through anti-entropy exactly what T66 closed - a key deleted on this node, its tombstone
+forgotten, taken back from a replica that still holds the value. A key whose value expired but
+whose version the table still holds is written the same way, which is what `held(key)` already
+answered for it in memory. **Old-file decision: a version 2 file is rejected**, by the reader's
+existing `UNSUPPORTED_VERSION` fault, whose message names version 3. Rejecting costs no new code
+and fails loudly at startup, where an operator can delete the snapshot and let anti-entropy
+refill the node; reading it with empty versions would have started the node silently in the
+state T66 recorded as debt (a value with no version is invisible to anti-entropy and is taken
+over by any peer's tombstone). `rdb_pre_tombstone_version_rejected` pins the fault and message.
+
+**What the WAL carries now, and its version bump.** The spec's entry header has no room for a
+format version (`[crc32][length][seq][op][payload]`, spec 2.8), so **bit 7 of the op code is the
+version**: set, the payload ends with the opaque trailer and then the trailer's length as a u32,
+and the reader answers the op code with the bit cleared again. Every op code is below 64, so an
+entry written before this ticket - and every channel-log record of a distributed snapshot, which
+carries no version at all - has the bit clear and **reads back with an empty trailer, which is
+exactly what it held**: the WAL's old files are read, not rejected. The writer and reader never
+interpret the trailer; `WalWriter.append` takes it and `WalEntry.trailer` hands it back, and the
+engine's log hook fills it from `versions.of(key)` on the partition thread, where the store has
+already moved the version before running the command (T66: the bump and the command are one
+task). `whatChanged` decides what is logged as before, and a fanned or keyless entry carries no
+trailer.
+
+**How the table and the counter are rebuilt.** `SnapshotEngine.restore` hands back the file's
+versions after the values are in, then replay hands back each entry's trailer after the commands
+it belongs to, so the last version a key was written under is the one it ends held under -
+including a key written after the last snapshot, which the RDB knows nothing about. A `DEL` and
+its trailer together are the tombstone. `VersionedStore.restored` decodes the bytes, writes the
+table and calls `DotCounter.saw(dvv)`, which raises the counter's floor to the highest counter of
+this node's own inside that version. `DotCounter.of`'s `localData` argument now folds through the
+same `saw`, so the "highest own dot" rule is written once instead of twice, and the private
+constructor lost its `scanned` parameter. Recovery is single-threaded and runs before the node
+serves anyone, so `restored` writing the table off the partition thread is safe; the maps were
+already concurrent.
+
+**Tests.** New: `VersionedRestartTest` (3) in the cluster module -
+`I2_versions_survive_restart` (write two keys, snapshot, then a fresh key, an overwrite and a
+delete, crash, recover: every key's version equals its pre-crash version and the delete comes
+back as a tombstone with no value), `dvv_no_counter_reuse` (the restarted node's dot ceiling has
+never been reserved, so the rebuilt table is its only floor, and the next dot is still above
+every dot handed out before the crash), and
+`restarted_replica_answers_quorum_read_with_its_version` (a kit replica saves, restarts and
+restores off its own snapshot; it holds the version it had, the quorum read answers the value,
+and the coordinator counts zero divergent reads and zero repairs sent). New in the engine module
+(4): `wal_entry_carries_an_opaque_trailer`, `wal_entry_without_a_trailer_reads_back_with_none`,
+`rdb_tombstone_roundtrip`, `rdb_pre_tombstone_version_rejected`. Changed: `RdbTest`'s `entry` and
+`shape` helpers take a nullable value.
+
+Red before green at each seam: the WAL and RDB tests failed to compile against the old
+signatures, then passed; the three restart tests were run with the store's engine registration
+commented out and failed exactly as a pre-T67 node behaves (`alpha=null, bravo=null,
+charlie=null` after recovery, and a dot counter that restarts at 1 after handing out 4), then
+passed with it restored.
+
+Counts before: engine 179, cluster 97, cp 113, server 108 (497). After: engine 183, cluster 100,
+cp 113, server 108 (**504**). Diff 476 insertions, 47 deletions across 12 files. Commit sha
+recorded in the report.
+
+**Deviations.**
+1. **Model.** Plan section 4 routes this ticket to Fable 5.1 as durability and causal-order
+   work. Fable was out of usage credits, so it was built by Opus 5 (1M context).
+2. The brief's per-module base counts (engine 181, cluster 95) did not match the tree; the
+   measured base is engine 179, cluster 97, and the total 497 is the same either way.
+3. The WAL's format version is a flag bit on the op code rather than a version field, because
+   the spec's entry header has none and adding a file header would have touched rotation,
+   replay and the distributed snapshot's channel logs. The consequence is the friendlier of the
+   ticket's two options for the WAL (old entries read with empty versions) while the RDB, which
+   does have a version byte, takes the stricter one (rejected).
+4. Restoring a **distributed snapshot** part now restores versions too, since a part is an
+   ordinary RDB. T36 deviation 6 recorded that a part restore "neither flushes the engine nor
+   resets the version table"; it now adds the versions the part carried, which is what I12 asks
+   for and what the values already did. Not asked for by this ticket, forced by filling the slot.
+5. `SnapshotEngine.restore`'s answer ("how many keys the snapshot held") now counts tombstone
+   rows. No caller branches on it; `SnapshotEngineTest` asserts exact counts and still passes
+   because a node with no cluster holds no tombstones.
+
+**Debt this leaves.**
+1. **A repair's install is still not logged.** `StoreAccess.install` writes the value straight
+   into the store rather than through `execute`, so neither the value nor the version of an
+   anti-entropy leaf or a read-repair push reaches the WAL; both are lost together by a crash
+   before the next snapshot, and anti-entropy repairs the node again. Consistent, but it means
+   "every key's version survives" holds for writes and for anything the last snapshot caught,
+   not for an install in between. Fixing it needs a log op for an arbitrary value install, which
+   is a wider change than this ticket's budget.
+2. **Tombstones now live forever on disk as well as in memory.** T66 recorded that the table
+   never shrinks; every save now writes every tombstone it holds. A snapshot of a delete-heavy
+   keyspace grows without bound until tombstones get an expiry rule.
+3. A write inside a `MULTI`/`EXEC` batch goes straight to the engine without a version bump
+   (T22 deviation 5), so its log entry carries whatever version the key already held. Restoring
+   it re-installs the version the key already had, which is harmless, but the batch's write is
+   still invisible to the cluster, exactly as it was before this ticket.
+
+**Merge note (orchestrator).** T67 and T78 (group commit) both edited the head of `Wal.kt` and
+resolved as a union: T78's flusher buffer constant beside T67's trailer-carrying entry, with the
+pre-trailer entry class dropped since the equality methods below the conflict already read the
+trailer. Reachability was then checked rather than inferred from the green build, the lesson T80
+had just taught: the trailer is written by `encode` at enqueue, so entries reach the flusher
+already serialised and no batching can drop it, and there are exactly two production appends, the
+engine's log path which passes a version and the snapshot channel log which deliberately passes
+none. Verified on the merged tree: 523 tests, engine 199, cluster 103, cp 113, server 108.
+
+---
+
+## T84 - Anti-entropy descends the tree over the wire
+
+The Merkle tree's saving is now collected across the exchange, not after it. Before this ticket
+a root mismatch made the peer ship every leaf of the range on its first reply; the requester
+built the peer's whole tree locally and called `MerkleTree.diff` on it, so the descent that
+never opens a matching subtree ran entirely on one side after the data had already crossed. A
+range of a million keys with one bad key cost a million leaves on the wire. The comparison now
+costs the divergence rather than the range.
+
+**The protocol.** Three exchanges instead of two, and the middle one repeats per level.
+
+1. `MerkleRoot{id, vnode, root}` -> `MerkleRootReply{id, root, fanout, leaf_count}`. Equal roots
+   end the step, as before. The reply no longer carries leaves at all; tag 3 is `reserved` with
+   its name, the way `Replicate`'s tokens were retired, since both ends of the wire are this
+   repository and nothing persists the message.
+2. `MerkleLevel{id, vnode, level, repeated position}` ->
+   `MerkleLevelReply{id, repeated hash, repeated Leaf leaf}`, one round per level. The requester
+   already knows the root disagreed, so the first round asks for the root's children; each
+   round after it asks only for the children of the nodes that disagreed at the level above.
+   Above the leaves the reply is one hash per position asked, in the order asked and empty
+   where the peer has no node there; at level 0 it is the leaves the peer holds among those
+   positions. A subtree whose hash matches is never opened and never crosses.
+3. `KeySync` / `KeySyncReply`, unchanged, over the keys the descent named. It is skipped
+   entirely when the descent finds nothing that really differs.
+
+Envelope body tags 26 and 27 are the new pair. `AntiEntropy.receive` routes both; `InboundLoop`
+needed no change.
+
+**How the two sides agree on fan-out.** The peer states the width of the tree it actually built
+in `MerkleRootReply.fanout`, and the requester descends only when it equals its own
+`MerkleTree.fanout`. A node position means nothing under another width, so on a mismatch the
+step ends and the range comes round again on a later tick, which is what a silent peer already
+did. `MerkleTree.diff` has always required the same thing locally (`require(fanout ==
+other.fanout)`); that requirement moved down into `suspectLeaves`, which `diff` delegates to, so
+both the local and the wire path are guarded by one statement of the rule.
+
+The reply also carries `leaf_count`, and `MerkleTree.heightOf(leafCount, fanout)` turns it back
+into the peer's height without building anything. Trees of different height have no level to
+line up, so the requester falls back to asking for every leaf position, exactly as
+`suspectLeaves` falls back to suspecting every leaf. That is the pre-existing cost of a key
+present on one side only, unchanged by this ticket.
+
+**C6 holds.** Nothing about a leaf, a hash or the tree's construction changed. The tree is still
+a pure function of the range's triples: `of` sorts what it is given, so the positions the
+descent names are the same on both sides whatever order either node's scan yielded, and the
+fan-out both sides descend under is the one they agreed on rather than either node's own. The
+descent never depends on scan order.
+
+**The keys are the same keys.** The wire descent runs the same three steps the local descent
+runs, now exposed on `MerkleTree` and shared by both drivers: `hashesAt(level, positions)`,
+`differing(level, positions, theirs)` and `childrenOf(positions)`. `suspectLeaves` was rewritten
+from a recursion into the level-by-level loop those three make, which is the shape the wire
+needs, and `diff` still calls it, so the local path is not a second implementation. At the
+bottom, `divergentKeys(positions, theirs)` decides key by key from the two sides' leaves at the
+suspect positions, comparing the tree's own `leafHash` rather than any new notion of equality.
+That is sound because outside the suspect positions the two sides hold identical leaves, so a
+key that can differ at all is at a suspect position on at least one side, and a key at a suspect
+position on my side cannot sit at a non-suspect position on the peer's.
+`merkle_descent_pieces_decide_what_diff_decides` asserts the equality directly over a 300-leaf
+range with one, first, last and two divergent leaves.
+
+**The request budget.** Plan 2.5's "every fan-out bounded" read here as "at most two requests";
+a descent needs more, so the promise is restated rather than the descent truncated to two. One
+step now sends at most `AntiEntropy.REQUESTS_PER_STEP` = 12 requests and waits at most
+`deadline` for each: the root, up to `DESCENT_ROUNDS` = 9 levels, the leaves, the key sync. A
+step's real cost is `tree height + 1` requests, so a fan-out of 16 keeps every range up to 16^9
+keys inside the budget. A tree deeper than that ends the step where it stands and the range
+comes round again on a later tick; the process can never issue an unbounded number of requests
+before its deadline. Both constants are public, stated in the class KDoc, and
+`a_single_divergent_key_costs_a_descent_not_the_range` asserts the step is inside the budget, so
+the number is read by something and not just written down.
+
+**Deliberate trades.**
+
+- The peer rebuilds its tree of the range once per descent round rather than remembering it
+  between rounds. A session would need a lifetime and an eviction of its own for a saving that
+  is local CPU, and the requester is already bounded to a handful of rounds.
+- Because of that, a write landing mid-descent can shift the peer's positions under the
+  descent. It costs at most a key for one step: the divergence is decided key by key at the
+  bottom, never by position, so nothing is ever synced wrongly, and the range comes round again.
+  The old protocol had the same class of race across its two rounds.
+- The worst case, two replicas that differ everywhere, now spends its request positions where it
+  used to spend reply leaves. It is the same order of bytes as before, which is what a Merkle
+  tree's worst case has always been.
+
+**Tests.** `dynacache-cluster` 97 -> 101; the reactor 497 -> 501 (engine 179, cluster 101, cp
+113, server 108), all green.
+
+- `a_single_divergent_key_costs_a_descent_not_the_range` (new): 300 keys in one vnode, sharing
+  one hash tag so a 384-vnode ring puts them in one range (C12), installed on all three
+  replicas under one version each; then one key's bytes rotted on the victim under the same
+  version, so exactly one leaf differs and no position shifts. Counting the envelopes of that
+  one step: 5 requests (`height + 1`, height 4), 32 hashes (`FANOUT * (height - 2)`, one node's
+  children at each of the two levels under the root), 16 leaves (the one subtree that differed),
+  and a `KeySync` naming exactly the one rotten key. Before T84 the same step carried 300
+  leaves. The assertions are counts of messages, hashes and leaves, never a timing.
+- `a_matching_range_still_costs_one_comparison` (new): the same 300-key range with nothing
+  rotted costs 1 request, 0 hashes, 0 leaves, and one range compared.
+- `merkle_descent_pieces_decide_what_diff_decides`, `merkle_height_follows_from_the_leaf_count`
+  (new): the equivalence above, and `heightOf` against `of(...).height` for 0, 1, 2, 15, 16, 17,
+  255, 256, 257 and 300 leaves.
+- Unchanged and passing: `anti_entropy_heals_divergence`, `convergence_after_partition` and the
+  rest of `AntiEntropyTest`, `ConvergenceTest` and `MerkleTreeTest`, tombstones included.
+
+**Deviations.**
+
+1. Plan section 4 routes this ticket to Fable 5.1 as protocol and convergence work, and the
+   section now notes the tier is unavailable. Fable is out of usage credits, so it was done on
+   Opus 5.
+2. `GrpcTransportTest.envelopeOf` is exhaustive over `Envelope.BodyCase`, so the two new body
+   cases and the removed `MerkleRootReply.leaf` forced edits there. No behaviour of the test
+   changed; it still round-trips every body case over a real socket.
+3. `MerkleTree.diff` and `DivergentRange` are no longer called from production, only from
+   `MerkleTreeTest`, where `diff` is now the oracle the wire descent is asserted against. They
+   were kept rather than deleted for that reason: the ticket's third acceptance criterion is
+   that the exchange decides exactly what the local diff decides, and deleting the reference
+   would delete the test that says so.

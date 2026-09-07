@@ -98,8 +98,10 @@ class ClusterNode(
     /**
      * This node's dots resume above the ceiling it last reserved at `<dataDir>/dots` (T51), so a
      * restart never re-stamps a write with a dot its replicas already hold. A node with no data
-     * directory forgets its ceiling as it forgets its keys; the version table itself is not
-     * persisted yet, so the scan the counter also takes as a floor is empty here.
+     * directory forgets its ceiling as it forgets its keys. The counter's other floor is the
+     * version table, which [start] rebuilds from this node's snapshot and log before the port
+     * opens and which raises the counter key by key on the way in (T67), so nothing is scanned
+     * here: the table is empty until then.
      */
     private val counter = DotCounter.of(
         self, emptyList(), dataDir?.let { DotCeilingStore.inFile(it.resolve(DOT_CEILING_FILE)) } ?: DotCeilingStore.inMemory(),
@@ -189,7 +191,7 @@ class ClusterNode(
         .takeIf { it.isNotEmpty() }
         ?.let { cpNode(self, it, cpAddresses, cpPort, dataDir?.resolve(CP_DIR), clock, cpRaft) }
 
-    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, batch = this, clock = clock) {
+    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, batch = this, clock = clock, fsync = fsync) {
         engine.tick()
         engine.wal?.tick()
         // The leader's TTL tick (CP spec 5): log time moves on, and a session past its timeout is
@@ -254,7 +256,7 @@ class ClusterNode(
      */
     fun snapshot(id: String) {
         val part = checkNotNull(distributed) { "$self was given no snapshot directory" }
-        scope.launch { part.start(id) }
+        scope.launch { part.initiate(id) }
     }
 
     /** Whether every incoming channel of [id] has closed here; the set is done when all nodes say so. */
@@ -300,7 +302,11 @@ class ClusterNode(
             "cluster_hints_pending:${replication.hintCount}",
             "cluster_ranges_compared:${antiEntropy.rangesCompared}",
             "cluster_keys_synced:${antiEntropy.keysSynced}",
-        ) + view.map { "member_${it.node}:${it.state.name.lowercase()},${it.incarnation}" } + ""
+            // A snapshot set this node's storage refused (T80). The node kept serving, so this
+            // count is the only place the operator learns its disk would not take a part.
+            "cluster_snapshots_abandoned:${distributed?.abandoned ?: 0}",
+        ) + listOfNotNull(distributed?.lastAbandoned?.let { "cluster_snapshot_last_failure:$it" }) +
+            view.map { "member_${it.node}:${it.state.name.lowercase()},${it.incarnation}" } + ""
         return Reply.Bulk(body + lines.joinToString(CRLF).toByteArray(Charsets.ISO_8859_1))
     }
 

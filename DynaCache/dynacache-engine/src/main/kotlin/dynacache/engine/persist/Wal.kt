@@ -6,6 +6,7 @@ import java.nio.channels.FileChannel
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -22,25 +23,64 @@ import java.util.zip.CRC32
  * `length` is the payload's byte count, so the header is a fixed 17 bytes. The checksum covers
  * everything after itself - length, seq, op and payload - so a corrupted length field is caught
  * by the same check as a corrupted payload.
+ *
+ * An entry may carry an opaque **trailer** behind the payload the command codec reads: the
+ * cluster's version for the key the command wrote ([KeyVersions], T67), which this file writes
+ * down and hands back without ever looking inside it. Since the spec's header has no room for a
+ * format version, bit 7 of the op code is the version: set, the payload ends with the trailer
+ * and then the trailer's length, and the op code the reader answers has the bit cleared again.
+ * The op codes are all below 64, so an entry written before T67 -- and every channel-log record
+ * of a distributed snapshot, which never carries a version -- has the bit clear and reads back
+ * with no trailer, which is exactly what it held.
+ *
+ *     [crc32:u32][length:u32][seq:u64][op|0x80:u8][payload][trailer][trailer_len:u32]
  */
 
 private const val HEADER_BYTES = 4 + 4 + 8 + 1
+
+/** Bit 7 of the op code: this entry's payload ends with a trailer and the trailer's length. */
+private const val TRAILER_FLAG = 0x80
+
+/** The u32 the trailer's own length is written as, at the very end of the payload. */
+private const val TRAILER_LENGTH_BYTES = 4
 
 private const val CRC_BYTES = 4
 private const val LENGTH_AT = 4
 private const val SEQ_AT = 8
 private const val OP_AT = 16
 
-/** One logged mutation: an opaque [payload] under an [op] code, stamped with its [seq]. */
-class WalEntry(val seq: Long, val op: Byte, val payload: ByteArray) {
+/** The flusher's buffer starts here and grows to whatever a batch needs. */
+private const val INITIAL_BATCH_BYTES = 64 * 1024
+
+/**
+ * One logged mutation: an opaque [payload] under an [op] code, stamped with its [seq], and behind
+ * it the equally opaque [trailer] the caller asked to carry -- [WalEntry.NO_TRAILER] for an entry
+ * that carried none.
+ */
+class WalEntry(
+    val seq: Long,
+    val op: Byte,
+    val payload: ByteArray,
+    val trailer: ByteArray = NO_TRAILER,
+) {
 
     override fun equals(other: Any?): Boolean =
         this === other ||
-            (other is WalEntry && seq == other.seq && op == other.op && payload.contentEquals(other.payload))
+            (
+                other is WalEntry && seq == other.seq && op == other.op &&
+                    payload.contentEquals(other.payload) && trailer.contentEquals(other.trailer)
+                )
 
-    override fun hashCode(): Int = (31 * seq.hashCode() + op) * 31 + payload.contentHashCode()
+    override fun hashCode(): Int =
+        ((31 * seq.hashCode() + op) * 31 + payload.contentHashCode()) * 31 + trailer.contentHashCode()
 
-    override fun toString(): String = "WalEntry(seq=$seq, op=$op, payload=${payload.size} bytes)"
+    override fun toString(): String =
+        "WalEntry(seq=$seq, op=$op, payload=${payload.size} bytes, trailer=${trailer.size} bytes)"
+
+    companion object {
+        /** What an entry that carries no version behind it holds: no bytes at all. */
+        val NO_TRAILER = ByteArray(0)
+    }
 }
 
 /** Why a read of the log stopped where it did. */
@@ -66,15 +106,31 @@ enum class WalStop {
 class WalScan(val entries: List<WalEntry>, val stop: WalStop, val stoppedAt: Long)
 
 /** When an appended entry is forced to disk (spec 2.8). */
-enum class FsyncPolicy {
+enum class FsyncPolicy(
+    /**
+     * How long an entry may sit written but unforced, or null for a policy that leaves none
+     * waiting. `EVERY_SECOND` measures it from the last fsync, so a burst after an idle spell is
+     * forced at the next due tick; `GROUP_COMMIT` measures it from its batch's oldest waiter, so
+     * it bounds one entry's wait rather than the log's.
+     */
+    val deadline: Duration? = null,
+) {
     /** Every append is fsynced before its future completes. */
     ALWAYS,
 
     /** Fsynced by the first [WalWriter.tick] at least one second after the last fsync. */
-    EVERY_SECOND,
+    EVERY_SECOND(Duration.ofSeconds(1)),
 
     /** Never fsynced by the writer; the operating system decides. The future completes on write. */
     NEVER,
+
+    /**
+     * Reply-after-durable on a short deadline (C14): a batch is written at once and forced by the
+     * first [WalWriter.tick] or flush that finds its oldest waiter aged past [deadline], so one
+     * fsync covers every writer that arrived inside the window. A deadline this short is shorter
+     * than the engine's tick, so the server gives it a cadence of its own.
+     */
+    GROUP_COMMIT(Duration.ofMillis(2)),
 }
 
 /** Where the log's bytes go: written, then forced to disk. The filesystem is a true boundary. */
@@ -115,10 +171,18 @@ class WalAppend(val seq: Long, val durable: CompletableFuture<Unit>)
  * makes them durable per [policy].
  *
  * Group commit: an append encodes its entry and enqueues it, then the first appender to find no
- * flusher running becomes the flusher. It drains everything enqueued so far into one write and,
- * under `ALWAYS`, one fsync, completes those appends, and repeats while the queue refills. No
- * thread is owned here, and the engine's rule of no timers holds: `EVERY_SECOND` is forced by
- * the caller's [tick].
+ * flusher running becomes the flusher. It drains everything enqueued so far into one reused
+ * buffer, writes it and, under `ALWAYS`, forces it, completes those appends, and repeats while
+ * the queue refills. So one write and one fsync carry every appender that arrived while the
+ * flusher was busy, which is what amortizes the fsync across concurrent writers (spec 2.8).
+ *
+ * Under `GROUP_COMMIT` the force is deferred instead: the batch stays open, and is forced by the
+ * first [tick] or flush to find its oldest waiter aged past the policy's deadline, so one fsync
+ * covers a window of writers rather than one batch of them. No waiter completes before the force
+ * that covers it under any policy (C14).
+ *
+ * No thread is owned here and the engine's rule of no timers holds: every force that is not the
+ * flusher's own comes from the caller's [tick].
  */
 class WalWriter(
     private var sink: WalSink,
@@ -148,18 +212,31 @@ class WalWriter(
     private val pending = ConcurrentLinkedQueue<Pending>()
     private val flushing = AtomicBoolean(false)
 
-    /** Written but not yet forced; only `EVERY_SECOND` fills it. Guarded by itself. */
+    /** Written but not yet forced; `EVERY_SECOND` and `GROUP_COMMIT` fill it. Guarded by itself. */
     private val awaitingFsync = ArrayList<CompletableFuture<Unit>>()
+
+    /** When the oldest waiter now in [awaitingFsync] was parked, null while none is. Guarded by it. */
+    private var awaitingSince: Instant? = null
+
+    /**
+     * The flusher's buffer, reused across batches and grown to fit. Only the flusher touches it,
+     * and [flushing] is what publishes it from one flusher to the next: the outgoing one releases
+     * the flag after its write, the incoming one takes it before its own.
+     */
+    private var batchBuffer: ByteBuffer = ByteBuffer.allocate(INITIAL_BATCH_BYTES)
 
     @Volatile
     private var lastFsync: Instant = clock.instant()
 
-    /** Enqueues one entry, returns its seq at once, and flushes if nobody else is. */
-    fun append(op: Byte, payload: ByteArray): WalAppend {
+    /**
+     * Enqueues one entry, returns its seq at once, and flushes if nobody else is. [trailer] is
+     * carried behind [payload] and read back beside it, uninterpreted either way.
+     */
+    fun append(op: Byte, payload: ByteArray, trailer: ByteArray = WalEntry.NO_TRAILER): WalAppend {
         val durable = CompletableFuture<Unit>()
         val seq = synchronized(this) {
             val seq = nextSeq++
-            pending.add(Pending(encode(seq, op, payload), durable))
+            pending.add(Pending(encode(seq, op, payload, trailer), durable))
             seq
         }
         flushIfIdle()
@@ -167,13 +244,17 @@ class WalWriter(
     }
 
     /**
-     * The caller's clock tick: under `EVERY_SECOND`, forces everything written since the last
-     * fsync once a second has passed, and completes those appends. A no-op otherwise.
+     * The caller's clock tick, which forces what the policy has left waiting and completes those
+     * appends. Under `EVERY_SECOND` that is everything written since the last fsync, once a second
+     * has passed; under `GROUP_COMMIT`, the open batch once its oldest waiter has aged past the
+     * deadline. A no-op under `ALWAYS` and `NEVER`, which leave nothing waiting.
      */
     fun tick() {
-        if (clock.instant() < lastFsync.plusSeconds(1)) return
-        val batch = takeAwaiting()
-        if (batch.isNotEmpty()) fsyncAndComplete(batch)
+        when (policy) {
+            FsyncPolicy.EVERY_SECOND -> if (clock.instant() >= lastFsync.plusSeconds(1)) forceAwaiting()
+            FsyncPolicy.GROUP_COMMIT -> forcePastDeadline()
+            FsyncPolicy.ALWAYS, FsyncPolicy.NEVER -> Unit
+        }
     }
 
     /**
@@ -191,12 +272,24 @@ class WalWriter(
     }
 
     private fun flushIfIdle() {
+        // The rule this flag exists to keep: every thread that touches the sink holds it, or is
+        // the caller's tick thread. [rotate] relies on exactly that, since a clear flag and an
+        // empty queue is the whole of its quiet-log check and the tick is its own thread. So
+        // nothing between taking the flag and releasing it may be moved out of the flag, however
+        // idle the writer looks at that moment: a write or a force running with the flag clear is
+        // one rotate cannot see, and it would land on a sink rotate had already closed and swapped.
+        //
         // Re-check after releasing the flag: an entry enqueued between the drain and the release
-        // would otherwise sit with nobody flushing it.
+        // would otherwise sit with nobody flushing it. An appender that finds a flusher running
+        // leaves without forcing, which is safe for the same reason: that flusher re-checks the
+        // queue after its own batch, so it writes and then forces this entry too.
         while (pending.peek() != null) {
             if (!flushing.compareAndSet(false, true)) return
             try {
                 writeBatch()
+                // A batch already past its deadline is forced here rather than left to the next
+                // tick, so a busy log forces at the rate its writers arrive.
+                if (policy == FsyncPolicy.GROUP_COMMIT) forcePastDeadline()
             } finally {
                 flushing.set(false)
             }
@@ -206,29 +299,62 @@ class WalWriter(
     private fun writeBatch() {
         val batch = generateSequence { pending.poll() }.toList()
         if (batch.isEmpty()) return
-        val bytes = ByteBuffer.allocate(batch.sumOf { it.record.remaining() })
-        batch.forEach { bytes.put(it.record) }
         val waiters = batch.map { it.durable }
         try {
-            sink.write(bytes.flip())
+            sink.write(fill(batch))
         } catch (e: IOException) {
             waiters.forEach { it.completeExceptionally(e) }
             return
         }
+        // Parked only now that the bytes are in the sink, which is what makes a later force sound:
+        // any fsync that starts after a waiter was parked has covered that waiter's entry.
         when (policy) {
             FsyncPolicy.ALWAYS -> fsyncAndComplete(waiters)
             FsyncPolicy.NEVER -> waiters.forEach { it.complete(Unit) }
-            FsyncPolicy.EVERY_SECOND -> synchronized(awaitingFsync) { awaitingFsync.addAll(waiters) }
+            FsyncPolicy.EVERY_SECOND, FsyncPolicy.GROUP_COMMIT -> park(waiters)
         }
     }
 
-    private fun takeAwaiting(): List<CompletableFuture<Unit>> = synchronized(awaitingFsync) {
-        ArrayList(awaitingFsync).also { awaitingFsync.clear() }
+    /**
+     * Every record of [batch] end to end in the reused buffer, which grows to fit and never
+     * shrinks. Only the flusher calls this, and there is one of those at a time.
+     */
+    private fun fill(batch: List<Pending>): ByteBuffer {
+        val need = batch.sumOf { it.record.remaining() }
+        if (batchBuffer.capacity() < need) batchBuffer = ByteBuffer.allocate(maxOf(need, batchBuffer.capacity() * 2))
+        batchBuffer.clear()
+        batch.forEach { batchBuffer.put(it.record) }
+        return batchBuffer.flip()
+    }
+
+    /** Written, waiting for the force that makes it durable, and aging from now if it is first. */
+    private fun park(waiters: List<CompletableFuture<Unit>>) = synchronized(awaitingFsync) {
+        if (awaitingFsync.isEmpty()) awaitingSince = clock.instant()
+        awaitingFsync.addAll(waiters)
+    }
+
+    private fun takeAwaiting(): List<CompletableFuture<Unit>> = synchronized(awaitingFsync) { drainAwaiting() }
+
+    /** The caller holds [awaitingFsync]'s monitor. */
+    private fun drainAwaiting(): List<CompletableFuture<Unit>> {
+        awaitingSince = null
+        return ArrayList(awaitingFsync).also { awaitingFsync.clear() }
     }
 
     private fun forceAwaiting() {
         val left = takeAwaiting()
         if (left.isNotEmpty()) fsyncAndComplete(left)
+    }
+
+    /** Forces the open batch, if there is one and its oldest waiter has aged past the deadline. */
+    private fun forcePastDeadline() {
+        val deadline = policy.deadline ?: return
+        val batch = synchronized(awaitingFsync) {
+            val since = awaitingSince ?: return
+            if (clock.instant() < since.plus(deadline)) return
+            drainAwaiting()
+        }
+        fsyncAndComplete(batch)
     }
 
     private fun fsyncAndComplete(batch: List<CompletableFuture<Unit>>) {
@@ -241,10 +367,14 @@ class WalWriter(
         }
     }
 
-    private fun encode(seq: Long, op: Byte, payload: ByteArray): ByteBuffer {
-        val record = ByteBuffer.allocate(HEADER_BYTES + payload.size)
+    private fun encode(seq: Long, op: Byte, payload: ByteArray, trailer: ByteArray): ByteBuffer {
+        val carried = trailer.isNotEmpty()
+        val length = payload.size + if (carried) trailer.size + TRAILER_LENGTH_BYTES else 0
+        val record = ByteBuffer.allocate(HEADER_BYTES + length)
         record.position(CRC_BYTES)
-        record.putInt(payload.size).putLong(seq).put(op).put(payload)
+        record.putInt(length).putLong(seq)
+        record.put(if (carried) (op.toInt() or TRAILER_FLAG).toByte() else op).put(payload)
+        if (carried) record.put(trailer).putInt(trailer.size)
         val crc = CRC32()
         crc.update(record.array(), CRC_BYTES, record.position() - CRC_BYTES)
         record.putInt(0, crc.value.toInt())
@@ -284,11 +414,30 @@ class WalReader(private val path: Path) {
                 if (crc.value.toInt() != header.getInt(0)) {
                     return WalScan(entries, WalStop.CRC_MISMATCH, offset)
                 }
-                entries.add(WalEntry(header.getLong(SEQ_AT), header.get(OP_AT), payload.array()))
+                val entry = split(header.getLong(SEQ_AT), header.get(OP_AT), payload.array())
+                    ?: return WalScan(entries, WalStop.TORN_TAIL, offset)
+                entries.add(entry)
                 offset += HEADER_BYTES + length
             }
             return WalScan(entries, WalStop.CLEAN_END, offset)
         }
+    }
+
+    /**
+     * The payload as the writer left it: the command's bytes alone when the op code's trailer bit
+     * is clear, and otherwise cut at the length the last four bytes name, with the bit cleared
+     * off the op code the caller sees. Null when that length does not fit inside the payload,
+     * which is a corrupt entry and reads as a torn tail like any other.
+     */
+    private fun split(seq: Long, flagged: Byte, bytes: ByteArray): WalEntry? {
+        if (flagged.toInt() and TRAILER_FLAG == 0) return WalEntry(seq, flagged, bytes)
+        if (bytes.size < TRAILER_LENGTH_BYTES) return null
+        val trailerAt = bytes.size - TRAILER_LENGTH_BYTES
+        val trailerLength = ByteBuffer.wrap(bytes).getInt(trailerAt)
+        if (trailerLength < 0 || trailerLength > trailerAt) return null
+        val op = (flagged.toInt() and TRAILER_FLAG.inv()).toByte()
+        val from = trailerAt - trailerLength
+        return WalEntry(seq, op, bytes.copyOfRange(0, from), bytes.copyOfRange(from, trailerAt))
     }
 
     private fun readFully(channel: FileChannel, into: ByteBuffer, from: Long) {
