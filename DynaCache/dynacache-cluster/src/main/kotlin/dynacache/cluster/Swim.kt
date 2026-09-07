@@ -23,11 +23,14 @@ import kotlin.time.Duration.Companion.seconds
  * table rides on every envelope; a received row wins when its incarnation is higher, or equal
  * with a stronger state (dead > suspect > alive). Suspicion of self is refuted by bumping the
  * incarnation. Production runs [run] as the node's one gossip coroutine; tests call [tick].
+ *
+ * SWIM does not read the transport: what arrives reaches it through [deliver], the last handler
+ * of the node's [InboundLoop] (T68). [tick] is the sending half alone.
  */
 class Swim(
     val self: NodeId,
     peers: Set<NodeId>,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val random: Random,
     incarnation: Long = 0,
     private val period: Duration = 1.seconds,
@@ -69,7 +72,6 @@ class Swim(
     /** One protocol period. */
     suspend fun tick() {
         now++
-        while (true) handle(transport.inbound.tryReceive().getOrNull() ?: break)
         for ((id, probe) in probes.entries.toList()) {
             val indirectAt = probe.indirectAt
             if (indirectAt == null && now - probe.sentAt >= rttTicks) {
@@ -90,13 +92,11 @@ class Swim(
     }
 
     /**
-     * Merges [envelope]'s piggybacked table and answers its gossip body. [tick] calls this for
-     * whatever it finds on the transport; a node that puts a second consumer on one inbound
-     * (T19's [Router]) calls it from its demux instead: gossip here, the rest to the router.
+     * Merges [envelope]'s piggybacked table and answers its gossip body. The node's [InboundLoop]
+     * calls this for every envelope no other handler claimed, and the merge is why it is the last
+     * handler rather than a peer of the others: every envelope carries the table (I8).
      */
-    suspend fun deliver(envelope: Envelope) = handle(envelope)
-
-    private suspend fun handle(envelope: Envelope) {
+    suspend fun deliver(envelope: Envelope) {
         envelope.membershipList.forEach {
             merge(Member(NodeId(it.node), MemberState.valueOf(it.state.name), it.incarnation))
         }

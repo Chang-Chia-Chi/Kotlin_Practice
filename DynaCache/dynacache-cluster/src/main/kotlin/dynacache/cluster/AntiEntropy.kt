@@ -49,7 +49,7 @@ class AntiEntropy(
     n: Int,
     private val engine: ApEngine,
     private val replication: Replication,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val membership: Membership,
     private val counter: DotCounter,
     private val deadline: Duration = 1.seconds,

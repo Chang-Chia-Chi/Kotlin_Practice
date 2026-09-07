@@ -12,7 +12,11 @@ import kotlin.math.ceil
 import kotlin.math.log2
 import kotlin.random.Random
 
-/** SWIM gossip (spec 2.4, I8): every node is a [Swim] on one [InMemoryTransport], stepped by rounds. */
+/**
+ * SWIM gossip (spec 2.4, I8): every node is a [Swim] on one [InMemoryTransport], stepped by
+ * rounds. What a node receives reaches its [Swim] the one way a real node's does, through the
+ * gossip handler of an [InboundLoop] (T68).
+ */
 class SwimTest {
 
     /** One round is a tick on every live node followed by a full drain of the network. */
@@ -20,24 +24,30 @@ class SwimTest {
         val network = InMemoryTransport()
         val nodes = List(n) { NodeId("node-${it + 1}") }
         val swims = LinkedHashMap<NodeId, Swim>()
+        val inbounds = LinkedHashMap<NodeId, InboundLoop>()
         var rounds = 0
 
         init { nodes.forEach { start(it, incarnation = 0) } }
 
         fun start(node: NodeId, incarnation: Long) {
-            swims[node] = Swim(
+            val swim = Swim(
                 self = node, peers = nodes.toSet() - node, transport = network.endpoint(node),
                 random = Random(seed * 31 + nodes.indexOf(node)), incarnation = incarnation,
                 k = k, rttTicks = rtt, suspectTicks = t,
             )
+            swims[node] = swim
+            inbounds[node] = InboundLoop(network.endpoint(node).inbound, gossip = swim::deliver)
         }
 
         fun kill(node: NodeId) {
             network.kill(node)
             swims.remove(node)
+            inbounds.remove(node)
         }
 
+        /** What each live node received, then one protocol period on each, then delivery. */
         suspend fun round() {
+            inbounds.values.forEach { it.drain() }
             swims.values.forEach { it.tick() }
             network.drain()
             rounds++

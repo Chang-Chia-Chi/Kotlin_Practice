@@ -34,27 +34,22 @@ import kotlinx.coroutines.launch
  * It is not the **dispatcher** (CONTEXT.md), which chooses between the AP and the CP engine by
  * namespace; the router sits under that choice and moves one command between nodes.
  *
- * [run] is the node's one inbound loop and owns the demux: [snapshots] sees every envelope
- * first and keeps the Chandy-Lamport markers (T36); `Forward` and `ForwardReply` are the
- * router's, and every other envelope goes to [others]: `Replication.receive` first and then
- * `Swim::deliver`, composed by whoever wires the node.
+ * The router does not read the transport: it is one handler of the node's [InboundLoop], which
+ * owns the order every handler is offered an envelope in (T68). [receive] takes the two bodies
+ * that are the router's, `Forward` and `ForwardReply`, and says no to everything else.
  *
  * @param local the engine that runs a command this node coordinates.
  * @param scope the node's lifecycle scope; a forward and its deadline live on it.
  * @param deadline how long a forward may take before its future answers with an error.
- * @param others where every envelope that is not a forward goes.
- * @param snapshots `DistributedSnapshot.receive`: records in-flight envelopes and consumes markers.
  */
 class Router(
     val self: NodeId,
     private val ring: Ring,
     private val n: Int,
     private val local: CommandEngine,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val scope: CoroutineScope,
     private val deadline: Duration = 2.seconds,
-    private val others: suspend (Envelope) -> Unit = {},
-    private val snapshots: suspend (Envelope) -> Boolean = { false },
 ) : CommandEngine {
 
     private val pending = ConcurrentHashMap<Long, CompletableFuture<Reply>>()
@@ -102,26 +97,21 @@ class Router(
 
     override fun close() = local.close()
 
-    /** The node's inbound loop: the demux, until the transport closes. */
-    suspend fun run() {
-        for (envelope in transport.inbound) receive(envelope)
-    }
-
-    /** One inbound envelope. Public so a test can hand the router one without a loop. */
-    suspend fun receive(envelope: Envelope) {
-        if (snapshots(envelope)) return
+    /** One inbound envelope; true when it was the router's, false when it belongs to someone else. */
+    suspend fun receive(envelope: Envelope): Boolean {
         when (envelope.bodyCase) {
             Envelope.BodyCase.FORWARD -> scope.launch { coordinate(NodeId(envelope.from), envelope.forward) }
             Envelope.BodyCase.FORWARD_REPLY ->
                 pending.remove(envelope.forwardReply.id)?.complete(ReplyWire.decode(envelope.forwardReply.reply))
-            else -> others(envelope)
+            else -> return false
         }
+        return true
     }
 
     /**
      * This node is the coordinator: run what [from] forwarded and answer under the same id.
      * A forward the codec cannot read is an error reply rather than a throw, because the throw
-     * would leave [run] dead and take the node's gossip down with its forwarding. A peer of this
+     * would leave the node's [InboundLoop] dead and take its gossip down with its forwarding. A peer of this
      * build cannot write one; a corrupted or older envelope can, and that is what this catches.
      *
      * Each forwarded command runs on its own coroutine on [scope]: the coordinator's answer needs

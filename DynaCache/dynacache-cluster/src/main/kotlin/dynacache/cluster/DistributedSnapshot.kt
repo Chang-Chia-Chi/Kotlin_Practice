@@ -19,7 +19,7 @@ import kotlinx.coroutines.sync.withLock
  * business: this class holds the marker rules and the channel bookkeeping, and hands the
  * adapter one channel's name and one envelope's bytes at a time.
  *
- * [initiate] is step 1, [receive] steps 2 and 3 fed by the router's demux, [complete] step 4
+ * [initiate] is step 1, [receive] steps 2 and 3 fed by the node's inbound loop, [complete] step 4
  * for this node; the whole snapshot is complete when every node's part is. A part starts by
  * cutting the state and only then opens its channels, and the demux waits out the cut, so an
  * envelope is in the state or on a channel, never both (C10, I12). Recording happens beside
@@ -30,14 +30,14 @@ import kotlinx.coroutines.sync.withLock
  * A node's part still open at [deadline] after it started is aborted: the whole set goes, the
  * engine is untouched, and a later marker for that id is ignored.
  *
- * @param demux the node's inbound handler (`Router.receive`), for the replay.
+ * @param demux the node's inbound loop (`InboundLoop.deliver`), for the replay.
  * @param scope the node's lifecycle scope; the deadline timer lives on it.
  * @param deadline how long this node waits for its channels to close (spec 2.8, default 30s).
  */
 class DistributedSnapshot(
     private val self: NodeId,
     private val peers: Collection<NodeId>,
-    private val transport: Transport,
+    private val transport: Outbound,
     private val parts: SnapshotParts,
     private val demux: suspend (Envelope) -> Unit,
     private val scope: CoroutineScope,

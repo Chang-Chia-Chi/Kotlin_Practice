@@ -20,13 +20,12 @@ import dynacache.cluster.proto.ReplicateAck
 import dynacache.cluster.proto.ReplyMsg
 import dynacache.cluster.proto.Version
 import com.google.protobuf.ByteString
-import io.grpc.StatusException
 import java.net.ServerSocket
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -61,16 +60,26 @@ class GrpcTransportTest {
         }
     }
 
+    /**
+     * The [Outbound] seam's one promise, on both of its adapters (T68). Nothing above the seam
+     * has an error path for a peer that is gone: gossip's tick would die with the exception and
+     * stop detecting the very failure it just saw, and a quorum's fan-out would fail the write
+     * instead of waiting for the replicas that are up.
+     */
     @Test
-    fun grpc_peer_down_is_a_send_error() {
-        val peers = mapOf(bravo to HostPort(LOCALHOST, portNothingListensOn()))
-        GrpcTransport(alpha, peers, port = 0).use { a ->
-            assertThrows(StatusException::class.java) {
-                runBlocking {
-                    withTimeout(DEADLINE) { a.send(bravo, envelopeOf(Envelope.BodyCase.PING, alpha, bravo)) }
-                }
-            }
+    fun unreachable_peer_is_a_drop_on_both_adapters() = runBlocking {
+        GrpcTransport(alpha, mapOf(bravo to HostPort(LOCALHOST, portNothingListensOn())), port = 0).use { grpc ->
+            withTimeout(DEADLINE) { grpc.send(bravo, envelopeOf(Envelope.BodyCase.PING, alpha, bravo)) }
+            assertTrue(grpc.inbound.tryReceive().isFailure, "a send to a dead peer was answered")
         }
+
+        val network = InMemoryTransport()
+        val memory = network.endpoint(alpha)
+        network.endpoint(bravo)
+        network.kill(bravo)
+        memory.send(bravo, envelopeOf(Envelope.BodyCase.PING, alpha, bravo))
+        network.drain()
+        assertTrue(memory.inbound.tryReceive().isFailure, "a send to a dead peer was answered")
     }
 
     /** A port the OS just handed out and took back, so nothing is behind it. */
