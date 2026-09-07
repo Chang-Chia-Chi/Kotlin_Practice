@@ -7205,3 +7205,58 @@ C16 test into `BatchTest`, and the cluster test kit lost a method on a fake, not
    is byte-for-byte what it was (`ERR a batch cannot name a cp: key`): the dispatcher failed the
    future with an `IllegalArgumentException` carrying that message and `orBatchError` unwrapped
    it, which is the reply `runBatch` now returns directly.
+
+## T76: Restoring a missing snapshot id is an error, not an empty node
+
+**Built**
+
+- `SnapshotParts.holds(id): Boolean`, one more answer on the persist seam beside T75's `accepts`:
+  whether this node's part of the set is here with its state in it. False for a set never cut
+  here and for an id `accepts` refuses, so a restore's id (an operator's, and a typo in one is an
+  ordinary mistake) is answered and never thrown on or turned into a path.
+- `FileSnapshotParts.holds` is `accepts(id) && Files.isRegularFile(<part>/dump.rdb)`; the name of
+  the state file moved to `SnapshotEngine.stateFile(dir)` so the format's one owner still owns it.
+- `FileSnapshotParts.restore` now `require`s `holds(id)`. The root cause was here: a part with no
+  state file restored as `RdbSnapshot(0, emptyList())`, which is exactly what an empty node looks
+  like, so the guard sits where every caller of restore routes through and not at one call site.
+- `DistributedSnapshot.restoreFrom` names the whole precondition in one line ahead of everything:
+  `parts.holds(id) && open[id].orEmpty().isEmpty()`. The part is here **and** complete, no channel
+  of it still recording; otherwise `IllegalArgumentException` and nothing is touched. A part still
+  recording would restore a state cut before the envelopes in flight at the cut had landed (I12).
+- `ClusterNode.restoreSnapshot` and CONTEXT.md's **Snapshot set** entry say the precondition.
+  The single-node RDB path (`SnapshotEngine.restore` with no `dump.rdb`) is untouched: that is a
+  fresh node starting, not a restore that was asked for.
+
+**Tests** (full reactor, `clean package`, all green)
+
+| Module | Tests |
+|---|---|
+| dynacache-engine | 179 |
+| dynacache-cluster | 94 |
+| dynacache-cp | 113 |
+| dynacache-server | 106 |
+
+New: `restore_of_a_missing_id_is_an_error_and_changes_nothing` and
+`restore_of_an_incomplete_part_is_an_error` (cluster; both red first, and red as the real bug --
+no error at all, `failure` was null), `a_part_is_held_from_the_cut_that_wrote_its_state` (engine).
+
+**Deviations**
+
+1. The refusal is an `IllegalArgumentException`, not a new reply type. A restore is an operator's
+   method on `ClusterNode` (T36), not a client command, so the throw is its reply; the ticket's
+   "answers an error" is met without inventing a wire error nobody parses.
+2. Two guards, not one: the adapter refuses a part it does not hold, and the caller refuses that
+   plus a part still recording. Only the caller knows whether channels have closed (the marker
+   rules are the cluster's), and only the adapter knows whether the state file is there.
+
+**For the next ticket**
+
+- T66 edits `restoreFrom`; the change there is the single `require` on the first line, chosen to
+  keep the merge trivial. T49's cut-then-open order, T74's WAL placement and T75's id check are
+  untouched.
+- A part's completeness is still only knowable in the process that cut it: `open` is in memory, so
+  a node restarted mid-snapshot sees a part with a state file and no idea whether its channels had
+  closed. Recording completeness in the part (a marker file at step 4) would close that and is its
+  own ticket.
+- `restore` is still not atomic: a part that fails halfway (a corrupt channel log, `replay`
+  throwing) leaves the engine holding the restored state and none of the replay. Unchanged here.

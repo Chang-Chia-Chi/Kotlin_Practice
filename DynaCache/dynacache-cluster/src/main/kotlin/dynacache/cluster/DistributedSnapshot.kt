@@ -97,8 +97,14 @@ class DistributedSnapshot(
      * Loads this node's state from snapshot [id] (I12) and re-delivers its recorded channels,
      * each in arrival order. Channels are replayed one after another: the cut ordered nothing
      * across them, so no order between them is owed.
+     *
+     * A restore names its precondition: this node's part of the set is here ([SnapshotParts.holds])
+     * and complete, no channel of it still recording. Otherwise it fails and nothing is touched:
+     * an unknown id is an operator's typo, and restoring it as the empty state it looks like on
+     * disk would empty a live node, while a part still recording would drop what is in flight.
      */
     suspend fun restoreFrom(id: String) {
+        require(parts.holds(id) && open[id].orEmpty().isEmpty()) { "$self has no complete part of snapshot $id" }
         parts.restore(id)
         for (peer in peers) {
             for (record in parts.replay(id, peer.name)) demux(Envelope.parseFrom(record))

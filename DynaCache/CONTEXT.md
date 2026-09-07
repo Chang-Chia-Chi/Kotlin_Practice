@@ -156,7 +156,9 @@ _Avoid_: barrier (that is the engine's word for a parked partition), token
 **Snapshot set**:
 Every node's part of one Chandy-Lamport snapshot: its state file plus one log per recorded
 channel, under `<dir>/<id>/<node>/`. Consistent as a whole (C10); restored as a whole (I12);
-deleted as a whole when a node's deadline passes with a channel still open.
+deleted as a whole when a node's deadline passes with a channel still open. A node restores
+only from a part it holds and has completed; any other id is an error that changes nothing,
+never an empty node.
 _Avoid_: backup, dump (that is the single-node RDB file)
 **Hint**:
 A write held by a node that is not one of the key's replicas, because the replica it was meant

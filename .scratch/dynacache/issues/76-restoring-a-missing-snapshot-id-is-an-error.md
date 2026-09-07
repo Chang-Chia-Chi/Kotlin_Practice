@@ -11,15 +11,15 @@ is untouched. Found by T55, pre-existing since T32.
 
 **Nature:** command semantics, I12 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache e33b9aeb, merged into misc/ai_gen)
 
-- [ ] `restore_of_a_missing_id_is_an_error_and_changes_nothing`: with data in the engine, a
+- [x] `restore_of_a_missing_id_is_an_error_and_changes_nothing`: with data in the engine, a
       restore of an unknown id answers an error and every key still reads as before
-- [ ] `restore_of_an_incomplete_part_is_an_error`: a part with a state file but a channel still
+- [x] `restore_of_an_incomplete_part_is_an_error`: a part with a state file but a channel still
       open is refused the same way
-- [ ] `chandy_lamport_restorable` and every existing restore, snapshot and P4 acceptance test
+- [x] `chandy_lamport_restorable` and every existing restore, snapshot and P4 acceptance test
       passes; the single-node RDB restore path keeps its behaviour for a present file
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
