@@ -105,10 +105,9 @@ class FileSnapshotParts(
     override fun accepts(id: String): Boolean =
         SAFE_ID.matches(id) && id != "." && id != ".." && id.substringBefore('.').uppercase() !in RESERVED
 
+    /** The part's directory is the snapshot engine's to create, so this only says where it goes. */
     override fun cut(id: String) {
-        val part = part(id)
-        Files.createDirectories(part)
-        SnapshotEngine(engine, part, clock).save()
+        SnapshotEngine(engine, part(id), clock).save()
     }
 
     // ponytail: one open-append-close per recorded message; keep the log open per channel if a

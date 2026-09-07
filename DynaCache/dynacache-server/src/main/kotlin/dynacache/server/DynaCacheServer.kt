@@ -36,7 +36,6 @@ import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.handler.codec.ByteToMessageDecoder
 import io.netty.util.concurrent.EventExecutor
 import java.net.InetSocketAddress
-import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import java.util.ArrayDeque
@@ -483,7 +482,7 @@ internal fun cpNode(
     raft: RaftConfig = RaftConfig.DEFAULT_RAFT_CONFIG,
 ): CpNode {
     if (self !in members) return CpNode(ForwardingCpEngine(members, addresses), null, null)
-    val store = storeDir?.let { FileRaftStore(Files.createDirectories(it)) } ?: InMemoryRaftStore()
+    val store = storeDir?.let { FileRaftStore(it) } ?: InMemoryRaftStore()
     val config = CpConfig(self, members, raft = raft, clock = clock)
     val runtime = RaftRuntime(config, GrpcRaftTransport(self, addresses), store)
     val engine = CpEngine(runtime)

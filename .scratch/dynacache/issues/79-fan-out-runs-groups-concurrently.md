@@ -16,19 +16,19 @@ becomes its own ticket. Source: benchmark anomaly 4.
 
 **Nature:** command dispatch, ADR 0001, ADR 0002, the T73 engine seam (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache f39f1dd0, measured d91efbc8, merged into misc/ai_gen)
 
-- [ ] `fan_out_submits_every_group_before_any_completes`: with partition doubles that hold their
+- [x] `fan_out_submits_every_group_before_any_completes`: with partition doubles that hold their
       futures, every group has been submitted before the first one is completed
-- [ ] `fan_out_reply_preserves_argument_order`: keys spread across partitions come back in the
+- [x] `fan_out_reply_preserves_argument_order`: keys spread across partitions come back in the
       order given, for `MGET`, `MSET` and `DEL`
-- [ ] `fan_out_one_failed_group_fails_the_command_and_settles_the_rest`: the command's future
+- [x] `fan_out_one_failed_group_fails_the_command_and_settles_the_rest`: the command's future
       completes exceptionally only after every group has settled
-- [ ] `Router`'s multi-partition path gets the same treatment and its existing tests pass
-- [ ] Before/after `-r 100000 -t mset,mget` plain and `-P 16`, plus an `MGET` key-count sweep at
+- [x] `Router`'s multi-partition path gets the same treatment and its existing tests pass
+- [x] Before/after `-r 100000 -t mset,mget` plain and `-P 16`, plus an `MGET` key-count sweep at
       2, 8, 16 and 64 keys, with p99 next to p50, in
       `docs/dynamiccache/benchmarks/<date>-t79-fan-out.md`
-- [ ] Progress entry written
+- [x] Progress entry written
 
 Ground rules for every ticket: implement only this ticket; JUnit 5 + Mockito only, no AssertJ or
 MockK; no sleeps, time is an injected Clock; spec-named tests keep their names, constraint tests

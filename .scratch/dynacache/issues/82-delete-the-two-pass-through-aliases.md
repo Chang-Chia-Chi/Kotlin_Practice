@@ -10,11 +10,11 @@ nothing. From the standards review's Middle Man list.
 
 **Nature:** vocabulary, no behaviour change (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache b210c606, merged into misc/ai_gen)
 
-- [ ] Neither alias exists; every caller, tests included, names the method it meant
-- [ ] Test count and every test name are unchanged
-- [ ] Progress entry appended
+- [x] Neither alias exists; every caller, tests included, names the method it meant
+- [x] Test count and every test name are unchanged
+- [x] Progress entry appended
 
 Size budget: a few lines. If either alias turns out to carry meaning the KDoc did not state (a
 different intent at a call site, say), keep it, say which and why, and delete only the other.

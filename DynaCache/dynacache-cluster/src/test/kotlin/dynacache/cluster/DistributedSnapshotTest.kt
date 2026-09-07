@@ -43,7 +43,7 @@ import org.junit.jupiter.api.io.TempDir
 
 /**
  * Chandy-Lamport distributed snapshots (spec 2.8, C10, I12) at the coordinator's seam,
- * `initiate` and `restoreFrom`, through the test kit's cluster. Every value is a causality
+ * `start` and `restoreFrom`, through the test kit's cluster. Every value is a causality
  * tag: write `i` completes (its quorum formed) before write `i + 1` is issued, so `i`
  * happened-before `i + 1`, and a consistent cut holding tag `i + 1` anywhere holds tag `i`.
  */
@@ -72,7 +72,7 @@ class DistributedSnapshotTest {
         val second = router(coordinator).submit(Command.Set(keys[1], "2".toByteArray()))
         untilInFlight()
         network.delay(rounds = 0..0, seed = 1)
-        snapshot((nodes - coordinator).first()).initiate(id)
+        snapshot((nodes - coordinator).first()).start(id)
         drainMessages()
         assertEquals(ok, second.await())
         nodes.forEach { assertTrue(snapshot(it).complete(id), "$it complete") }
@@ -141,7 +141,7 @@ class DistributedSnapshotTest {
         assertEquals(ok, cluster.writeVia(survivors[0], keys[0], "1".toByteArray()))
         cluster.network.kill(victim)
 
-        cluster.snapshot(survivors[0]).initiate("s1")
+        cluster.snapshot(survivors[0]).start("s1")
         cluster.drainMessages()
         assertTrue(dir.resolve("s1").exists(), "the survivors recorded their parts")
         assertEquals(ok, cluster.writeVia(survivors[1], keys[1], "2".toByteArray()), "the write path is open during a snapshot")
@@ -163,7 +163,7 @@ class DistributedSnapshotTest {
         val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], Key("k1"), "1".toByteArray()))
 
-        cluster.snapshot(cluster.nodes[1]).initiate("s1")
+        cluster.snapshot(cluster.nodes[1]).start("s1")
         cluster.drainMessages()
 
         val markers = cluster.network.sent.filter { it.hasMarker() }.groupingBy { it.from to it.to }.eachCount()
@@ -179,7 +179,7 @@ class DistributedSnapshotTest {
         val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
         assertEquals(ok, cluster.writeVia(cluster.nodes[1], keys[1], "2".toByteArray()))
-        cluster.snapshot(cluster.nodes[2]).initiate("s1")
+        cluster.snapshot(cluster.nodes[2]).start("s1")
         cluster.drainMessages()
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "9".toByteArray()))
         assertEquals(Reply.Integer(1), cluster.settle(cluster.router(cluster.nodes[1]).submit(Command.Del(keys[1]))))
@@ -199,7 +199,7 @@ class DistributedSnapshotTest {
 
     /**
      * The initiator's cut against its own demux (spec 2.8 step 1 before step 2). On a real node
-     * `initiate` runs on the node's scope while the router's inbound loop runs the demux, so here
+     * `start` runs on the node's scope while the router's inbound loop runs the demux, so here
      * the initiator runs on [Dispatchers.Default] and a [Gate] clock parks it at the state
      * save's first clock reading, before any partition's view is taken. A Replicate handed to
      * the demux there is restored with its effect applied once: it is in the state or on the
@@ -210,13 +210,13 @@ class DistributedSnapshotTest {
     fun I12_write_during_the_cut_is_restored_once() = runTest {
         val gate = Gate()
         val node = Lone(gate, backgroundScope)
-        val initiate = launch(Dispatchers.Default) { node.snapshot.initiate("s1") }
+        val starting = launch(Dispatchers.Default) { node.snapshot.start("s1") }
         assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
         val delivery = launch { node.demux(incr) }
         runCurrent()
         gate.release.countDown()
         delivery.join()
-        initiate.join()
+        starting.join()
         assertEquals(one, node.engine.submit(Command.Get(counted)).await(), "the live node applied the write once")
         node.close()
 
@@ -234,7 +234,7 @@ class DistributedSnapshotTest {
     fun C10_state_is_cut_before_any_channel_opens() = runTest {
         val gate = Gate()
         val node = Lone(gate, backgroundScope)
-        val initiate = launch(Dispatchers.Default) { node.snapshot.initiate("s1") }
+        val starting = launch(Dispatchers.Default) { node.snapshot.start("s1") }
         assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
         val delivery = launch { node.demux(incr) }
         runCurrent()
@@ -242,7 +242,7 @@ class DistributedSnapshotTest {
         assertEquals(emptyList<Path>(), logs, "no channel is open while the state is being cut")
         gate.release.countDown()
         delivery.join()
-        initiate.join()
+        starting.join()
         node.close()
         val part = recorded("s1").getValue(self)
         assertEquals(Part(emptySet(), mapOf(peer to setOf(1))), part, "delivered during the cut: on the channel, not in the state")
@@ -259,7 +259,7 @@ class DistributedSnapshotTest {
         val data = dir.resolve("data")
         val node = Lone(clock, backgroundScope, dataDir = data, deadline = 30.seconds)
         assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
-        node.snapshot.initiate("s1")
+        node.snapshot.start("s1")
         assertEquals(ok, node.engine.submit(Command.Set(counted, "2".toByteArray())).await())
         assertEquals(ok, node.engine.submit(Command.Set(Key("after"), "3".toByteArray())).await())
 
@@ -296,7 +296,7 @@ class DistributedSnapshotTest {
         assertEquals(emptyList<Path>(), dir.listDirectoryEntries(), "the refused id recorded nothing")
         assertFalse(cluster.snapshot(target).complete("../x"), "no part was started for the refused id")
 
-        cluster.snapshot(sender).initiate("s1")
+        cluster.snapshot(sender).start("s1")
         cluster.drainMessages()
         cluster.nodes.forEach { assertTrue(cluster.snapshot(it).complete("s1"), "$it complete") }
         assertEquals(Reply.Bulk("1".toByteArray()), cluster.readVia(target, keys[0]), "the node still answers its clients")
@@ -312,7 +312,7 @@ class DistributedSnapshotTest {
     fun restore_of_a_missing_id_is_an_error_and_changes_nothing() = runTest {
         val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
-        cluster.snapshot(cluster.nodes[0]).initiate("s1")
+        cluster.snapshot(cluster.nodes[0]).start("s1")
         cluster.drainMessages()
 
         for (node in cluster.nodes) {
@@ -334,7 +334,7 @@ class DistributedSnapshotTest {
     fun restore_of_an_incomplete_part_is_an_error() = runTest {
         val node = Lone(clock, backgroundScope)
         assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
-        node.snapshot.initiate("s1")
+        node.snapshot.start("s1")
         assertTrue(dir.resolve("s1").resolve(self.name).resolve("dump.rdb").exists(), "the state is cut")
         assertFalse(node.snapshot.complete("s1"), "$peer never closed its channel")
 

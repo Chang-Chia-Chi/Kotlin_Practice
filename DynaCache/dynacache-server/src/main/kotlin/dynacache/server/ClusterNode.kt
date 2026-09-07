@@ -32,7 +32,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import java.util.concurrent.CompletableFuture
@@ -176,10 +175,7 @@ class ClusterNode(
      * shutdown. A cluster node needs its own because a restart is what makes a node warm again;
      * the cluster's own repair paths only cover what a peer still holds.
      */
-    private val snapshots = dataDir?.let {
-        Files.createDirectories(it)
-        SnapshotEngine(engine, it, clock, fsync = fsync)
-    }
+    private val snapshots = dataDir?.let { SnapshotEngine(engine, it, clock, fsync = fsync) }
 
     /**
      * This node's CP subsystem, or null when it was given no group. The two engines are siblings
