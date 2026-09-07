@@ -13,6 +13,7 @@ import dynacache.cp.RaftRuntime
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
+import dynacache.engine.CpNamespace
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
 import dynacache.engine.Reply
@@ -68,7 +69,7 @@ class DynaCacheServer(
 ) : AutoCloseable {
 
     /** Where every connection submits: the AP engine, the CP engine, and CP spec 9.5 between. */
-    private val dispatcher = CommandDispatcher(ap, cp, clock)
+    private val dispatcher = CommandDispatcher(ap, cp)
 
     private val acceptors = NioEventLoopGroup(1)
     private val workers = NioEventLoopGroup()
@@ -295,7 +296,7 @@ private class CommandHandler(
         forget()
         if (refused) return done(Reply.Error("EXECABORT", "Transaction discarded because of previous errors."))
         return engine
-            .atomically<Reply>(commands.flatMap(::keysOf).distinct()) { ctx ->
+            .atomically<Reply>(commands.flatMap(CpNamespace::keysOf).distinct()) { ctx ->
                 Reply.Array(commands.map(ctx::execute))
             }
             .orBatchError()

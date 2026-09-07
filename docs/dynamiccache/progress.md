@@ -6266,3 +6266,398 @@ is released by the session cascade, not by lease expiry.
 - The fixture deliberately exposes no accessor for the state machine itself. T70 will want one
   (to read `state` and to install a snapshot); adding a single `val stateMachine` to `Primitives`
   is the smallest change, and was left out here under YAGNI rather than guessed at.
+
+---
+
+## T64 - A forward carries codec bytes
+
+The RESP spelling of a command no longer crosses the cluster seam. A `Forward` carries the engine
+command codec's bytes, and the coordinator decodes them with the same codec, so the two ends of a
+forward are one encoding rather than a writer in the server module and a reader in the parser.
+
+**The envelope.** `Forward`'s `repeated bytes token = 2` is gone and `bytes command = 3` replaces
+it; tag 2 and the name `token` are `reserved`. The field was removed rather than deprecated
+because nothing persists a `Forward` and both ends of the wire are this repository: a forward
+lives for one round trip between two nodes of the same build. A new tag rather than a reuse of
+tag 2, so a stale peer's tokens decode as an absent field rather than as a corrupt command.
+
+**The router.** `Router`'s constructor lost `tokens: (Command) -> List<ByteArray>` and
+`parse: (List<ByteArray>) -> Command`; nothing is injected in their place. Two private companion
+functions hold the framing T63 specified: `encode` is `CommandCodec.encode(command)` with no `now`
+(so a `SET`'s TTL crosses as the duration the client wrote and the coordinator decides its
+deadline), framed as `byteArrayOf(op) + body`; `decode` is
+`CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()`. `single` is not a bet:
+only a `SET` the log wrote with a decided deadline decodes to two commands, and a forward passes
+no `now`.
+
+`coordinate`'s `runCatching` stayed. An unreadable forward is now impossible between peers of this
+build - the codec wrote it, so the codec reads it - but a corrupted envelope or an older peer's
+tokens still arrive as an empty or unknown-op `command` field, and a throw on the demux would
+leave `run` dead and take the node's gossip down with its forwarding. The guard is cheap and the
+failure it prevents is the whole node.
+
+**What was deleted, and what was not.** Deleted: the two constructor parameters and the two
+arguments at each of the three call sites (`ClusterNode`, the kit's `InProcessCluster`,
+`RouterTest`).
+
+**`commandToTokens` is still alive, and its remaining caller is `Replication`.** The ticket allowed
+either deletion or a named caller; this is the named caller.
+`dynacache-server/.../ClusterNode.kt` still passes `tokens = ::commandToTokens, parse = ::parse` to
+the `Replication` constructor, and `Replication` still spells a `Replicate` and a `Read` in RESP
+tokens (`Replication.kt:131` and `:154`). The same holds for the test kit's `TokenCodec`: the kit's
+`InProcessCluster` still hands it to `Replication` and to `seed`, and `DistributedSnapshotTest`,
+`ReadRepairTest` and `ReplicationTest` still use it. T65 moves replicates onto the codec and both
+files go then. `CommandTokensTest` in the server module is untouched and still passes.
+
+**Tests.** `forward_round_trips_every_keyed_variant` in
+`dynacache-cluster/src/test/kotlin/dynacache/cluster/RouterTest.kt`: 38 keyed variants and all 4
+fanned ones, run in an order that builds the string, hash, list and sorted-set keys before it
+reads them, each once through the key's coordinator and once through a node that has to forward,
+asserted equal. The conditional `SET` with a TTL is the first sample; the multi-key read is
+`MGET`. Two guards keep the equality from being vacuous: the direct run must not answer an error
+(two matching "unreadable forwarded command" replies would otherwise pass), and a fanned sample's
+keys must all share a coordinator, which the `{multi}` hash tag gives them, so the direct run
+forwards nothing at all. A `classify` function with a `when` exhaustive over `Command` stops the
+build when a variant is added to the engine.
+
+Counts: engine 158, cluster 86 to 87, cp 95, server 100, all green. Diff 6 files, +233/-27.
+
+**Deviation 1: the round-trip test builds its own routers rather than using `InProcessCluster`.**
+The kit puts `Replication` under every router, and `Replication.write` calls `tokens(...)`
+eagerly, before the quorum, so even at n=1/w=1 a forwarded `APPEND`, `PERSIST`, `HMSET`, `HDEL`,
+`LSET`, `LREM`, `POP`, `ZINCRBY` or `ZREM` dies in the test kit's `TokenCodec`, which knows six
+writes. Growing that codec to 38 variants is exactly the RESP re-encoding this ticket removes and
+T65 deletes, so the test builds three routers straight over three `ApEngine`s on one
+`InMemoryTransport` instead - about 35 lines, an inner class in `RouterTest`. That is also the
+honest seam for this ticket: what it asserts is the forward's own round trip, with nothing under
+it. The four existing router tests still run through the kit, unchanged.
+
+**Deviation 2: `router_unreadable_forward_is_an_error_and_the_node_lives` changed its garbage.**
+It sent the RESP token `NOSUCH`, which no longer has a field to sit in. It now sends op code 99,
+which no command has. The test's name, shape and claim are unchanged; only the spelling of
+"unreadable" moved with the envelope.
+
+**Also touched:** `GrpcTransportTest`'s one-envelope-per-oneof-case fixture built its `Forward`
+with `addAllToken`; it now carries `GET k` as the codec writes it. No assertion changed.
+
+**For the next ticket (T65).**
+
+- `Replication`'s `tokens`/`parse` parameters and `Replication.decided()` are what is left. The
+  same two-line framing this ticket put in `Router`'s companion (`byteArrayOf(op) + body`, and
+  `decode(bytes[0], rest).single()`) is what a `Replicate` and a `Read` need. When T65 writes the
+  second copy, lifting both onto `CommandCodec` as a framed pair is worth it; one copy did not
+  justify it.
+- A `Replicate` differs from a forward in one way that matters: it passes `encode` the
+  coordinator's `now`, which is the same decision as the message's `expiresAtMillis` field, and a
+  `SET` with a deadline then decodes to two commands, so `single()` is wrong there and the list is
+  the point.
+- Deleting `commandToTokens` (`dynacache-server/.../CommandTokens.kt`) and its
+  `CommandTokensTest`, and the kit's `TokenCodec.kt`, falls out of T65 once `Replication` and
+  `InProcessCluster.seed` stop calling them. Nothing else references either file.
+
+---
+
+## T55 - A snapshot-set part is a persist adapter
+
+The cluster module no longer touches the filesystem. A node's part of a snapshot set is written
+and read by `SnapshotParts` in `dynacache.engine.persist`, and `DistributedSnapshot` keeps only
+the marker rules and the channel bookkeeping. Plan 2.2's rule that `java.nio.file` appears only
+in the engine's persist package and the cp module holds again for the cluster: there is no
+`java.nio.file`, `kotlin.io.path` or `java.io.File` import left under `dynacache-cluster/src/main`.
+
+### The interface
+
+`dynacache-engine/src/main/kotlin/dynacache/engine/persist/SnapshotParts.kt`, shaped after
+`DotCeilingStore` and `WalSink` in the same package. Set ids and channel names are opaque strings
+and the recorded bytes are opaque bytes, so nothing in the engine knows what a marker, an
+envelope or a protobuf is.
+
+```kotlin
+interface SnapshotParts {
+    fun cut(id: String)                                        // open this node's part, state into it
+    fun record(id: String, channel: String, bytes: ByteArray)  // append one whole record
+    fun restore(id: String)                                    // the state back into the engine
+    fun replay(id: String, channel: String): List<ByteArray>   // every whole record, in order
+    fun delete(id: String)                                     // the whole set, every node's part
+}
+```
+
+The one adapter is `FileSnapshotParts(root, self, engine, clock)`: a set is `<root>/<id>/`, a part
+is `<root>/<id>/<self>/`, its state is the T32 snapshot's `dump.rdb` in it, and a channel is
+`from-<peer>.wal` beside that.
+
+### Record format, crc and torn tail
+
+A channel log is an ordinary WAL: `WalWriter`/`WalReader` are reused as-is, so a record is the
+spec 2.8 entry `[crc32:u32][length:u32][seq:u64][op:u8][payload]` with the envelope's bytes as
+the payload. The header is not command-specific, so no new record writer was needed.
+
+- Torn tail (a crash mid-append): `WalReader` reports `TORN_TAIL` and `replay` answers every
+  whole record before it and stops. Covered by
+  `snapshot_part_with_torn_channel_log_replays_the_complete_prefix`.
+- Checksum failure: `replay` throws `IOException`. A torn tail is the shape a crash leaves at the
+  end of a file; a crc mismatch is corruption, and nothing at or past it is trusted. The old
+  delimited-protobuf loop had neither check.
+- Every record carries `seq = 0` and `op = 0`. A channel's order is its file order and nothing
+  reads the seq back, so the log is not a sequenced WAL, only a crc'd record file in the WAL's
+  format. Deliberate: reusing the writer is cheaper than a second record format.
+- A recorded envelope is **not** fsynced (`FsyncPolicy.NEVER`), which is exactly what the old
+  `Files.newOutputStream(...).use { writeDelimitedTo }` did. Recording happens on the node's
+  inbound path, and forcing the disk there would stall it.
+- A failed append is surfaced: `record` joins the append's `durable` future, because `WalWriter`
+  hands an `IOException` to that future and nowhere else, and under `NEVER` nothing later forces
+  it. Found in the code-review self-pass; without the join a full disk would silently drop an
+  in-flight envelope and break I12 with no error anywhere.
+
+### Compatibility with parts written before this ticket: **rejected, with a clear error**
+
+The channel log's name changed from `from-<peer>.log` to `from-<peer>.wal`, so an old part is
+recognisable. `restore` refuses one:
+`IOException("<path> predates the checksummed channel log and cannot be restored")`. Old records
+are length-delimited protobuf with no header and cannot be read as WAL records; restoring the
+state without them would silently drop everything that was in flight at the cut (I12), which is
+worse than refusing. `restore` runs before any `replay` on the only path that reads a part
+(`DistributedSnapshot.restoreFrom`), so no part can be half-restored. Covered by
+`a_part_written_before_the_channel_log_became_a_wal_is_rejected`.
+
+### What moved out of the cluster
+
+`DistributedSnapshot` lost its `engine`, `dir` and `clock` constructor parameters and gained
+`parts: SnapshotParts`; the class is 67 lines shorter in the diff. Gone from it: the
+`java.nio.file` imports, `Files.createDirectories`, the `SnapshotEngine` construction in `start`
+and `restoreFrom`, the delimited-protobuf append and `generateSequence { parseDelimitedFrom }`
+loop, the `deleteRecursively` in `abort`, and the `part(root, id)` path helper. What stayed: the
+marker rules, `open`/`aborted`, the `cutting` mutex and T49's cut-then-open order, the deadline
+timer, and the peer iteration on replay.
+
+`restoreFrom(from: Path, id: String)` became `restoreFrom(id: String)`. Every caller passed the
+same directory the adapter is already built on, so the parameter carried no information.
+
+T49's ordering is preserved and is now slightly stronger. The part directory used to be created
+before the `cutting` mutex was taken; `parts.cut(id)` now creates it and writes the state inside
+the mutex. Nothing can observe the gap: `record` is reachable only from `receive`, which takes
+the same mutex and iterates `open`, and `open[id]` is published inside the mutex strictly after
+`cut` returns.
+
+### Tests and counts
+
+New: `dynacache-engine/src/test/kotlin/dynacache/engine/persist/SnapshotPartsTest.kt`, six tests
+(`a_channel_replays_what_was_recorded_on_it_in_order`,
+`snapshot_part_with_torn_channel_log_replays_the_complete_prefix`,
+`a_channel_log_with_a_corrupt_record_is_rejected`, `a_part_holds_the_state_it_cut`,
+`a_set_is_deleted_as_a_whole`, `a_part_written_before_the_channel_log_became_a_wal_is_rejected`).
+
+| Module | Before | After |
+|---|---|---|
+| engine | 158 | 164 |
+| cluster | 86 | 86 |
+| cp | 102 | 102 |
+| server | 103 | 103 |
+
+Every Chandy-Lamport test passes unchanged in name and assertion: `chandy_lamport_consistent_cut`,
+`chandy_lamport_restorable`, `chandy_lamport_timeout_aborts`, `C10_marker_on_every_channel`,
+`I12_reads_after_restore_return_snapshot_time_values`, `I12_write_during_the_cut_is_restored_once`,
+`C10_state_is_cut_before_any_channel_opens`; `P4AcceptanceTest` passes.
+
+### Deviations
+
+1. **`snapshot_set_deleted_as_a_whole_on_deadline` does not exist and was not added.** The ticket
+   names it; no test under that name has ever existed. The deadline-abort test that must keep
+   passing is `chandy_lamport_timeout_aborts` (`DistributedSnapshotTest`), and it does, asserting
+   that `<dir>/s1` is gone after the deadline. The new unit-level `a_set_is_deleted_as_a_whole`
+   covers `delete` itself, without a deadline.
+2. **`SnapshotParts` is a seam with one adapter, which plan 2.1 forbids** ("A seam exists only
+   where a second adapter is real, and every seam has one in the test kit"). Built as an interface
+   because the ticket and the orchestrating brief both name an interface as the deliverable, and
+   the concrete `FileSnapshotParts` would satisfy plan 2.2 on its own. Collapsing the interface
+   into the class is a one-line change at five call sites if the plan's rule is meant to win.
+3. **The cluster test helper `recorded` reads a part's records through the adapter but still
+   finds its channels by listing `from-*.wal`.** The code-review self-pass called the glob
+   coupling to a layout the adapter now owns and suggested deriving the channels from the set's
+   node list instead. That was tried and is wrong: a peer whose envelopes were recorded need not
+   have a part of its own, which is exactly the `Lone` node in
+   `C10_state_is_cut_before_any_channel_opens` and `I12_write_during_the_cut_is_restored_once`,
+   and the refactor made that test read an empty channel map. Which channels a part recorded is a
+   fact only the files hold. Reverted, with the reason written into the helper's KDoc. If the
+   coupling is worth removing later, the adapter needs a `channels(id)` listing, which the ticket
+   did not ask for and nothing in main sources needs.
+
+### For the next ticket (T66)
+
+1. **A distributed snapshot rotates the node's live WAL into the snapshot part, and an abort
+   deletes it.** Pre-existing since T36 and moved verbatim here, not introduced by T55, but
+   `FileSnapshotParts.cut` now owns the line. `SnapshotEngine.save()` calls `cut()`, which does
+   `wal.rotate(FileChannelSink(logFile(seq)))` with `logFile` resolved under the **part**
+   directory. On a node with both `dataDir` and `snapshotDir` (which is how `clusterMain` wires
+   every persisting node: `snapshotDir = dataDir.resolve("snapshots")`) the live WAL therefore
+   continues inside the snapshot part, and `DistributedSnapshot.abort` `deleteRecursively`s the
+   set at the deadline, taking the open log file with it. Every write acked after the cut is then
+   unrecoverable on restart, since recovery reads `dataDir` only. C14 and spec 2.8's recovery
+   sequence. Not fixed here: the fix is in `SnapshotEngine`'s save/rotate contract, outside this
+   ticket's seams. No test covers it because no test wires `dataDir` and `snapshotDir` together
+   and then aborts.
+2. **A snapshot id arrives on a marker from the wire and becomes a path segment unchecked.**
+   `envelope.marker.snapshotId` reaches `root.resolve(id)` in `FileSnapshotParts`, and `abort`
+   turns that into `deleteRecursively`. Pre-existing and identical before T55. Not fixed here: a
+   bare `require` would swap a traversal for a node kill, because `Router.run` has no per-envelope
+   catch by design, so the real fix is for the marker path to ignore an unusable id, and the brief
+   put the marker protocol off-limits. Worth a ticket: validate in the adapter and have
+   `DistributedSnapshot.receive` drop a marker whose id the adapter refuses.
+3. Restoring an id that was never cut is a silent no-op that leaves the engine empty
+   (`SnapshotEngine.restore` on a missing `dump.rdb`). `ClusterNode.restoreSnapshot("typo")`
+   therefore empties a node without complaint.
+
+---
+
+## T71 - One home for the cp: namespace rule
+
+The rule "is this a CP key, which primitive kind owns it, and which Redis commands may touch it"
+was written in four modules with five `-NOTCP` literals, the reference prefix was known only to
+the dispatcher, and the compat re-target undid the parser: an `EXPIRE` became an instant from the
+parser's clock and a span again from the dispatcher's. It is now one module in the engine, beside
+`Command.Cp`, and every other site reads it.
+
+### The rule and where it lives
+
+`dynacache-engine/src/main/kotlin/dynacache/engine/CpNamespace.kt` (~215 lines), three
+declarations:
+
+- `enum class CpKind(prefix)` - `COUNTER("cp:counter:")`, `LOCK("cp:lock:")`,
+  `SEMAPHORE("cp:sem:")`, `LATCH("cp:latch:")`, `REFERENCE("cp:ref:")`, `SESSION("cp:session")`,
+  `UNTYPED("cp:")`, the sub-namespaces of CP spec 2 in declaration order so `cp:` is read last and
+  never hides a longer prefix.
+- `sealed interface CpRouting` - `Ap` (names no `cp:` key), `Verb(Command.Cp)` (the CP verb this
+  command means), `Refused(Reply.Error)`.
+- `object CpNamespace` with six public members: `kindOf(Key): CpKind?`, `owns(Key): Boolean`,
+  `kindOf(Command.Cp): CpKind?`, `refusalFor(Command.Cp): Reply.Error?`, `route(Command):
+  CpRouting`, `expiry(Key, Duration): CpRouting`, plus `notCp(message)`, `keysOf(command)` and
+  `COMPAT`.
+
+`route` is total and is the whole of CP spec 9.5's three rules in order. `refusalFor` is the edge
+both CP engines check. `expiry` is the parser's, and is the only entry that takes a span, because
+a span is what the CP log evaluates against log time (CP spec 5).
+
+`COMPAT` is CP spec 9.5's fifteen names written once, as the command classes those names parse to
+(`SETEX` and `SETNX` both parse to `Command.Set`, `DECR` and `INCRBY` to `Command.IncrBy`), so the
+set is one declaration rather than fifteen. It earns its keep in production: a refusal inside the
+set reads "no CP verb answers this command yet" (`DEL`, `EXISTS`, `TYPE`) and one outside it reads
+"this is not a command it accepts" (`LPUSH`, `STRLEN`).
+
+### Sites that now read it, literals deleted
+
+| Site | Before | After |
+|---|---|---|
+| `CommandDispatcher.kt` | 145 lines: `isCpKey`, `keysOf`, `compat`, `Rejected`, `refuse`, `notAnInteger`, `asLong`, `REFERENCE_PREFIX`, a `Clock` | 55 lines: one `when` over `CpRouting`, no clock |
+| `CpEngine.submit` | two `Reply.Error("NOTCP", ...)`, own `Key.isCp()` | `CpNamespace.notCp` + `refusalFor` |
+| `ForwardingCpEngine.submit` | two `Reply.Error("NOTCP", ...)`, own `Key.isCp()` | `CpNamespace.notCp` + `refusalFor` |
+| `CommandEngine.submit` (AP) | one `Reply.Error("NOTCP", ...)` | `CpNamespace.notCp` |
+| `CommandParser` | built `Command.Expire` for every key | emits the CP verb for a `cp:` key |
+| `DynaCacheServer` | `CommandDispatcher(ap, cp, clock)`, server-local `keysOf` | `CommandDispatcher(ap, cp)`, `CpNamespace::keysOf` |
+
+Deleted: five `Reply.Error("NOTCP", ...)` literals (one producer remains, `CpNamespace.notCp`);
+three copies of `startsWith("cp:")` (`Key.isCp()` twice, `Key.isCpKey()` once); the dispatcher's
+`REFERENCE_PREFIX` and its private `Rejected` control-flow exception; the server's `keysOf`.
+
+### The parser decision: emit the CP verb, leave the refusal
+
+The parser emits CP verbs for `cp:` keys, as the ticket asks. It is done in two places:
+
+1. `parse` runs `cpVerb(dispatch(...))`, one line reading `CpNamespace.route`, which covers `GET`,
+   `SET`/`SETEX`/`SETNX`, the `INCR` family, `TTL`/`PTTL` and `PERSIST`.
+2. the four expiry spellings call `CpNamespace.expiry(key, ttl)` **before** an instant exists, so
+   `EXPIRE cp:counter:x 10` becomes `LongExpire(key, PT10S)` with no instant in between.
+
+A command the namespace **refuses** is deliberately left as it parsed and refused by the
+dispatcher. Refusing at parse time would turn an execution error into a parse error, and a parse
+error aborts an enclosing `MULTI` with `EXECABORT` where an execution error does not. That is a
+semantic change this ticket has no business making, so the refusal stayed where it was.
+
+The round trip is gone: the dispatcher has no `Clock` parameter any more, which is the mechanical
+proof. `EXPIRE`/`PEXPIRE` cost one clock read in the parser, and it is the overflow guard rather
+than a conversion: a span no clock can hold is still Redis's `invalid expire time` for a `cp:` key
+too, before the CP log has to add it to log time. `EXPIREAT`/`PEXPIREAT` cost the same one read,
+for the absolute-to-span conversion the wire genuinely requires.
+
+### The kind-mismatch decision: `-WRONGTYPE`, from CP spec 6.8
+
+CP spec 9.4 does not name a reply; it says only that "`EXPIRE` on a `cp:lock:*` key is rejected"
+(line 356). The reply is named one section earlier, in the error table of CP spec 6.8 (line 279):
+
+> `-WRONGTYPE` | Key exists as different primitive (e.g., LOCK on AtomicLong key)
+
+CP spec 2 (line 104) makes the sub-namespace the thing that says which primitive a key is. Putting
+the two together: **a verb of one kind aimed at a key of another kind is `-WRONGTYPE`**, whether it
+is spelled as a CP verb (`CP.LONG.INCR cp:lock:x`) or as the Redis command the compat set maps to
+one (`GET cp:lock:x`, `EXPIRE cp:lock:x`, `INCR cp:ref:r`). Decided once, in `CpNamespace`, rather
+than differently per verb.
+
+Three boundaries of that decision, all deliberate:
+
+- **A command outside the compat set stays `-NOTCP`, whatever kind owns the key.** CP spec 9.5
+  rule 2 is explicit that the `cp:` namespace only accepts the compat set, so `LPUSH cp:lock:x`
+  and `TYPE cp:lock:x` are commands aimed at no primitive rather than at the wrong one. Only the
+  six value verbs the counter and the reference share (`GET`, `SET`, the `INCR` family, `EXPIRE`,
+  `TTL`, `PERSIST`) can be aimed at the wrong primitive, and only those answer `-WRONGTYPE`.
+  (The first cut of this ticket had the mismatch swallow the whole else-branch; the code-review
+  pass caught it against spec 9.5 and it is now one line, `else -> refused(command)`.)
+
+- **An untyped `cp:` key is nobody's in particular.** `cp:x` is `CpKind.UNTYPED` and the counter
+  answers it, exactly as before this ticket. The mismatch check fires only when the key's kind is
+  one a primitive claims. Making unknown prefixes an error would reject `CP.LONG.INCR cp:x`, which
+  works today and which CP spec 2 permits ("conventionally prefixed").
+- **The check is on the key's sub-namespace, not on the key's existence.** CP spec 6.8 says "key
+  exists as different primitive"; nothing tracks per-key existence across state machines and this
+  ticket may not change them. The prefix is the spec's own way of saying which primitive a key is,
+  so it is what the check reads. This also closes the `ponytail:` comment the dispatcher carried
+  since T44: `GET cp:lock:x` no longer reads an empty counter, and `EXPIRE cp:lock:x` no longer
+  answers 0.
+
+This fixes the class of bug ticket 54 fixed, at its root: `INCR cp:ref:r` used to become
+`LongIncrBy` on a reference key because only `GET`/`SET`/`EXPIRE`/`TTL`/`PERSIST` consulted the
+reference prefix. There is now one lookup, so a verb cannot consult it for some commands and not
+others.
+
+### Tests
+
+New, `dynacache-engine/src/test/kotlin/dynacache/engine/CpNamespaceTest.kt` (9):
+`cp_kind_lookup_covers_every_prefix` (every prefix, and every enum entry reachable from a key, so
+no prefix is written twice or hidden), `C16_a_cp_verb_outside_the_cp_namespace_is_notcp`,
+`a_verb_of_one_kind_on_a_key_of_another_is_wrongtype`,
+`the_untyped_and_typed_counter_keys_read_the_same_verbs`,
+`the_reference_answers_its_own_value_and_ttl_verbs`, `a_plain_key_is_the_ap_engines`,
+`C16_a_fanned_command_naming_a_cp_key_is_refused_whole`,
+`a_command_no_cp_primitive_answers_is_notcp_whatever_the_kind`,
+`a_counter_takes_a_number_or_the_error_redis_gives_for_one`.
+
+New, `CommandParserTest` (3): `compat_set_matches_cp_spec_9_5` (each of the fifteen names parses
+to a class in `COMPAT`, and `LPUSH`/`STRLEN`/`APPEND`/`HSET`/`MGET` do not),
+`the_parser_emits_cp_verbs_for_cp_keys`, `a_refused_cp_command_is_left_for_the_dispatcher`.
+
+New, `CommandDispatcherTest` (1): `a_kind_mismatch_on_a_cp_key_is_wrongtype`.
+
+Moved: the two `Command.Expire` rows of `the compat set reaches the CP engine as the verb it
+means` are now the parser's, because the dispatcher no longer sees an `Expire` on a `cp:` key.
+`I22_namespaces_never_cross`, `C16_ap_engine_never_sees_cp_key`,
+`C22_no_cross_engine_state_leakage`, `compat_conditional_set_retargets_to_the_kinds_set_verb` and
+every `CpRoutingTest`, `CpSessionLifecycleTest` and P5 acceptance test are unchanged and green.
+
+Counts: engine 158 -> 167, cluster 86 -> 86, cp 102 -> 102, server 103 -> 107 (462 total, all
+green). Diff: 569 insertions, 147 deletions across 11 files, two of them new; the dispatcher alone
+is net -69.
+
+`CpSnapshotTest.lagging_member_is_brought_up_by_snapshot` failed once during a whole-repo run and
+passed on its own immediately after. It asserts that a restarted member's `lastSnapshotIndex` has
+caught up, which is MicroRaft install-snapshot timing; three other Maven builds were running on
+the machine at the time. Not touched by this ticket and green in every isolated run.
+
+### Deviations
+
+1. **The refusal did not move to the parser** (above): a parse error aborts a `MULTI` and an
+   execution error does not, and the ticket's seam list does not include `MULTI` semantics. The
+   parser emits every CP verb it can build; it never refuses.
+2. **`DEL`, `EXISTS` and `TYPE` still answer `-NOTCP` on a `cp:` key**, though CP spec 9.5 lists
+   them in the compat set. No CP primitive answers them and adding three CP verbs is another
+   ticket; the refusal now says so in as many words ("no CP verb answers this command yet"), and
+   `COMPAT` records that they are in the set. Behaviour is unchanged from before this ticket.
+3. **`DynaCache/CONTEXT.md` gained a "Namespace rule" and a "CP kind" entry** and lost the
+   dispatcher's claim to the re-target, since the rule moved out from under it.

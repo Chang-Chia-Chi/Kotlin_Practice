@@ -129,13 +129,20 @@ message Repair {
   repeated string target = 2;
 }
 
-// A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are
-// the client's own frame, so the coordinator's parser reads them exactly as the contact's
-// would have and no second encoding of a command exists.
+// A command a contact node hands to the key's coordinator (spec 5.1 step 3). It crosses in the
+// engine's own encoding, not the client's RESP frame: RESP is the server module's business and
+// stops at the node the client reached, and a command the codec wrote is a command the
+// coordinator can read.
 message Forward {
   // Unique per sending router; the ForwardReply carries it back so the request finds its future.
   int64 id = 1;
-  repeated bytes token = 2;
+  // The engine command codec's bytes, op code first (T64): `CommandCodec.encode(command)` with no
+  // `now`, so a `SET`'s TTL crosses as the duration the client wrote and the coordinator decides
+  // its deadline. Tag 2 was the RESP tokens this replaced; nothing persists a Forward, and both
+  // ends of the wire are this repository, so the old field is gone rather than deprecated.
+  reserved 2;
+  reserved "token";
+  bytes command = 3;
 }
 
 // The coordinator's answer to a Forward, under the same id.

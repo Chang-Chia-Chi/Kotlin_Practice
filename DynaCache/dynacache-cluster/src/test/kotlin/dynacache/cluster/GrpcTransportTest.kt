@@ -91,7 +91,9 @@ class GrpcTransportTest {
             Envelope.BodyCase.ACK -> envelope.setAck(Ack.newBuilder().setSeq(7))
             Envelope.BodyCase.PING_REQ -> envelope.setPingReq(PingReq.newBuilder().setSeq(7).setTarget("charlie"))
             Envelope.BodyCase.FORWARD -> envelope.setForward(
-                Forward.newBuilder().setId(7).addAllToken(listOf("GET", "k").map(ByteString::copyFromUtf8))
+                // `GET k` as the engine codec writes it: op code 18, then the key length-prefixed.
+                Forward.newBuilder().setId(7)
+                    .setCommand(ByteString.copyFrom(byteArrayOf(18, 0, 0, 0, 1, 'k'.code.toByte())))
             )
             Envelope.BodyCase.FORWARD_REPLY -> envelope.setForwardReply(
                 ForwardReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK"))

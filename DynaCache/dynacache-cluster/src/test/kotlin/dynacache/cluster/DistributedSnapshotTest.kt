@@ -7,8 +7,7 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
-import dynacache.engine.persist.SnapshotEngine
-import java.nio.file.Files
+import dynacache.engine.persist.FileSnapshotParts
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
@@ -80,7 +79,7 @@ class DistributedSnapshotTest {
         // Write 3 is issued after the snapshot completed.
         assertEquals(ok, cluster.writeVia(cluster.nodes[2], keys[2], "3".toByteArray()))
 
-        val parts = recorded(dir.resolve("s1"))
+        val parts = recorded("s1")
         val tags = parts.values.flatMap { it.state + it.channels.values.flatten() }.toSet()
         assertFalse(3 in tags, "a write after the snapshot is not in it: $parts")
         for (tag in tags) assertTrue(tags.containsAll((1 until tag).toList()), "tag $tag without its predecessors: $parts")
@@ -109,7 +108,7 @@ class DistributedSnapshotTest {
         cluster.close()
 
         val restored = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
-        restored.nodes.forEach { restored.snapshot(it).restoreFrom(dir, "s1") }
+        restored.nodes.forEach { restored.snapshot(it).restoreFrom("s1") }
         restored.drainMessages()
         for (node in restored.nodes) {
             assertEquals(Reply.Bulk("1".toByteArray()), restored.readVia(node, keys[0]), "k1 via $node")
@@ -181,7 +180,7 @@ class DistributedSnapshotTest {
         cluster.close()
 
         val restored = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
-        restored.nodes.forEach { restored.snapshot(it).restoreFrom(dir, "s1") }
+        restored.nodes.forEach { restored.snapshot(it).restoreFrom("s1") }
         restored.drainMessages()
         for (node in restored.nodes) {
             assertEquals(Reply.Bulk("1".toByteArray()), restored.readVia(node, keys[0]), "k1 (overwritten after) via $node")
@@ -215,7 +214,7 @@ class DistributedSnapshotTest {
         node.close()
 
         val restored = Lone(clock, backgroundScope)
-        restored.snapshot.restoreFrom(dir, "s1")
+        restored.snapshot.restoreFrom("s1")
         assertEquals(one, restored.engine.submit(Command.Get(counted)).await(), "restored once: from the state or the channel log, not both")
         restored.close()
     }
@@ -232,13 +231,13 @@ class DistributedSnapshotTest {
         assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
         val delivery = launch { node.demux(incr) }
         runCurrent()
-        val logs = dir.resolve("s1").resolve(self.name).listDirectoryEntries("from-*.log")
+        val logs = dir.resolve("s1").resolve(self.name).listDirectoryEntries("from-*.wal")
         assertEquals(emptyList<Path>(), logs, "no channel is open while the state is being cut")
         gate.release.countDown()
         delivery.join()
         initiate.join()
         node.close()
-        val part = recorded(dir.resolve("s1")).getValue(self)
+        val part = recorded("s1").getValue(self)
         assertEquals(Part(emptySet(), mapOf(peer to setOf(1))), part, "delivered during the cut: on the channel, not in the state")
     }
 
@@ -261,7 +260,8 @@ class DistributedSnapshotTest {
     private inner class Lone(snapshotClock: Clock, scope: CoroutineScope) {
         val engine = ApEngine(1, clock)
         val snapshot = DistributedSnapshot(
-            self, listOf(peer), engine, InMemoryTransport().endpoint(self), dir, snapshotClock,
+            self, listOf(peer), InMemoryTransport().endpoint(self),
+            FileSnapshotParts(dir, self.name, engine, snapshotClock),
             demux = ::demux, scope = scope, deadline = Duration.INFINITE,
         )
 
@@ -302,25 +302,30 @@ class DistributedSnapshotTest {
         error("nothing was sent")
     }
 
-    /** Every node's part of the snapshot set under [snapshot], read back from its files. */
-    private fun recorded(snapshot: Path): Map<NodeId, Part> = snapshot.listDirectoryEntries().associate { node ->
+    /**
+     * Every node's part of snapshot set [id]: its state and its channels through the persist
+     * adapter, the set's own directory listed for the parts. Which channels a part recorded is
+     * a fact only the files hold -- a peer whose envelopes were recorded need not have a part
+     * of its own -- so the log names are read here and the records through [SnapshotParts].
+     */
+    private fun recorded(id: String): Map<NodeId, Part> = dir.resolve(id).listDirectoryEntries().associate { partDir ->
+        val node = NodeId(partDir.name)
         val scratch = ApEngine(1, clock)
-        SnapshotEngine(scratch, node, clock).restore()
+        val parts = FileSnapshotParts(dir, node.name, scratch, clock)
+        parts.restore(id)
         val keys = scratch.submit(Command.Keys("*".toByteArray())).get() as Reply.Array
         val state = keys.items.map { key ->
             val value = scratch.submit(Command.Get(Key((key as Reply.Bulk).bytes!!))).get() as Reply.Bulk
             value.bytes!!.decodeToString().toInt()
         }
         scratch.close()
-        val channels = node.listDirectoryEntries("from-*.log").associate { log ->
-            val tags = Files.newInputStream(log).use { input ->
-                generateSequence { Envelope.parseDelimitedFrom(input) }
-                    .filter { it.hasReplicate() }
-                    .map { it.replicate.getToken(2).toStringUtf8().toInt() }
-                    .toSet()
-            }
-            NodeId(log.name.removeSurrounding("from-", ".log")) to tags
+        val channels = partDir.listDirectoryEntries("from-*.wal").associate { log ->
+            val peer = NodeId(log.name.removeSurrounding("from-", ".wal"))
+            peer to parts.replay(id, peer.name).map { Envelope.parseFrom(it) }
+                .filter { it.hasReplicate() }
+                .map { it.replicate.getToken(2).toStringUtf8().toInt() }
+                .toSet()
         }
-        NodeId(node.name) to Part(state.toSet(), channels)
+        node to Part(state.toSet(), channels)
     }
 }

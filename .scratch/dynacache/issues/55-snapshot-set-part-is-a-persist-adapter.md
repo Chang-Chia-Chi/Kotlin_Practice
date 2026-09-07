@@ -13,16 +13,16 @@ only in the engine's persist package and the cp module holds again for the clust
 
 **Nature:** file format and crash recovery of the file (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 0b575eeb, merged into misc/ai_gen; old parts rejected with a named error; three follow-ups ticketed as 74 to 76)
 
-- [ ] No `java.nio.file` import remains under the cluster module's main sources
-- [ ] `snapshot_part_with_torn_channel_log_replays_the_complete_prefix`: a channel log cut
+- [x] No `java.nio.file` import remains under the cluster module's main sources
+- [x] `snapshot_part_with_torn_channel_log_replays_the_complete_prefix`: a channel log cut
       mid-record replays every complete record and stops cleanly
-- [ ] `snapshot_set_deleted_as_a_whole_on_deadline` and every existing Chandy-Lamport and P4
+- [x] `snapshot_set_deleted_as_a_whole_on_deadline` and every existing Chandy-Lamport and P4
       acceptance test pass unchanged
-- [ ] Restoring a part written before this ticket is either supported or rejected with a
+- [x] Restoring a part written before this ticket is either supported or rejected with a
       clear error; the progress entry says which
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

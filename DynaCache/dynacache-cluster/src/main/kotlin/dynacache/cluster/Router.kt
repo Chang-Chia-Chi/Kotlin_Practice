@@ -13,6 +13,7 @@ import dynacache.engine.CommandEngine
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
+import dynacache.engine.persist.CommandCodec
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -26,8 +27,9 @@ import kotlinx.coroutines.launch
  * One node's request router (spec 5.1 steps 1 to 3, 5.2 step 1). It presents the
  * `CommandEngine` shape, so the node's RESP pipeline submits to it exactly as it submits to an
  * engine, and it decides one thing: whether this node is the key's **coordinator**. If it is,
- * the command runs on [local]; if it is not, the command's tokens cross to the coordinator as a
- * `Forward` and its answer comes back as a `ForwardReply`, unchanged, errors included.
+ * the command runs on [local]; if it is not, the command crosses to the coordinator as a `Forward`
+ * carrying the engine codec's bytes, and its answer comes back as a `ForwardReply`, unchanged,
+ * errors included. No RESP spelling of a command crosses the cluster seam (T64).
  *
  * It is not the **dispatcher** (CONTEXT.md), which chooses between the AP and the CP engine by
  * namespace; the router sits under that choice and moves one command between nodes.
@@ -38,8 +40,6 @@ import kotlinx.coroutines.launch
  * `Swim::deliver`, composed by whoever wires the node.
  *
  * @param local the engine that runs a command this node coordinates.
- * @param tokens the wire form of a command: what a client would have sent for it.
- * @param parse the inverse, applied to the tokens a peer forwarded.
  * @param scope the node's lifecycle scope; a forward and its deadline live on it.
  * @param deadline how long a forward may take before its future answers with an error.
  * @param others where every envelope that is not a forward goes.
@@ -51,8 +51,6 @@ class Router(
     private val n: Int,
     private val local: CommandEngine,
     private val transport: Transport,
-    private val tokens: (Command) -> List<ByteArray>,
-    private val parse: (List<ByteArray>) -> Command,
     private val scope: CoroutineScope,
     private val deadline: Duration = 2.seconds,
     private val others: suspend (Envelope) -> Unit = {},
@@ -122,8 +120,9 @@ class Router(
 
     /**
      * This node is the coordinator: run what [from] forwarded and answer under the same id.
-     * Tokens this node cannot read are an error reply rather than a throw, because the throw
-     * would leave [run] dead and take the node's gossip down with its forwarding.
+     * A forward the codec cannot read is an error reply rather than a throw, because the throw
+     * would leave [run] dead and take the node's gossip down with its forwarding. A peer of this
+     * build cannot write one; a corrupted or older envelope can, and that is what this catches.
      *
      * Each forwarded command runs on its own coroutine on [scope]: the coordinator's answer needs
      * the demux to keep reading, since its quorum's acks and read replies arrive there (T22).
@@ -132,7 +131,7 @@ class Router(
      * a per-sender queue of forwards is the repair if a pipelining client ever observes it.
      */
     private suspend fun coordinate(from: NodeId, request: Forward) {
-        val reply = runCatching { parse(request.tokenList.map(ByteString::toByteArray)) }.fold(
+        val reply = runCatching { decode(request.command.toByteArray()) }.fold(
             { local.submit(it).await() },
             { Reply.Error("ERR", "unreadable forwarded command: ${it.message}") },
         )
@@ -148,7 +147,7 @@ class Router(
         val id = ids.incrementAndGet()
         val answer = CompletableFuture<Reply>()
         pending[id] = answer
-        val body = Forward.newBuilder().setId(id).addAllToken(tokens(command).map(ByteString::copyFrom))
+        val body = Forward.newBuilder().setId(id).setCommand(ByteString.copyFrom(encode(command)))
         scope.launch {
             send(coordinator, Envelope.newBuilder().setForward(body))
             // The same coroutine is the deadline and the cleanup: an answer that arrived took
@@ -163,6 +162,23 @@ class Router(
 
     private suspend fun send(to: NodeId, envelope: Envelope.Builder) =
         transport.send(to, envelope.setFrom(self.name).setTo(to.name).build())
+
+    private companion object {
+
+        /** The codec's op code and body, concatenated: the one framing a `Forward` uses. */
+        fun encode(command: Command): ByteArray {
+            val (op, body) = CommandCodec.encode(command)
+            return byteArrayOf(op) + body
+        }
+
+        /**
+         * The inverse. `single` is not a bet: only a `SET` the log wrote with a decided deadline
+         * decodes to two commands, and a forward passes the codec no `now`, so it never carries
+         * one. A forward that did would be a bug worth an error reply rather than a silent half.
+         */
+        fun decode(bytes: ByteArray): Command =
+            CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()
+    }
 }
 
 /**
