@@ -3,10 +3,11 @@
 Measured by `DynaCache/bench/single-node.sh` with `SECTIONS=t78`. Every number is a value
 `redis-benchmark --csv` printed; nothing is rounded, averaged or adjusted.
 
-**The ratios are the result. The absolute rates are provisional.** Every pass ran on a machine
-that could not pass the quiet gate, and says so in its own row. Both sides were measured minutes
-apart in one window under the same recorded load, which is what makes a ratio survive here where
-a rate does not.
+**The ratios are the result. The absolute rates are provisional.** Both sides were measured
+minutes apart in one window under the same recorded load, which is what makes a ratio survive
+where a rate would not. Every pass is stamped as contended because the gate allows no foreign
+JVM and one idle daemon cannot exit; the machine itself sat at 91 to 98 percent idle for all but
+the first pass. See the environment section.
 
 ## What is compared
 
@@ -95,19 +96,32 @@ tell a prediction from a rationalisation.**
 | before run | 2026-09-07T12:57:20Z, commit `d24c4699` |
 | after run | 2026-09-07T13:11:08Z, commit `1add9a48` |
 
-**Every pass ran contended and every pass says so.** Load recorded per pass: one other Java
-process throughout, an IntelliJ Maven daemon, and CPU idle between 63 and 97 percent, most passes
-above 92. Docker Desktop was also running a three-container kind cluster. The gate's floor is 70
-percent idle with an allowance of one Java process, so every pass is stamped
-`NO_TAKEN_UNDER_CONTENTION`: the machine cannot pass that gate unless the user shuts down their
-own tooling, which is not this ticket's to require.
+**Every pass is stamped `NO_TAKEN_UNDER_CONTENTION`, and the label overstates it.** The gate
+allows zero foreign JVMs, and one cannot exit: an IntelliJ Maven daemon the user owns. So the
+label reports that one idle daemon exists, not that the machine was loaded. The idle figures
+beside it are the real conditions.
+
+| | |
+|---|---|
+| other Java processes | 1 on every pass, the IDE Maven daemon, idle |
+| CPU idle, kept run | 78% on the first pass of the sequence, 91 to 98% on the other sixteen |
+| also running | Docker Desktop with a three-container kind cluster |
+
+**An earlier attempt was abandoned, not averaged in.** A reactor build from another session
+overlapped it. A build that spans some passes and not others is a step change, and an A, A, B, B
+design cannot tell a step change from a real effect, so those passes were discarded rather than
+annotated. The run kept here was taken with that session's build queue parked.
+
+That also corrects a figure this report carried earlier. CPU idle was sampled at 23 to 52 percent
+while diagnosing the machine and called the floor; it was measured while those builds were
+running, so it described the builds. The floor with everything parked is the high nineties, which
+is what the kept run ran at.
 
 Run with `QUIET_BUDGET` at 45 seconds, not the default 600. The gate waits that long per pass
 before giving up and running anyway, so on a busy machine the default costs ten minutes a pass to
-reach a number that is stamped contended regardless. A first attempt at this measurement spent
-ten minutes in the gate and took no reading at all. A minute catches a machine that is briefly
-busy and hands the window back while it is still worth having. Recommended for whoever measures
-next.
+reach a number that is stamped contended regardless. The abandoned attempt spent ten minutes in
+the gate and took no reading at all. A minute catches a machine that is briefly busy and hands
+the window back while it is still worth having. Recommended for whoever measures next.
 
 ## Pass 1: NEVER, plain and pipelined, `-t set,incr,hset,zadd`
 
@@ -131,10 +145,12 @@ Pipelined `-P 16`, requests per second:
 
 **Null.** The plain pass's own before-side spread is 25 to 28 percent against a before-to-after
 difference of 9 to 14 percent, so the difference is inside the band by a factor of two. The
-before samples do not straddle the after samples, but only because before A alone is low: it ran
-first, on a cold JVM and a cold page cache, immediately after a Maven build. The pipelined pass
-settles it. Its band is 1.2 percent, and there the change measures between -4.3 and +0.1 percent,
-with the four tests disagreeing on the sign.
+before samples do not straddle the after samples, but only because before A alone is low, and
+that row is the least trustworthy in the report: it is the first pass of the whole sequence, on a
+cold JVM and a cold page cache, and it is the one pass that ran at 78 percent idle rather than
+above 91. The conclusion does not rest on it. The pipelined pass settles it: its band is 1.2
+percent, and there the change measures between -4.3 and +0.1 percent, with the four tests
+disagreeing on the sign.
 
 This is prediction 1 landing. The reused buffer removes one allocation and one copy per batch
 from a path that ends in a file write, and that is not visible against a syscall. Nothing is
