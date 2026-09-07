@@ -62,6 +62,16 @@ tell a prediction from a rationalisation.**
    pair is the characterisation. Near one at fifty clients, the deadline does not bind; far below
    one at one client, it does. The single-client pass is there for that, not a stray
    low-concurrency data point.
+
+   **The single-client p50 decides between the two ways that ratio can come back near one**, where
+   the rate cannot. A writer that genuinely waits for the deadline has a p50 of at least the
+   deadline, about 2 ms plus the round trip. A writer whose force fires at once, because the
+   post-batch check in `flushIfIdle` finds the previous batch already past its deadline, never
+   waits and has the round trip alone, well under a millisecond at one client. Those are far
+   apart. So the p50 is recorded beside the rate for both policies and the report says which of
+   the two the latency says it is: a rate near the round trip with a p50 near the round trip is
+   the deadline binding at zero, a bug in the force path and its own ticket; a rate near the round
+   trip with a p50 above 2 ms is stranger still and worth stopping for.
 4. **The no-data-directory pass states the log's share separately.** A node started with no data
    directory has no log at all, so the gap between it and the `NEVER` node is everything the log
    costs a pipelined write, of which the buffer is one part.
