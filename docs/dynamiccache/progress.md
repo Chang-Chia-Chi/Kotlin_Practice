@@ -6973,3 +6973,104 @@ New `PartitionStoreTest` (5 tests, driving the store directly with no engine in 
   one class, so an expiry index would be a change to `PartitionStore` alone.
 - `Partition` at 574 lines is now almost entirely the command `when` and its Redis-shape helpers.
   The next split there is by command family, not by concern.
+
+---
+
+## T68 - One inbound loop, and a send-only transport
+
+Plan 2.3's Transport seam split in two, and the node's handler order moved out of the router
+into a class of its own. Candidate 3 of the architecture review: the drop-on-unreachable promise
+and the demux chain each existed twice, once in the server's node wiring and once in the test
+kit, and SWIM kept a second inbound path alive for its own test.
+
+### The two seams
+
+```kotlin
+interface Outbound {                                  // the send-only seam
+    suspend fun send(to: NodeId, envelope: Envelope)  // an unreachable peer is a DROP, never a throw
+}
+
+interface Transport : Outbound {                      // a node's whole endpoint
+    val inbound: ReceiveChannel<Envelope>
+    fun close()
+}
+```
+
+The promise is stated in `Outbound`'s KDoc and owed by both adapters. `GrpcTransport.send` now
+catches what the gRPC call throws for a peer that is down and drops it, rethrowing
+`CancellationException`; `InMemoryTransport` already dropped. A peer this node was given no
+address for still raises, outside the catch: that is a wiring error, not an unreachable peer, and
+no gossip round repairs it.
+
+`Replication`, `AntiEntropy`, `DistributedSnapshot`, `Swim` and `Router` all take `Outbound`.
+Only the inbound loop takes a whole `Transport`.
+
+### The inbound module
+
+`dynacache-cluster/.../InboundLoop.kt`: one class, five handlers, one order.
+
+```kotlin
+class InboundLoop(
+    inbound: ReceiveChannel<Envelope>,
+    snapshots:   suspend (Envelope) -> Boolean = { false },  // DistributedSnapshot.receive
+    forwards:    suspend (Envelope) -> Boolean = { false },  // Router.receive
+    replication: suspend (Envelope) -> Boolean = { false },  // Replication.receive
+    antiEntropy: suspend (Envelope) -> Boolean = { false },  // AntiEntropy.receive
+    gossip:      suspend (Envelope) -> Unit    = {},         // Swim.deliver
+) {
+    suspend fun run()                       // every envelope, until the transport closes
+    suspend fun drain()                     // everything already waiting, then returns
+    suspend fun deliver(envelope: Envelope) // one envelope, offered in order until one claims it
+}
+```
+
+Markers first (C10, T36), then forwards (spec 5.1), then replication, then anti-entropy, then
+gossip last and total, because every envelope carries the piggybacked membership table (I8).
+Every handler defaults to deaf, so a node with no snapshot directory or a router test with
+nothing under the forward seam wires only what it has. `drain` is what a test that steps a node
+by rounds needs, and is exactly the loop SWIM's `tick` used to run on its own.
+
+### Deleted
+
+- `NodeTransport` in `ClusterNode.kt` (the five views, four "deaf on purpose", and the
+  throw-to-drop wrapper): 33 lines, gone. The node builds one `GrpcTransport` and one loop.
+- `Router.run`, `Router`'s `others` and `snapshots` constructor parameters, and its `else ->
+  others(envelope)` branch. `Router.receive` now returns `Boolean`, like the other three.
+- SWIM's second inbound path: the `while (true) handle(transport.inbound.tryReceive()...)` line
+  at the top of `tick`. `deliver` stays and is now SWIM's only way in.
+- The hand-built demux chain in `InProcessCluster`; it builds an `InboundLoop` like the server's.
+
+### Tests
+
+- `inbound_order_is_snapshots_forwards_replication_antientropy_gossip` (new `InboundLoopTest`):
+  five envelopes, one per handler, arrive together; the assertion is the full sequence of which
+  handler saw which, so both the order and the short-circuit are pinned.
+- `a_handler_that_claims_an_envelope_ends_it` (same file): a marker never reaches gossip.
+- `unreachable_peer_is_a_drop_on_both_adapters` (`GrpcTransportTest`, replacing
+  `grpc_peer_down_is_a_send_error`): a send to a port nothing listens on over gRPC and a send to
+  a killed peer in memory both return without throwing and leave no reply.
+- `SwimTest`'s `Gossip` now drains each node's `InboundLoop` before ticking it, which is the
+  order `tick` itself used to run; `RouterTest.Routers` and `InProcessCluster` run the loop.
+
+Counts: engine 173, cluster 89 (was 87), cp 113, server 107. 482 total, was 480. Net diff
++142 / -122 across 14 files, 20 lines net.
+
+### Deviations
+
+1. `GrpcTransport` still raises for a peer with no address (`requireNotNull(peers[to])`). The
+   seam's promise is about reachability; a missing address is a wiring bug that no runtime path
+   repairs, and swallowing it would make a mis-wired cluster look merely silent.
+2. `CONTEXT.md` gained an **Inbound loop** entry and a sentence in **Transport** about the
+   send-only half. The glossary is the vocabulary of record and this ticket named a new concept.
+3. `DistributedSnapshot` keeps its parameter named `demux`; only the two comments that named
+   `Router.receive` as the demux were corrected to name the loop. Renaming the parameter would
+   have widened the diff into T55's shape for no behaviour.
+
+### For the next ticket
+
+- `Replication`, `AntiEntropy` and `DistributedSnapshot` are now takers of `Outbound` and
+  suppliers of a `receive(Envelope): Boolean`. That pair is the shape a fifth handler would take.
+- `InProcessCluster.gossipOn(node)` still collects what the loop hands to gossip rather than
+  running a real `Swim`; a test kit that wants gossip in the loop would pass `swim::deliver`.
+- T65 is changing `Replication`'s constructor and the `Replicate`/`Read` protos in parallel. The
+  only line this ticket changed in `Replication.kt` is its transport parameter's type.

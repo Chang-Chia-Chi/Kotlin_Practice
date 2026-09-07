@@ -16,17 +16,17 @@ parallel schedule it after 64.
 
 **Nature:** adapter and wiring (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache dabc5035, merged into misc/ai_gen)
 
-- [ ] `inbound_order_is_snapshots_forwards_replication_antientropy_gossip`: a test drives
+- [x] `inbound_order_is_snapshots_forwards_replication_antientropy_gossip`: a test drives
       one envelope of each kind through the loop and asserts which handler saw it and in what
       order when several arrive together
-- [ ] `unreachable_peer_is_a_drop_on_both_adapters`: sending to a dead peer over gRPC and
+- [x] `unreachable_peer_is_a_drop_on_both_adapters`: sending to a dead peer over gRPC and
       over the in-memory transport both return without throwing and without a reply
-- [ ] The server's node wiring builds one transport, not five views; the in-process cluster
+- [x] The server's node wiring builds one transport, not five views; the in-process cluster
       uses the same loop class; the SWIM test drives delivery through the loop
-- [ ] Every existing transport, SWIM, router, replication and acceptance test passes
-- [ ] Progress entry appended
+- [x] Every existing transport, SWIM, router, replication and acceptance test passes
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
