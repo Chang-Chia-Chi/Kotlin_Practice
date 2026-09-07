@@ -12,7 +12,9 @@ import java.util.concurrent.ConcurrentHashMap
  * next one (I14). A lease is measured against log time, never a clock: it is checked on every
  * access and swept on every TTL tick.
  */
-class FencedLockStateMachine {
+class FencedLockStateMachine : CpPrimitive {
+
+    override val id = CpPrimitive.LOCKS
 
     // ponytail: a key once locked is never forgotten, since its token counter must live on.
     // The ceiling is a very large number of distinct lock keys; the repair is a per-key
@@ -58,16 +60,21 @@ class FencedLockStateMachine {
         Reply.Error("REENTRANCE", if (lock.owner == null) "lock is not held" else "not the holder with token ${lock.token}")
 
     /** A tick releases every lease that has run out, so the state matches what any access would see. */
-    fun sweep(now: Long) = locks.replaceAll { _, lock -> lock.at(now) }
+    override fun sweep(now: Long) = locks.replaceAll { _, lock -> lock.at(now) }
 
     /** A session's death releases every lock it holds, in the one entry that ends it (C18, I15). */
-    fun releaseAllOf(session: Long) = locks.replaceAll { _, lock -> if (lock.owner == session) lock.released() else lock }
+    override fun releaseAllOf(session: Long) =
+        locks.replaceAll { _, lock -> if (lock.owner == session) lock.released() else lock }
 
-    fun snapshot(): Map<Key, Lock> = HashMap(locks)
+    override fun snapshot(): ByteArray = CpWire.encodeTable(locks) {
+        writeLong(it.owner ?: CpWire.NO_OWNER)
+        writeLong(it.token)
+        writeLong(it.leaseUntil)
+        writeInt(it.holds)
+    }
 
-    fun restore(state: Map<Key, Lock>) {
-        locks.clear()
-        locks.putAll(state)
+    override fun restore(bytes: ByteArray) = CpWire.decodeTable(bytes, locks) {
+        Lock(readLong().takeIf { it != CpWire.NO_OWNER }, readLong(), readLong(), readInt())
     }
 
     /** One lock's state (CP spec 3.1). [token] is the last token issued for the key, held or not. */

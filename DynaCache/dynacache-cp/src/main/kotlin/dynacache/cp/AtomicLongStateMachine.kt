@@ -10,7 +10,9 @@ import java.util.concurrent.ConcurrentHashMap
  * committed entries in log order. A counter's TTL is measured against the log time passed in
  * with every call ([CpStateMachine] owns it); nothing here reads a clock.
  */
-class AtomicLongStateMachine {
+class AtomicLongStateMachine : CpPrimitive {
+
+    override val id = CpPrimitive.LONGS
 
     private val counters = ConcurrentHashMap<Key, Counter>()
 
@@ -63,15 +65,15 @@ class AtomicLongStateMachine {
     }
 
     /** A tick drops every counter whose TTL has run out. */
-    fun sweep(now: Long) {
+    override fun sweep(now: Long) {
         counters.values.removeIf { it.expired(now) }
     }
 
-    fun snapshot(): Map<Key, Counter> = HashMap(counters)
+    override fun snapshot(): ByteArray =
+        CpWire.encodeTable(counters) { writeLong(it.value); writeLong(it.expiresAt ?: CpWire.NO_TTL) }
 
-    fun restore(state: Map<Key, Counter>) {
-        counters.clear()
-        counters.putAll(state)
+    override fun restore(bytes: ByteArray) = CpWire.decodeTable(bytes, counters) {
+        Counter(readLong(), readLong().takeIf { it != CpWire.NO_TTL })
     }
 
     /** Gives a live counter the expiry [expiresAt]: 1 when there was a live counter to give it to, else 0. */

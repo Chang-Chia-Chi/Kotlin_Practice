@@ -8,6 +8,7 @@ import dynacache.cp.proto.CpServiceGrpcKt
 import dynacache.cp.proto.InfoRequest
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
+import dynacache.engine.CpNamespace
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
@@ -47,13 +48,12 @@ class ForwardingCpEngine(
     private var believedLeader: NodeId? = null
 
     override fun submit(command: Command): CompletableFuture<Reply> {
-        // The same edge as CpEngine's (C16): this node forwards CP work on cp: keys, nothing else.
+        // The same edge as CpEngine's (C16), read from the same rule: this node forwards CP work
+        // on cp: keys the key's own primitive answers, nothing else.
         if (command !is Command.Cp) {
-            return CompletableFuture.completedFuture(Reply.Error("NOTCP", "$command is not a CP command"))
+            return CompletableFuture.completedFuture(CpNamespace.notCp("$command is not a CP command"))
         }
-        if (!command.key.isCp()) {
-            return CompletableFuture.completedFuture(Reply.Error("NOTCP", "${command.key} is not a cp: key"))
-        }
+        CpNamespace.refusalFor(command)?.let { return CompletableFuture.completedFuture(it) }
         // CP spec 6.7 is a report, not a log entry: CP.INFO asks the leader for one and
         // CP.MEMBERS is answered from the fixed membership this node was configured with.
         if (command is Command.Cp.Info) return info()
@@ -124,8 +124,6 @@ class ForwardingCpEngine(
         }
         return CpServiceGrpcKt.CpServiceCoroutineStub(channel)
     }
-
-    private fun Key.isCp(): Boolean = toString().startsWith("cp:")
 
     private companion object {
         /** How long to wait before asking the members again; an election is measured in seconds. */

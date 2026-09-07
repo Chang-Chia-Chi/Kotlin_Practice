@@ -1,6 +1,8 @@
 package dynacache.server
 
 import dynacache.engine.Command
+import dynacache.engine.CpNamespace
+import dynacache.engine.CpRouting
 import dynacache.engine.Key
 import dynacache.engine.Reply
 import java.time.Clock
@@ -25,16 +27,28 @@ sealed interface Parsed {
  * The parser is where the wire's several spellings of one meaning collapse: `EXPIRE`, `PEXPIRE`
  * and `EXPIREAT` all reduce to the absolute instant the engine stores (spec 5.4), and `INCR`,
  * `DECR`, `INCRBY` and `DECRBY` to a signed delta. [clock] is what "now" means while it does so.
+ * It is also where a command on a `cp:` key becomes the CP verb that key's primitive names, so
+ * the dispatcher downstream only routes: see [cpVerb] and the namespace rule it reads.
  */
 class CommandParser(private val clock: Clock = Clock.systemUTC()) {
 
     /** [tokens] is one client frame, never empty: [RespDecoder] skips the frames that would be. */
     fun parse(tokens: List<ByteArray>): Parsed =
         try {
-            Parsed.Ok(dispatch(tokens[0].text().lowercase(), tokens.drop(1)))
+            Parsed.Ok(cpVerb(dispatch(tokens[0].text().lowercase(), tokens.drop(1))))
         } catch (rejected: Rejected) {
             Parsed.Failed(rejected.error)
         }
+
+    /**
+     * The CP verb a compat command on a `cp:` key means (CP spec 6.2, 6.5, 9.5), so a command
+     * reaches the dispatcher already spelled the way the engine that runs it names it, and the
+     * dispatcher only routes. A command the namespace refuses is left as it parsed: the refusal
+     * is the dispatcher's, where it stays an execution error rather than becoming a parse error
+     * that would abort an enclosing `MULTI`.
+     */
+    private fun cpVerb(command: Command): Command =
+        (CpNamespace.route(command) as? CpRouting.Verb)?.command ?: command
 
     private fun dispatch(name: String, args: List<ByteArray>): Command = when (name) {
         // Server and keyspace. A trailing argument this node has no use for -- INFO's section,
@@ -91,19 +105,16 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "lset" -> exactly(name, args, 3).let { Command.LSet(Key(it[0]), integer(it[1]), it[2]) }
         "lrem" -> exactly(name, args, 3).let { Command.LRem(Key(it[0]), integer(it[1]), it[2]) }
 
-        // Key expiry: three spellings of one deadline (spec 5.4). Redis takes any value it can
-        // hold here -- a deadline already past deletes the key -- so only [deadline] guards them.
-        "expire" -> exactly(name, args, 2).let {
-            Command.Expire(Key(it[0]), deadline(name) { now().plusSeconds(integer(it[1])) })
-        }
-        "pexpire" -> exactly(name, args, 2).let {
-            Command.Expire(Key(it[0]), deadline(name) { now().plusMillis(integer(it[1])) })
-        }
+        // Key expiry: four spellings of one deadline (spec 5.4), or of one span when the key is a
+        // cp: one. Redis takes any value it can hold here -- a deadline already past deletes the
+        // key -- so only [deadline] guards them.
+        "expire" -> exactly(name, args, 2).let { expiry(name, Key(it[0]), seconds(it[1])) }
+        "pexpire" -> exactly(name, args, 2).let { expiry(name, Key(it[0]), millis(it[1])) }
         "expireat" -> exactly(name, args, 2).let {
-            Command.Expire(Key(it[0]), deadline(name) { Instant.ofEpochSecond(integer(it[1])) })
+            expiryAt(name, Key(it[0])) { Instant.ofEpochSecond(integer(it[1])) }
         }
         "pexpireat" -> exactly(name, args, 2).let {
-            Command.Expire(Key(it[0]), deadline(name) { Instant.ofEpochMilli(integer(it[1])) })
+            expiryAt(name, Key(it[0])) { Instant.ofEpochMilli(integer(it[1])) }
         }
         "ttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.SECONDS)
         "pttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.MILLIS)
@@ -299,6 +310,27 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         } catch (unrepresentable: DateTimeException) {
             rejectExpireTime(name)
         }
+
+    /**
+     * `EXPIRE` and `PEXPIRE`: a span, which a `cp:` key takes straight to its CP verb. The CP log
+     * evaluates a span against log time (CP spec 5), so making an instant of it here and a span
+     * of that again downstream would read this clock twice for the one deadline.
+     */
+    private fun expiry(name: String, key: Key, ttl: Duration): Command {
+        // The one clock read either engine's deadline costs. It is the overflow guard as much as
+        // the AP deadline: a span no clock can hold is refused for a cp: key too, before the CP
+        // log has to add it to log time.
+        val instant = deadline(name) { now().plus(ttl) }
+        return (CpNamespace.expiry(key, ttl) as? CpRouting.Verb)?.command ?: Command.Expire(key, instant)
+    }
+
+    /** `EXPIREAT` and `PEXPIREAT`: an absolute deadline, and for a `cp:` key the span to it. */
+    private fun expiryAt(name: String, key: Key, at: () -> Instant): Command {
+        val instant = deadline(name, at)
+        if (!CpNamespace.owns(key)) return Command.Expire(key, instant)
+        val verb = CpNamespace.expiry(key, Duration.between(now(), instant)) as? CpRouting.Verb
+        return verb?.command ?: Command.Expire(key, instant)
+    }
 
     /**
      * A relative TTL the `SET` family will take: strictly positive, and near enough that the

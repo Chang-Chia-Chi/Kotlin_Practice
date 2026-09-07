@@ -24,12 +24,14 @@ import java.time.Instant
 class Primitives {
 
     private val clock = MutableClock(EPOCH)
-    private val machine = CpStateMachine()
+
+    /** The composite under this fixture, for a test that reads its state rather than its replies. */
+    val stateMachine = CpStateMachine()
     private var index = 0L
     private var lastStamped = 0L
 
     /** Applies [command] as the entry stamped with the current log time, and answers its reply. */
-    fun apply(command: Command.Cp): Reply = machine.runOperation(++index, CpOp(stamp(), command)) as Reply
+    fun apply(command: Command.Cp): Reply = stateMachine.runOperation(++index, CpOp(stamp(), command)) as Reply
 
     /** Moves this leader's clock; no entry carries the new time until the next [apply] or [tick]. */
     fun advance(by: Duration) = clock.advance(by)
@@ -37,12 +39,12 @@ class Primitives {
     /** [advance]s by [after], then appends the idle entries: the TTL tick, then every lapsed session. */
     fun tick(after: Duration = Duration.ZERO) {
         advance(after)
-        machine.runOperation(++index, TtlTick(stamp()))
-        machine.lapsedSessions().forEach { machine.runOperation(++index, SessionClosed(stamp(), it)) }
+        stateMachine.runOperation(++index, TtlTick(stamp()))
+        stateMachine.lapsedSessions().forEach { stateMachine.runOperation(++index, SessionClosed(stamp(), it)) }
     }
 
     private fun stamp(): Long {
-        lastStamped = maxOf(clock.millis(), machine.lastAppliedTs + 1, lastStamped + 1)
+        lastStamped = maxOf(clock.millis(), stateMachine.lastAppliedTs + 1, lastStamped + 1)
         return lastStamped
     }
 

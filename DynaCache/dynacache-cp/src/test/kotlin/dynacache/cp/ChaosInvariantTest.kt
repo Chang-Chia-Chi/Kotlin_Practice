@@ -158,10 +158,10 @@ class ChaosInvariantTest {
         kit.leaderEngine().submit(command).get(REPLY_TIMEOUT_SECS, SECONDS)
 
     private fun ownerOf(state: CpStateMachine, key: Key): Long? =
-        ((state.locks.apply(Command.Cp.LockState(key), state.lastAppliedTs) as Reply.Array).items[0] as? Reply.Integer)?.value
+        ((state.read(Command.Cp.LockState(key)) as Reply.Array).items[0] as? Reply.Integer)?.value
 
     private fun available(state: CpStateMachine, key: Key): Long =
-        (state.semaphores.apply(Command.Cp.SemAvailable(key)) as Reply.Integer).value
+        (state.read(Command.Cp.SemAvailable(key)) as Reply.Integer).value
 
     private companion object {
         const val STEPS = 30
