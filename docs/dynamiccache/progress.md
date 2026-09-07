@@ -7962,3 +7962,123 @@ had just taught: the trailer is written by `encode` at enqueue, so entries reach
 already serialised and no batching can drop it, and there are exactly two production appends, the
 engine's log path which passes a version and the snapshot channel log which deliberately passes
 none. Verified on the merged tree: 523 tests, engine 199, cluster 103, cp 113, server 108.
+
+---
+
+## T84 - Anti-entropy descends the tree over the wire
+
+The Merkle tree's saving is now collected across the exchange, not after it. Before this ticket
+a root mismatch made the peer ship every leaf of the range on its first reply; the requester
+built the peer's whole tree locally and called `MerkleTree.diff` on it, so the descent that
+never opens a matching subtree ran entirely on one side after the data had already crossed. A
+range of a million keys with one bad key cost a million leaves on the wire. The comparison now
+costs the divergence rather than the range.
+
+**The protocol.** Three exchanges instead of two, and the middle one repeats per level.
+
+1. `MerkleRoot{id, vnode, root}` -> `MerkleRootReply{id, root, fanout, leaf_count}`. Equal roots
+   end the step, as before. The reply no longer carries leaves at all; tag 3 is `reserved` with
+   its name, the way `Replicate`'s tokens were retired, since both ends of the wire are this
+   repository and nothing persists the message.
+2. `MerkleLevel{id, vnode, level, repeated position}` ->
+   `MerkleLevelReply{id, repeated hash, repeated Leaf leaf}`, one round per level. The requester
+   already knows the root disagreed, so the first round asks for the root's children; each
+   round after it asks only for the children of the nodes that disagreed at the level above.
+   Above the leaves the reply is one hash per position asked, in the order asked and empty
+   where the peer has no node there; at level 0 it is the leaves the peer holds among those
+   positions. A subtree whose hash matches is never opened and never crosses.
+3. `KeySync` / `KeySyncReply`, unchanged, over the keys the descent named. It is skipped
+   entirely when the descent finds nothing that really differs.
+
+Envelope body tags 26 and 27 are the new pair. `AntiEntropy.receive` routes both; `InboundLoop`
+needed no change.
+
+**How the two sides agree on fan-out.** The peer states the width of the tree it actually built
+in `MerkleRootReply.fanout`, and the requester descends only when it equals its own
+`MerkleTree.fanout`. A node position means nothing under another width, so on a mismatch the
+step ends and the range comes round again on a later tick, which is what a silent peer already
+did. `MerkleTree.diff` has always required the same thing locally (`require(fanout ==
+other.fanout)`); that requirement moved down into `suspectLeaves`, which `diff` delegates to, so
+both the local and the wire path are guarded by one statement of the rule.
+
+The reply also carries `leaf_count`, and `MerkleTree.heightOf(leafCount, fanout)` turns it back
+into the peer's height without building anything. Trees of different height have no level to
+line up, so the requester falls back to asking for every leaf position, exactly as
+`suspectLeaves` falls back to suspecting every leaf. That is the pre-existing cost of a key
+present on one side only, unchanged by this ticket.
+
+**C6 holds.** Nothing about a leaf, a hash or the tree's construction changed. The tree is still
+a pure function of the range's triples: `of` sorts what it is given, so the positions the
+descent names are the same on both sides whatever order either node's scan yielded, and the
+fan-out both sides descend under is the one they agreed on rather than either node's own. The
+descent never depends on scan order.
+
+**The keys are the same keys.** The wire descent runs the same three steps the local descent
+runs, now exposed on `MerkleTree` and shared by both drivers: `hashesAt(level, positions)`,
+`differing(level, positions, theirs)` and `childrenOf(positions)`. `suspectLeaves` was rewritten
+from a recursion into the level-by-level loop those three make, which is the shape the wire
+needs, and `diff` still calls it, so the local path is not a second implementation. At the
+bottom, `divergentKeys(positions, theirs)` decides key by key from the two sides' leaves at the
+suspect positions, comparing the tree's own `leafHash` rather than any new notion of equality.
+That is sound because outside the suspect positions the two sides hold identical leaves, so a
+key that can differ at all is at a suspect position on at least one side, and a key at a suspect
+position on my side cannot sit at a non-suspect position on the peer's.
+`merkle_descent_pieces_decide_what_diff_decides` asserts the equality directly over a 300-leaf
+range with one, first, last and two divergent leaves.
+
+**The request budget.** Plan 2.5's "every fan-out bounded" read here as "at most two requests";
+a descent needs more, so the promise is restated rather than the descent truncated to two. One
+step now sends at most `AntiEntropy.REQUESTS_PER_STEP` = 12 requests and waits at most
+`deadline` for each: the root, up to `DESCENT_ROUNDS` = 9 levels, the leaves, the key sync. A
+step's real cost is `tree height + 1` requests, so a fan-out of 16 keeps every range up to 16^9
+keys inside the budget. A tree deeper than that ends the step where it stands and the range
+comes round again on a later tick; the process can never issue an unbounded number of requests
+before its deadline. Both constants are public, stated in the class KDoc, and
+`a_single_divergent_key_costs_a_descent_not_the_range` asserts the step is inside the budget, so
+the number is read by something and not just written down.
+
+**Deliberate trades.**
+
+- The peer rebuilds its tree of the range once per descent round rather than remembering it
+  between rounds. A session would need a lifetime and an eviction of its own for a saving that
+  is local CPU, and the requester is already bounded to a handful of rounds.
+- Because of that, a write landing mid-descent can shift the peer's positions under the
+  descent. It costs at most a key for one step: the divergence is decided key by key at the
+  bottom, never by position, so nothing is ever synced wrongly, and the range comes round again.
+  The old protocol had the same class of race across its two rounds.
+- The worst case, two replicas that differ everywhere, now spends its request positions where it
+  used to spend reply leaves. It is the same order of bytes as before, which is what a Merkle
+  tree's worst case has always been.
+
+**Tests.** `dynacache-cluster` 97 -> 101; the reactor 497 -> 501 (engine 179, cluster 101, cp
+113, server 108), all green.
+
+- `a_single_divergent_key_costs_a_descent_not_the_range` (new): 300 keys in one vnode, sharing
+  one hash tag so a 384-vnode ring puts them in one range (C12), installed on all three
+  replicas under one version each; then one key's bytes rotted on the victim under the same
+  version, so exactly one leaf differs and no position shifts. Counting the envelopes of that
+  one step: 5 requests (`height + 1`, height 4), 32 hashes (`FANOUT * (height - 2)`, one node's
+  children at each of the two levels under the root), 16 leaves (the one subtree that differed),
+  and a `KeySync` naming exactly the one rotten key. Before T84 the same step carried 300
+  leaves. The assertions are counts of messages, hashes and leaves, never a timing.
+- `a_matching_range_still_costs_one_comparison` (new): the same 300-key range with nothing
+  rotted costs 1 request, 0 hashes, 0 leaves, and one range compared.
+- `merkle_descent_pieces_decide_what_diff_decides`, `merkle_height_follows_from_the_leaf_count`
+  (new): the equivalence above, and `heightOf` against `of(...).height` for 0, 1, 2, 15, 16, 17,
+  255, 256, 257 and 300 leaves.
+- Unchanged and passing: `anti_entropy_heals_divergence`, `convergence_after_partition` and the
+  rest of `AntiEntropyTest`, `ConvergenceTest` and `MerkleTreeTest`, tombstones included.
+
+**Deviations.**
+
+1. Plan section 4 routes this ticket to Fable 5.1 as protocol and convergence work, and the
+   section now notes the tier is unavailable. Fable is out of usage credits, so it was done on
+   Opus 5.
+2. `GrpcTransportTest.envelopeOf` is exhaustive over `Envelope.BodyCase`, so the two new body
+   cases and the removed `MerkleRootReply.leaf` forced edits there. No behaviour of the test
+   changed; it still round-trips every body case over a real socket.
+3. `MerkleTree.diff` and `DivergentRange` are no longer called from production, only from
+   `MerkleTreeTest`, where `diff` is now the oracle the wire descent is asserted against. They
+   were kept rather than deleted for that reason: the ticket's third acceptance criterion is
+   that the exchange decides exactly what the local diff decides, and deleting the reference
+   would delete the test that says so.
