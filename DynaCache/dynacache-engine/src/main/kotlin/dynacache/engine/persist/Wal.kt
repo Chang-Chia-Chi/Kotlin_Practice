@@ -233,6 +233,13 @@ class WalWriter(
     }
 
     private fun flushIfIdle() {
+        // The rule this flag exists to keep: every thread that touches the sink holds it, or is
+        // the caller's tick thread. [rotate] relies on exactly that, since a clear flag and an
+        // empty queue is the whole of its quiet-log check and the tick is its own thread. So
+        // nothing between taking the flag and releasing it may be moved out of the flag, however
+        // idle the writer looks at that moment: a write or a force running with the flag clear is
+        // one rotate cannot see, and it would land on a sink rotate had already closed and swapped.
+        //
         // Re-check after releasing the flag: an entry enqueued between the drain and the release
         // would otherwise sit with nobody flushing it. An appender that finds a flusher running
         // leaves without forcing, which is safe for the same reason: that flusher re-checks the
@@ -241,13 +248,13 @@ class WalWriter(
             if (!flushing.compareAndSet(false, true)) return
             try {
                 writeBatch()
+                // A batch already past its deadline is forced here rather than left to the next
+                // tick, so a busy log forces at the rate its writers arrive.
+                if (policy == FsyncPolicy.GROUP_COMMIT) forcePastDeadline()
             } finally {
                 flushing.set(false)
             }
         }
-        // The writer is free: a batch already past its deadline is forced here rather than left
-        // to the next tick, so a busy log forces at the rate its writers arrive.
-        if (policy == FsyncPolicy.GROUP_COMMIT) forcePastDeadline()
     }
 
     private fun writeBatch() {
@@ -260,6 +267,8 @@ class WalWriter(
             waiters.forEach { it.completeExceptionally(e) }
             return
         }
+        // Parked only now that the bytes are in the sink, which is what makes a later force sound:
+        // any fsync that starts after a waiter was parked has covered that waiter's entry.
         when (policy) {
             FsyncPolicy.ALWAYS -> fsyncAndComplete(waiters)
             FsyncPolicy.NEVER -> waiters.forEach { it.complete(Unit) }
