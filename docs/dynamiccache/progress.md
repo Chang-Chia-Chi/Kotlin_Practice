@@ -7755,3 +7755,78 @@ through the merge because they compose: T77's `TESTS`, `PASSES` and `SECTIONS` c
 T78's `BENCH_ROOT` chooses the tree, which is what lets a before pass measure an older checkout
 with the newer script. The write-path subset is a `SECTIONS` value, since that concept was T77's.
 T85 owns the shutdown finding; the platform-timer finding needs a ticket of its own.
+---
+
+## T80 - A failed snapshot cut abandons the snapshot, not the node
+
+An `IOException` out of the cut's file work (a full disk, a permission the process lost, a
+directory taken from under it) used to leave `DistributedSnapshot`, cross an inbound loop that
+has no per-envelope catch (T68), and end that loop. The node then answered nothing at all: one
+node's disk problem became an availability problem for the third of the keyspace it coordinates.
+T75 found it; it had been there since T36. A cut that fails for an environmental reason now
+abandons that snapshot set on this node and the node reads its next envelope.
+
+**Where the policy sits, and why.** In the snapshot handler, not in the inbound loop. The loop's
+want of a catch is deliberate: a catch there, even one narrowed to `IOException`, would stand over
+every handler, and a handler that has no disk to fail on would have its bugs quietly absorbed on
+the way past. Only this handler knows what to do about a storage failure, and what it does is not
+"ignore" -- it drops the set: the part deleted, the id refused afterwards, exactly what a set that
+times out already gets. So the catch is at the two places that touch the adapter, `start`'s cut
+and `receive`'s record, and `initiate` gets it too: a cut it fails is fire-and-forget on the
+node's own scope (`ClusterNode.snapshot` launches it), so throwing there would cancel that scope
+and take the inbound loop with it anyway. The boundary is drawn by exception type, and the
+adapter's contract is what makes the type mean something: `SnapshotParts` now says in words that
+`cut` and `record` fail with an `IOException` when the environment refuses, and `FileSnapshotParts`
+unwraps the `CompletionException` the WAL append's `join` used to leak, so the future's wrapper
+stops at the seam instead of travelling to a caller that would not recognise it.
+
+**What an operator sees.** `INFO`'s `# Cluster` section, which is this node's whole observability
+(plan 2.4), gained `cluster_snapshots_abandoned` and, when there has been one,
+`cluster_snapshot_last_failure` with the set's id and the platform's own words. The reason's
+whitespace is collapsed, since the section's lines are joined by CRLF.
+
+**What still fails loudly.** Anything that is not an `IOException`. A bug inside a handler ends
+the inbound loop as before, which is what a broken build should do; `a_bug_in_the_cut_is_not_swallowed`
+pins it at the snapshot handler and `a_handler_that_throws_ends_the_loop` pins it at the loop.
+An id the adapter refuses is still dropped by value (T75) and an operator's typo at `restoreFrom`
+still fails. `restoreFrom` also refuses an id this node aborted or abandoned, by name rather than
+by what survives on disk, so whatever a half-finished cut left behind can never be read back as a
+complete part.
+
+**Tests.** Five new, all green: `a_cut_that_cannot_write_abandons_the_set_and_the_node_lives`
+(three-node cluster, one node's `dump.rdb.tmp` is a directory so its state save fails: it abandons
+the set, records no part, and still takes a write and answers a read),
+`a_failed_cut_leaves_no_half_written_part`, `a_channel_that_cannot_be_recorded_abandons_the_set_and_the_envelope_is_handled`
+(the envelope still gets its ordinary handling; recording is beside the write path),
+`a_bug_in_the_cut_is_not_swallowed`, and `a_handler_that_throws_ends_the_loop` in
+`InboundLoopTest`. Making the failure a filesystem fact needed no mock and no platform-specific
+permission call: a `dump.rdb.tmp` that is a directory refuses the save's first write on Windows
+and on POSIX alike. The two tests that need the adapter itself to refuse (a record that fails, a
+cut with a bug in it) inject through `SnapshotParts` at the `Lone` harness's new `wrap` seam.
+Counts, `-pl dynacache-server -am`: engine 179, cluster 102, cp 113, server 108, 502 total, from
+497 at the base (engine 179, cluster 97). Diff 229 insertions, 13 deletions across five files.
+
+**Deviations.**
+1. Model: plan section 4 routes this ticket to Fable 5.1 as failure-semantics work. Fable is out
+   of usage credits, so it was done by Opus 5.
+2. The brief's seams name the snapshot module, the loop, the adapter and tests. One more file was
+   touched: `ClusterNode`'s `# Cluster` section, two lines, because "records the failure where an
+   operator can see it" has nowhere else to go -- this build has no logger, and `INFO` is the
+   observability the plan gives it.
+3. The brief's base counts (engine 181, cluster 95) do not match what is at `1bf5fc55`: the total
+   is right at 497, the split is engine 179 and cluster 97.
+4. Red was taken once for the four snapshot tests together rather than one slice at a time. Each
+   build here costs about two minutes, and the four are one behaviour at one seam. The red was
+   behavioural and not a compile error: the counter field was added first, so the run showed the
+   node's loop dying silently and the exceptions escaping `demux`, which is the bug this ticket
+   names.
+
+**Merge note (orchestrator).** Landing this against `misc/ai_gen` hit a conflict worth recording,
+because a textual resolution would have shipped the fix disabled. T82 had deleted
+`DistributedSnapshot.initiate` as a pass-through alias, correctly at the time, and repointed
+`ClusterNode.snapshot` at `start`. This ticket gives that same name real behaviour: it wraps the
+cut so an `IOException` is abandoned rather than propagating into the node scope that launched
+it. Git conflicted on the method and auto-merged the call site clean, so the obvious resolution
+compiles, passes every test this ticket wrote, and leaves the availability fix bypassed at its
+only production call site. Resolved by keeping the method and putting the caller back on it.
+Verified on the merged tree: 516 tests, engine 192, cluster 103, cp 113, server 108.
