@@ -271,18 +271,17 @@ t78_passes() {
   TESTS=$keep
 
   for entry in $T78_DURABILITY; do
-    policy=${entry%%:*}
-    requests=${entry##*:}
+    IFS=: read -r policy requests clients <<<"$entry"
     # Named by count as well as policy: EVERY_SECOND runs at two counts, to show that its rate is
     # bound by the fsync interval rather than by how long the pass is.
-    local name=t78-$policy-set-$requests
-    echo "=== T78 durability ($policy, SET only, $requests requests)"
+    local name=t78-$policy-set-$requests-c$clients
+    echo "=== T78 durability ($policy, SET only, $requests requests, $clients clients)"
     start_node "$policy"
     wait_for_ping "$PORT" DynaCache
     wait_for_quiet "$name" "$OWN_JAVA"
     timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
-      -h "$HOST_FROM_CONTAINER" -p "$PORT" -c "$CLIENTS" -n "$requests" -d 3 -t set --csv \
-      >"$OUT/$name.csv" 2>&1 || fail "durability pass $policy at $requests"
+      -h "$HOST_FROM_CONTAINER" -p "$PORT" -c "$clients" -n "$requests" -d 3 -t set --csv \
+      >"$OUT/$name.csv" 2>&1 || fail "durability pass $policy at $requests on $clients clients"
     cat "$OUT/$name.csv"
     stop_node
   done
