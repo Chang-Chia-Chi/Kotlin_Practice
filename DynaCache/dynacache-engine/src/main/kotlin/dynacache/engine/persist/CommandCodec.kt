@@ -15,14 +15,15 @@ import java.time.Instant
  * its arguments, big-endian and length-prefixed as the RDB's are. Every keyed command encodes,
  * reads included, and so does every fanned one, because a command crosses the network in this form
  * as well as going into the log: the WAL entry's header carries the op code and its payload the
- * body, and a forward carries the two concatenated, op code first. `Command.Cp` is CpWire's
- * business and has no form here (C16).
+ * body, and a forward or a replicate carries the two concatenated, op code first
+ * ([CommandCodec.frame]). `Command.Cp` is CpWire's business and has no form here (C16).
  *
  * What is logged is what changed, not what was asked, and that is [whatChanged]'s decision, not
  * this encoding's. A TTL travels into the log as the absolute instant the engine settled on, never
  * as the duration the client sent, so a replay lands the same deadline however late it runs (spec
  * 5.4); that is what the `now` [CommandCodec.encode] takes is for. A forward, which the coordinator
- * has yet to decide, passes none and carries the duration as the client wrote it.
+ * has yet to decide, passes none and carries the duration as the client wrote it; a replicate
+ * passes the coordinator's, so a replica reads the entry the coordinator logged (ADR 0003).
  *
  * A field the log has never needed is written only when it is not its default -- `SET`'s condition
  * and asked TTL, `ZADD`'s `CH` -- so an entry written before this codec grew to the wire's needs
@@ -285,6 +286,15 @@ object CommandCodec {
             else -> throw IllegalArgumentException("unknown command op $op")
         }
     }
+
+    /** [encode] framed for the wire: the op code and then the body, one byte array. */
+    fun frame(command: Command, now: Instant? = null): ByteArray {
+        val (op, body) = encode(command, now)
+        return byteArrayOf(op) + body
+    }
+
+    /** The inverse of [frame]: the commands the framed bytes redo, in order, as [decode] lists them. */
+    fun unframe(bytes: ByteArray): List<Command> = decode(bytes[0], bytes.copyOfRange(1, bytes.size))
 
     private inline fun body(fill: DataOutputStream.() -> Unit): ByteArray =
         ByteArrayOutputStream().also { DataOutputStream(it).use(fill) }.toByteArray()

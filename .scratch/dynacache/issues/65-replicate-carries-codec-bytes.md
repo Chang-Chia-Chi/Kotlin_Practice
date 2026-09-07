@@ -13,17 +13,17 @@ before, so hinted handoff is unchanged. This is the contract step of the codec c
 
 **Nature:** replication protocol, ADR 0003 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 7d3525bb, merged into misc/ai_gen; finished by a second agent after the first hit the session limit)
 
-- [ ] `replica_applies_exactly_the_logged_entry`: a TTL'd conditional `SET` on the
+- [x] `replica_applies_exactly_the_logged_entry`: a TTL'd conditional `SET` on the
       coordinator arrives at each replica as one entry with an absolute instant and the
       condition already decided, and the replica's WAL holds the same bytes
-- [ ] No tokens/parse functions remain in the cluster module's constructors; the test kit's
+- [x] No tokens/parse functions remain in the cluster module's constructors; the test kit's
       command encoding class is deleted
-- [ ] Every existing replication, quorum, hint, read-repair, anti-entropy, convergence and
+- [x] Every existing replication, quorum, hint, read-repair, anti-entropy, convergence and
       P2/P3/P4 acceptance test passes unchanged
-- [ ] ADR 0003 gains one line: the command ships as the engine codec's bytes
-- [ ] Progress entry appended
+- [x] ADR 0003 gains one line: the command ships as the engine codec's bytes
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

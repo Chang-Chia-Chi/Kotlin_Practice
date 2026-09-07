@@ -5,6 +5,12 @@ import dynacache.cluster.proto.ReplicateAck
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.persist.CommandCodec
+import dynacache.engine.persist.FsyncPolicy
+import dynacache.engine.persist.SnapshotEngine
+import dynacache.engine.persist.WalReader
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -13,11 +19,13 @@ import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 
 /**
  * Replication and quorum at the `CommandEngine` seam through the test kit's cluster (spec 5.1
@@ -126,8 +134,6 @@ class ReplicationTest {
             membership = ScriptedMembership(nodes),
             counter = DotCounter.of(coordinator, emptyList()),
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
             view = { CompletableFuture.completedFuture(null) },
             install = { CompletableFuture.completedFuture(null) },
             scope = backgroundScope,
@@ -244,5 +250,46 @@ class ReplicationTest {
         assertEquals(v3, cluster.readVia(second, key))
         cluster.assertConverged()
         cluster.close()
+    }
+
+    /**
+     * ADR 0003 (T65): a `Replicate` carries the entry the coordinator logged, byte for byte. A
+     * conditional `SET` with a TTL is logged with the condition decided away and the deadline
+     * settled as an instant, and those bytes are what ship, so a replica re-decides neither.
+     * A replica's own log holds that entry as the engine redoes one: the `SET` and then the
+     * `EXPIRE` the entry decodes to, one entry each, under the coordinator's deadline.
+     */
+    @Test
+    fun replica_applies_exactly_the_logged_entry(@TempDir dir: Path) = runTest {
+        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 3, r = 1, scope = backgroundScope)
+        val (coordinator, first, second) = cluster.ring.preferenceList(key, 3)
+        val clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC)
+        for (node in cluster.nodes) {
+            SnapshotEngine(cluster.engine(node), Files.createDirectories(dir.resolve(node.name)), clock, fsync = FsyncPolicy.NEVER).restore()
+        }
+        fun logOf(node: NodeId) = WalReader(dir.resolve(node.name).resolve("wal.0")).readAll().entries.map { it.op to it.payload }
+
+        val set = Command.Set(key, "v".toByteArray(), Command.Set.Condition.NX, Duration.ofSeconds(10))
+        assertEquals(Reply.Simple("OK"), cluster.submitVia(coordinator, set))
+
+        val logged = logOf(coordinator).single()
+        assertEntry(CommandCodec.encode(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)), Instant.EPOCH), logged)
+        val shipped = cluster.network.sent.filter { it.hasReplicate() }.map { it.replicate.command.toByteArray() }
+        assertEquals(2, shipped.size, "one Replicate per replica")
+        shipped.forEach { assertArrayEquals(byteArrayOf(logged.first) + logged.second, it, "the shipped bytes are the logged entry") }
+
+        val redone = CommandCodec.decode(logged.first, logged.second).map { CommandCodec.encode(it, Instant.EPOCH) }
+        assertEquals(2, redone.size, "a SET with a deadline redoes as SET then EXPIRE")
+        for (replica in listOf(first, second)) {
+            val held = logOf(replica)
+            assertEquals(redone.size, held.size, "entries logged on $replica")
+            redone.zip(held).forEach { (expected, actual) -> assertEntry(expected, actual) }
+        }
+        cluster.close()
+    }
+
+    private fun assertEntry(expected: Pair<Byte, ByteArray>, actual: Pair<Byte, ByteArray>) {
+        assertEquals(expected.first, actual.first, "op code")
+        assertArrayEquals(expected.second, actual.second, "body")
     }
 }

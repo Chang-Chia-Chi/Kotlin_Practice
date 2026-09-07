@@ -6773,3 +6773,146 @@ Net diff: 16 files, +488 / -165, net +323 (2 new files). Commit a0e5cdb4 on bran
   `CpSnapshotTest`; the spec was not edited.
 - **One new test file** rather than a snapshot case added to each of the five existing primitive
   suites, which are about semantics rather than persistence.
+
+## T74: The live WAL never lives inside a snapshot part
+
+### Built
+
+The root cause was in `SnapshotEngine`, not in the part adapter: `save()` always rotated the
+engine's live log into a file under its own directory, and `FileSnapshotParts.cut` runs a save
+rooted at the part. A `SnapshotEngine` built with `fsync = null` was already documented as
+"snapshots and no log"; that is now the ownership rule. Such an engine stamps the checkpoint's
+seq into the RDB it writes and neither rotates nor deletes a log file; the engine's log, if it
+has one, is another `SnapshotEngine`'s to checkpoint (the data directory's). Two one-token
+guards in `SnapshotEngine.cut` and `SnapshotEngine.save`, plus the contract written into the
+`fsync` parameter, `cut`'s KDoc and `SnapshotParts.cut`.
+
+A part therefore holds `dump.rdb` (the state at the cut, stamped with the log's seq at the
+cut) and its channel logs, never a `wal.*`. The live log keeps running under the data
+directory across a cut, an abort deletes the set without touching it, and recovery from the
+data directory replays every write acked after the cut. T49's cut-then-open order and T55's
+`SnapshotParts` interface are unchanged; `DistributedSnapshot` is untouched.
+
+### Tests
+
+- engine: `SnapshotPartsTest.snapshot_part_holds_the_log_up_to_the_cut_only` (new). A node
+  with a data directory cuts a part, writes on, restarts: no `wal.*` under the snapshot root,
+  the part's checkpoint seq equals the log's seq at the cut and its state holds only the
+  pre-cut value, the data directory's `wal.0` holds every entry, and the restart reads the
+  post-cut writes.
+- cluster: `DistributedSnapshotTest.C14_writes_after_the_cut_survive_an_aborted_snapshot_set`
+  (new). The test's `Lone` node gained an optional data directory (restored through
+  `SnapshotEngine`, `FsyncPolicy.NEVER`) and a deadline; its peer never answers the marker,
+  the set is aborted at 30s of virtual time, the node crashes without a save, and the restart
+  reads both writes acked after the cut. Red before the fix with the exact data-loss symptom
+  (`expected <Bulk(2)> but was <Bulk(1)>`).
+
+| Module | Tests |
+|---|---|
+| engine | 165 |
+| cluster | 88 |
+| cp | 103 |
+| server | 103 |
+
+`chandy_lamport_restorable`, `I12_reads_after_restore_return_snapshot_time_values`, every WAL
+and recovery test and `P4AcceptanceTest` pass unchanged.
+
+### Deviations
+
+1. **A part holds no log file at all.** The ticket allowed "a copy or a sealed segment of the
+   log up to the cut"; the part's RDB is that log folded, stamped with the cut's seq. A copied
+   segment would be dead weight: a part is restored by a no-log `SnapshotEngine`, which never
+   replays, and a replay would skip every entry at or below the checkpoint anyway. The
+   acceptance test asserts the checkpoint seq and the state instead of file bytes.
+2. Well under the 200-line floor (about 110 lines including tests): the fix is two guards.
+
+### For the next ticket
+
+- `SnapshotEngine.close()` still does `engine.wal?.close()` regardless of `fsync`. No caller
+  closes a part's engine, so it is harmless today; the same guard belongs there if one appears.
+- T76 could stop reading `fsync == null` as "no log" by splitting a `RdbStore` out of
+  `SnapshotEngine`; not needed for anything yet.
+
+---
+
+## T65 - A replicate carries codec bytes
+
+A replica applies exactly the entry the coordinator logged. The coordinator runs the write,
+passes `(command, reply)` through `whatChanged`, frames the result with its own instant through
+the engine command codec, and ships those bytes with the version. The replica decodes them and
+submits what they decode to, in order. No RESP spelling of a command is left anywhere on the
+cluster seam: T64 took the forward, this ticket takes the replicate and the read.
+
+This ticket was started by one agent, who landed the codec's framed pair, the proto change and
+the named test before dying on an API limit without committing, and finished by a second agent,
+who wrote everything else below from that inherited diff.
+
+**The envelope.** `Replicate`'s `repeated bytes token = 2` is gone and `bytes command = 6`
+replaces it; tag 2 and the name `token` are `reserved`, as `Forward`'s are (T64). The field was
+removed rather than deprecated because a hint outlives a build only in memory. `expires_at_millis`
+stays: it is the same instant the command's bytes carry, repeated so a hint holder can drop a
+write that expired while it waited (T25) without decoding it. `Read` lost its tokens the same
+way and carries `bytes command = 3`.
+
+**The framing helper's home.** `CommandCodec.frame(command, now)` is `encode` with the op code
+prepended to the body, one byte array; `CommandCodec.unframe(bytes)` is the inverse and answers
+the list `decode` does. T64's note said the second copy of `Router`'s private framing would
+justify lifting it onto the codec; this is the second copy, so `Router`'s companion is deleted
+and `Router`, `Replication`, the test kit and `DistributedSnapshotTest` all call the codec's
+pair. `Router.coordinate` still takes `single()` (a forward passes no `now`, so it never
+decodes to two commands); a replicate iterates the list.
+
+**Replication.** `write` is `whatChanged(command, reply) ?: return reply`, then
+`frame(changed, clock.instant())`. The hand-written rules are deleted with `Replication.decided()`:
+the refused-`SET` check (`whatChanged` answers null for an error or a nil bulk), the NX/XX
+stripping (`whatChanged` strips it), the TTL-to-instant conversion (`encode`'s `now` settles it)
+and the replica's second submit of an `EXPIRE` (a `SET` with a settled deadline decodes to the
+`SET` and then the `EXPIRE`, and the replica submits each). `replicate` takes its key from the
+first decoded command; bytes that do not decode are not acked, as unreadable tokens were not.
+The constructor lost `tokens` and `parse`; nothing is injected in their place, at every call
+site (`ClusterNode`, `InProcessCluster`, `ReadRepairTest`, `ReplicationTest`). `ClusterNode`
+also lost its `CommandParser` and the `parse` helper that were only there for replication.
+
+**The same-bytes comparison.** `replica_applies_exactly_the_logged_entry` in
+`dynacache-cluster/.../ReplicationTest.kt`: three nodes with W = 3, each engine under a
+`SnapshotEngine` with a never-fsynced WAL in a temp dir. A `SET NX` with a ten-second TTL goes
+through the coordinator. The coordinator's WAL holds one entry, asserted equal to
+`CommandCodec.encode(Set(key, value, ttl = 10s), EPOCH)`: condition gone, deadline settled. Both
+`Replicate` envelopes on the in-memory transport's `sent` log carry exactly `op + body` of that
+entry. Each replica's WAL holds the two entries the logged entry decodes to (`SET` without TTL,
+then `EXPIRE` at the deadline), byte for byte. Red by construction against the base: the
+`Replicate` message had no `command` field, so the test did not compile before the proto change.
+
+**What was deleted.** The test kit's `TokenCodec.kt` (the kit's partial command encoding), the
+server's `CommandTokens.kt` (`commandToTokens`) and `CommandTokensTest.kt`. `TokenCodec` was
+also the reason T64's round-trip test built its own routers; that test's comment no longer
+points at T65. `GrpcTransportTest`'s one-envelope-per-case fixture builds `Replicate` and `Read`
+with opaque `command` bytes, as it does for `dvv`. `DistributedSnapshotTest` reads a channel
+log's write tag out of the decoded command (a `SET`'s value, or the lone harness's `INCRBY`
+delta) instead of token 2.
+
+**Docs.** ADR 0003 gains the line: since T65 the command ships as the engine command codec's
+bytes, the entry the coordinator logged, framed op code first. `CONTEXT.md`'s hint entry and
+`HintStore`'s header say "the logged entry's bytes" where they said "tokens".
+
+**Tests.** engine 158, cluster 87 to 88, cp 103, server 103 to 102 (`CommandTokensTest` gone),
+all green. Diff 18 files, +138/-347. The three known flaky tests did not flake in the green run.
+
+**Deviations.** None from the ticket. One judgment call: a write whose reply is a nil bulk
+(an empty-list `LPOP`) used to be replicated and applied as a no-op on the replicas; now
+`whatChanged` says nothing changed and nothing ships. The coordinator's version bump still
+happens first, exactly as it did for a refused conditional `SET` before this ticket.
+
+**For the next ticket.**
+
+- T66 (the versioned store): `Replication.write` now has the shape T66 wants to move, a
+  `versions.compute` bump, an engine submit, a `whatChanged`, a frame; the replica side is
+  `versions[key]` + spec 5.3's three-way `when` + a loop of submits. The version bump before the
+  engine runs and the replicate's key coming from `commands.first()` are the two places a
+  versioned store takes over. `RecordingEngine` in `ReplicationTest` is still the double for
+  C4; T66 deletes it.
+- T73 (or whoever touches the wire next): `frame`/`unframe` are the only framing on the cluster
+  seam; `Router` keeps `single()` and a comment saying why. If a forward ever needs to carry a
+  settled deadline, drop the `single()` and pass the codec a `now` on the forwarding side.
+  `expires_at_millis` on `Replicate` is now redundant with the bytes; it stays only for
+  `HintStore.pending`'s expiry sweep without a decode.

@@ -329,7 +329,8 @@ class CommandParserTest {
      * No spec line asks for `EXAT`, `PXAT` or `PSETEX`. Spec 2.1 gives `SET` the flags `NX`, `XX`,
      * `EX` and `PX`, and the Redis-compat-for-CP set (CP spec 6.2) names `SETEX` without its
      * millisecond twin, so T62 deleted the three rows instead of leaving unrequested commands in
-     * the parser. `PEXPIREAT` stays: `CommandTokens` forwards every `Command.Expire` as one.
+     * the parser. `PEXPIREAT` stays: it was the forward's spelling of every `Command.Expire`
+     * from T19 until the codec took over (T64, T65).
      */
     @Test
     fun `EXAT PXAT and PSETEX are not commands here`() {

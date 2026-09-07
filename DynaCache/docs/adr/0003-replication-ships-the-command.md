@@ -8,6 +8,9 @@ exactly as a forward does (T19), with NX/XX already decided and the TTL turned i
 instant, plus the version it created. A replica parses the tokens, applies them through its own
 engine and stores the version in its side table.
 
+Since T65 the command ships as the engine command codec's bytes: the entry the coordinator
+logged, framed op code first, so a replica applies exactly what the coordinator's log holds.
+
 Consequence: a command that depends on the replica's current value (`INCRBY`, `APPEND`, `LPOP`)
 produces the same result only when the replica held the same value, which the quorum makes true
 in the steady state and a missed write breaks until anti-entropy (T28) repairs it. Spec 5.3's

@@ -7,7 +7,10 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.FileSnapshotParts
+import dynacache.engine.persist.FsyncPolicy
+import dynacache.engine.persist.SnapshotEngine
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
@@ -16,6 +19,7 @@ import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit.SECONDS
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.name
@@ -241,6 +245,32 @@ class DistributedSnapshotTest {
         assertEquals(Part(emptySet(), mapOf(peer to setOf(1))), part, "delivered during the cut: on the channel, not in the state")
     }
 
+    /**
+     * A node with a data directory and a snapshot directory, wired as `clusterMain` wires every
+     * persisting node. Its peer never answers the marker, so the set is aborted at the deadline
+     * and deleted whole; the writes acked between the cut and the abort are on the node's own
+     * log, which lives under the data directory and never inside the part (spec 2.8 recovery).
+     */
+    @Test
+    fun C14_writes_after_the_cut_survive_an_aborted_snapshot_set() = runTest {
+        val data = dir.resolve("data")
+        val node = Lone(clock, backgroundScope, dataDir = data, deadline = 30.seconds)
+        assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
+        node.snapshot.initiate("s1")
+        assertEquals(ok, node.engine.submit(Command.Set(counted, "2".toByteArray())).await())
+        assertEquals(ok, node.engine.submit(Command.Set(Key("after"), "3".toByteArray())).await())
+
+        advanceTimeBy(31.seconds)
+        runCurrent()
+        assertFalse(dir.resolve("s1").exists(), "the set was aborted at the deadline")
+        node.close()
+
+        val restarted = Lone(clock, backgroundScope, dataDir = data)
+        assertEquals(Reply.Bulk("2".toByteArray()), restarted.engine.submit(Command.Get(counted)).await(), "acked after the cut")
+        assertEquals(Reply.Bulk("3".toByteArray()), restarted.engine.submit(Command.Get(Key("after"))).await(), "acked after the cut")
+        restarted.close()
+    }
+
     private val self = NodeId("node-1")
     private val peer = NodeId("node-2")
     private val counted = Key("n")
@@ -248,7 +278,7 @@ class DistributedSnapshotTest {
 
     /** What the peer replicates during the cut: not idempotent, so a second application shows. */
     private val incr: Envelope = Envelope.newBuilder().setFrom(peer.name).setTo(self.name)
-        .setReplicate(Replicate.newBuilder().setId(1).addAllToken(TokenCodec.tokens(Command.IncrBy(counted, 1)).map(ByteString::copyFrom)))
+        .setReplicate(Replicate.newBuilder().setId(1).setCommand(ByteString.copyFrom(CommandCodec.frame(Command.IncrBy(counted, 1)))))
         .build()
 
     /**
@@ -257,20 +287,33 @@ class DistributedSnapshotTest {
      * its marker back, so the part waits without a deadline: under `runTest` a finite one fires
      * as soon as the test idles on the initiator's thread and deletes the set under the test.
      */
-    private inner class Lone(snapshotClock: Clock, scope: CoroutineScope) {
+    private inner class Lone(
+        snapshotClock: Clock,
+        scope: CoroutineScope,
+        /** The node's own RDB and log (spec 2.8), restored at construction; null persists nothing. */
+        dataDir: Path? = null,
+        deadline: Duration = Duration.INFINITE,
+    ) {
         val engine = ApEngine(1, clock)
+        init {
+            dataDir?.let { SnapshotEngine(engine, it.createDirectories(), clock, fsync = FsyncPolicy.NEVER).restore() }
+        }
         val snapshot = DistributedSnapshot(
             self, listOf(peer), InMemoryTransport().endpoint(self),
             FileSnapshotParts(dir, self.name, engine, snapshotClock),
-            demux = ::demux, scope = scope, deadline = Duration.INFINITE,
+            demux = ::demux, scope = scope, deadline = deadline,
         )
 
         suspend fun demux(envelope: Envelope) {
             if (snapshot.receive(envelope) || !envelope.hasReplicate()) return
-            engine.submit(TokenCodec.command(envelope.replicate.tokenList.map(ByteString::toByteArray))).await()
+            engine.submit(CommandCodec.unframe(envelope.replicate.command.toByteArray()).single()).await()
         }
 
-        fun close() = engine.close()
+        /** The crash of spec 2.8: nothing is saved on the way out, so recovery is the log alone. */
+        fun close() {
+            engine.wal?.close()
+            engine.close()
+        }
     }
 
     /** A clock whose first reading parks its caller until [release]; every reading is the epoch. */
@@ -302,6 +345,13 @@ class DistributedSnapshotTest {
         error("nothing was sent")
     }
 
+    /** The write's tag: the value a cluster `SET` carries, or the delta of the lone harness's [incr]. */
+    private fun tag(replicate: Replicate): Int = when (val write = CommandCodec.unframe(replicate.command.toByteArray()).single()) {
+        is Command.Set -> write.value.decodeToString().toInt()
+        is Command.IncrBy -> write.delta.toInt()
+        else -> error("no tag in $write")
+    }
+
     /**
      * Every node's part of snapshot set [id]: its state and its channels through the persist
      * adapter, the set's own directory listed for the parts. Which channels a part recorded is
@@ -323,7 +373,7 @@ class DistributedSnapshotTest {
             val peer = NodeId(log.name.removeSurrounding("from-", ".wal"))
             peer to parts.replay(id, peer.name).map { Envelope.parseFrom(it) }
                 .filter { it.hasReplicate() }
-                .map { it.replicate.getToken(2).toStringUtf8().toInt() }
+                .map { tag(it.replicate) }
                 .toSet()
         }
         node to Part(state.toSet(), channels)

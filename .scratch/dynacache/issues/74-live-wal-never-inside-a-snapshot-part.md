@@ -15,16 +15,16 @@ remove a file recovery needs. Found by T55, pre-existing since T36.
 
 **Nature:** concurrent durability protocol, C14 and spec 2.8 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache cd198a36, merged into misc/ai_gen)
 
-- [ ] `C14_writes_after_the_cut_survive_an_aborted_snapshot_set`: a node with a data directory
+- [x] `C14_writes_after_the_cut_survive_an_aborted_snapshot_set`: a node with a data directory
       and a snapshot directory cuts a part, acks writes after the cut, aborts the set at its
       deadline, restarts, and every acked write is present
-- [ ] `snapshot_part_holds_the_log_up_to_the_cut_only`: the part's log content equals the WAL
+- [x] `snapshot_part_holds_the_log_up_to_the_cut_only`: the part's log content equals the WAL
       up to the cut and nothing after; the live WAL file is not under any part
-- [ ] `chandy_lamport_restorable`, `I12_reads_after_restore_return_snapshot_time_values`, every
+- [x] `chandy_lamport_restorable`, `I12_reads_after_restore_return_snapshot_time_values`, every
       WAL, recovery and P4 acceptance test passes
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

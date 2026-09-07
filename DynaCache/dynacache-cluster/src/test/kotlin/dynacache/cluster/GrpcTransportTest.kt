@@ -108,12 +108,12 @@ class GrpcTransportTest {
                 ForwardReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK"))
             )
             Envelope.BodyCase.REPLICATE -> envelope.setReplicate(
-                Replicate.newBuilder().setId(7).addAllToken(listOf("SET", "k", "v").map(ByteString::copyFromUtf8))
+                Replicate.newBuilder().setId(7).setCommand(ByteString.copyFromUtf8("command"))
                     .setDvv(ByteString.copyFromUtf8("dvv")).setExpiresAtMillis(9).setHintFor("charlie")
             )
             Envelope.BodyCase.REPLICATE_ACK -> envelope.setReplicateAck(ReplicateAck.newBuilder().setId(7))
             Envelope.BodyCase.READ -> envelope.setRead(
-                Read.newBuilder().setId(7).addAllToken(listOf("GET", "k").map(ByteString::copyFromUtf8))
+                Read.newBuilder().setId(7).setCommand(ByteString.copyFromUtf8("command"))
             )
             Envelope.BodyCase.READ_REPLY -> envelope.setReadReply(
                 ReadReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK")).setDvv(ByteString.copyFromUtf8("dvv"))
