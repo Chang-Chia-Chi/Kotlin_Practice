@@ -1,6 +1,5 @@
 package dynacache.engine
 
-import dynacache.engine.persist.RdbEntry
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
 
@@ -11,22 +10,38 @@ import java.util.concurrent.CompletableFuture
  */
 class Stored(val key: Key, val value: Value, val expiresAt: Instant?)
 
-/** Frozen copies of every live key [holds] selects, each partition scanned as one task on its own executor. */
-fun ApEngine.view(holds: (Key) -> Boolean): CompletableFuture<List<Stored>> =
-    gather(partitions.map { it.view(holds) })
-
-/** Frozen copies of the live keys among [keys], each partition asked as one task on its own executor. */
-fun ApEngine.view(keys: Collection<Key>): CompletableFuture<List<Stored>> =
-    gather(keys.groupBy { partitionOf(it).index }.map { (index, part) -> partitions[index].view(part) })
-
 /**
- * Puts [stored] under its key exactly as a restore does: through the partition's one write
- * funnel, on its executor, replacing what was held, TTL and all. Not logged to the WAL: like a
- * restore, an installed value is what a peer already holds durably, and a node that recovers
- * from its own log will be handed it again by the next anti-entropy round.
+ * One partition's store for the length of one task on its thread (T66): frozen copies of its
+ * live keys, a copy put back under its key, and a command run here and now. A caller that
+ * keeps something beside a value -- the cluster keeps its version -- moves both inside the one
+ * task, so no reader on this thread sees one without the other.
  */
-fun ApEngine.install(stored: Stored): CompletableFuture<Void> =
-    partitions[partitionOf(stored.key).index].restore(listOf(RdbEntry(stored.key, stored.value, stored.expiresAt, ByteArray(0))))
+interface StoreAccess {
 
-private fun gather(parts: List<CompletableFuture<List<Stored>>>): CompletableFuture<List<Stored>> =
-    CompletableFuture.allOf(*parts.toTypedArray()).thenApply { parts.flatMap { it.join() } }
+    /** Frozen copies of the live keys among [keys]. */
+    fun view(keys: Collection<Key>): List<Stored>
+
+    /** Frozen copies of every live key [holds] selects: a walk of the whole partition. */
+    fun view(holds: (Key) -> Boolean): List<Stored>
+
+    /**
+     * Puts [stored] under its key exactly as a restore does, replacing what was held, TTL and
+     * all; a copy already past its deadline removes the key instead. Not logged to the WAL:
+     * like a restore, an installed value is what a peer already holds durably, and a node that
+     * recovers from its own log will be handed it again by the next anti-entropy round.
+     */
+    fun install(stored: Stored)
+
+    /** Runs [command] here and now, logged as any command is. Its key must live on this partition. */
+    fun execute(command: Command): Reply
+}
+
+/** [block] as one task on [key]'s partition, with that partition's store at hand. */
+fun <R> ApEngine.onPartitionOf(key: Key, block: (StoreAccess) -> R): CompletableFuture<R> =
+    partitions[partitionOf(key).index].withStore(block)
+
+/** [block] as one task on every partition, each on its own executor and told which it is, the answers in partition order. */
+fun <R> ApEngine.onEveryPartition(block: (PartitionId, StoreAccess) -> R): CompletableFuture<List<R>> {
+    val parts = partitions.mapIndexed { index, partition -> partition.withStore { block(PartitionId(index), it) } }
+    return CompletableFuture.allOf(*parts.toTypedArray()).thenApply { parts.map { it.join() } }
+}
