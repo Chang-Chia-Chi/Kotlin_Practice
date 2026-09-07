@@ -5,6 +5,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
+import java.util.concurrent.CompletionException
 
 /**
  * Where one node keeps its **part** of each distributed snapshot **set** (spec 2.8 step 5): the
@@ -14,6 +15,11 @@ import java.time.Clock
  * The recorded bytes are opaque too. The caller hands over one message's bytes and gets the same
  * bytes back, in the order it recorded them, so nothing here knows what a marker, an envelope or
  * a protobuf is: the Chandy-Lamport rules stay with the caller and the file stays here.
+ *
+ * The file work of [cut] and [record] fails with an `IOException` when the environment refuses
+ * it: a full disk, a permission the process lost, a directory taken from under it. That is the
+ * caller's signal to abandon the set and keep serving (T80), so it is the one exception type an
+ * adapter raises for a storage failure, and nothing wrapping it leaves here.
  *
  * A set is written once and read once. [cut] opens this node's part and puts the state in it,
  * [record] appends to a channel, and [restore] with [replay] is the way back, over a part this
@@ -107,10 +113,17 @@ class FileSnapshotParts(
     // ponytail: one open-append-close per recorded message; keep the log open per channel if a
     // snapshot under heavy traffic shows it.
     override fun record(id: String, channel: String, bytes: ByteArray) {
-        WalWriter(log(id, channel), firstSeq = 0, policy = FsyncPolicy.NEVER, clock = clock)
-            // The writer hands a failed write to the append's future and nowhere else, and under
-            // `NEVER` nothing later forces it, so the future is where a full disk is seen at all.
-            .use { it.append(CHANNEL_RECORD, bytes).durable.join() }
+        try {
+            WalWriter(log(id, channel), firstSeq = 0, policy = FsyncPolicy.NEVER, clock = clock)
+                // The writer hands a failed write to the append's future and nowhere else, and
+                // under `NEVER` nothing later forces it, so the future is where a full disk is
+                // seen at all.
+                .use { it.append(CHANNEL_RECORD, bytes).durable.join() }
+        } catch (wrapped: CompletionException) {
+            // `join` wraps what the append failed with. The caller's policy reads the environment's
+            // own exception, so the future's wrapper stops at this seam rather than travelling.
+            throw (wrapped.cause as? IOException) ?: wrapped
+        }
     }
 
     override fun holds(id: String): Boolean = accepts(id) && Files.isRegularFile(SnapshotEngine.stateFile(part(id)))

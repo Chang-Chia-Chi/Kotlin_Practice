@@ -9,6 +9,7 @@ import dynacache.cluster.proto.Replicate
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -58,6 +59,31 @@ class InboundLoopTest {
         loop.deliver(ping)
 
         assertEquals(listOf(ping), gossiped)
+    }
+
+    /**
+     * The other half of T80's boundary. The loop has no per-envelope catch on purpose (T68): a
+     * handler that throws ends it, loudly, rather than leaving a node that silently drops what it
+     * receives. The one failure a node survives is the environment refusing a snapshot part, and
+     * that is caught in the snapshot handler, which is the only one that knows what to do about
+     * it; a catch here would stand over every handler and swallow the bugs too.
+     */
+    @Test
+    fun a_handler_that_throws_ends_the_loop() = runTest {
+        val channel = Channel<Envelope>(Channel.UNLIMITED)
+        val gossiped = mutableListOf<Envelope>()
+        val loop = InboundLoop(
+            channel,
+            snapshots = { throw IllegalStateException("a bug in this build") },
+            gossip = { gossiped += it },
+        )
+        channel.trySend(ping)
+        channel.close()
+
+        val failure = runCatching { loop.run() }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException, "the loop ends on a programming error: $failure")
+        assertEquals(emptyList<Envelope>(), gossiped, "the envelope was not handled on")
     }
 
     private val marker = envelope { it.setMarker(Marker.newBuilder().setSnapshotId("s1")) }

@@ -251,7 +251,7 @@ class ClusterNode(
      */
     fun snapshot(id: String) {
         val part = checkNotNull(distributed) { "$self was given no snapshot directory" }
-        scope.launch { part.start(id) }
+        scope.launch { part.initiate(id) }
     }
 
     /** Whether every incoming channel of [id] has closed here; the set is done when all nodes say so. */
@@ -297,7 +297,11 @@ class ClusterNode(
             "cluster_hints_pending:${replication.hintCount}",
             "cluster_ranges_compared:${antiEntropy.rangesCompared}",
             "cluster_keys_synced:${antiEntropy.keysSynced}",
-        ) + view.map { "member_${it.node}:${it.state.name.lowercase()},${it.incarnation}" } + ""
+            // A snapshot set this node's storage refused (T80). The node kept serving, so this
+            // count is the only place the operator learns its disk would not take a part.
+            "cluster_snapshots_abandoned:${distributed?.abandoned ?: 0}",
+        ) + listOfNotNull(distributed?.lastAbandoned?.let { "cluster_snapshot_last_failure:$it" }) +
+            view.map { "member_${it.node}:${it.state.name.lowercase()},${it.incarnation}" } + ""
         return Reply.Bulk(body + lines.joinToString(CRLF).toByteArray(Charsets.ISO_8859_1))
     }
 
