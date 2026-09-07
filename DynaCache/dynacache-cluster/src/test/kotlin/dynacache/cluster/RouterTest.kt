@@ -151,8 +151,7 @@ class RouterTest {
      * state up, so the comparison is over real replies and not a column of nils.
      *
      * The routers sit straight on engines here, with no [Replication] between: what this asserts
-     * is the forward's own round trip, and replication still carries a command as RESP tokens
-     * until T65 moves it onto the same codec.
+     * is the forward's own round trip, with nothing under it.
      */
     @Test
     fun forward_round_trips_every_keyed_variant() = runTest {

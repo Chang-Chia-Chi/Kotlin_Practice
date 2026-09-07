@@ -10,6 +10,7 @@ import dynacache.engine.Reply
 import dynacache.engine.Value
 import dynacache.engine.view
 import dynacache.engine.install
+import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.DotCeilingStore
 import dynacache.engine.persist.FileSnapshotParts
 import java.nio.file.Path
@@ -84,8 +85,6 @@ class InProcessCluster(
             membership = membership,
             counter = counter,
             clock = clock,
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
             view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
             install = engine::install,
             scope = scope,
@@ -213,7 +212,7 @@ class InProcessCluster(
         written += write.key
         val seeder = network.endpoint(SEEDER)
         val body = Replicate.newBuilder().setId(0)
-            .addAllToken(TokenCodec.tokens(write).map(ByteString::copyFrom))
+            .setCommand(ByteString.copyFrom(CommandCodec.frame(write, clock.instant())))
             .setDvv(ByteString.copyFrom(dvv.encode()))
         seeder.send(node, Envelope.newBuilder().setFrom(SEEDER.name).setTo(node.name).setReplicate(body).build())
         repeat(SETTLE_ROUNDS) {

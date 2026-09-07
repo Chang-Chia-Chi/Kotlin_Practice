@@ -151,8 +151,8 @@ deleted as a whole when a node's deadline passes with a channel still open.
 _Avoid_: backup, dump (that is the single-node RDB file)
 **Hint**:
 A write held by a node that is not one of the key's replicas, because the replica it was meant
-for was dead when the coordinator wrote (sloppy quorum). It is the whole write, unchanged: key,
-tokens, version and TTL as an instant (C5). The holder's ack counts toward W like a replica's,
+for was dead when the coordinator wrote (sloppy quorum). It is the whole write, unchanged: the
+logged entry's bytes, version and TTL as an instant (C5). The holder's ack counts toward W like a replica's,
 and when gossip sees the replica alive the holder replays the hint to it as an ordinary
 replication write and forgets it on the ack (**handoff**, I9). A hint whose TTL has passed is
 dropped instead.

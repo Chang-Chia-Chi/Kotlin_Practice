@@ -93,7 +93,6 @@ class ClusterNode(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ring = Ring.of(nodes)
-    private val parser = CommandParser(clock)
 
     private val engine = ApEngine(partitionCount, clock, maxMemoryBytes = maxMemoryBytes, policy = policy)
     private val wire = GrpcTransport(self, addresses, grpcPort)
@@ -127,8 +126,6 @@ class ClusterNode(
         membership = swim,
         counter = counter,
         clock = clock,
-        tokens = ::commandToTokens,
-        parse = ::parse,
         view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
         install = engine::install,
         scope = scope,
@@ -289,12 +286,6 @@ class ClusterNode(
             "cluster_keys_synced:${antiEntropy.keysSynced}",
         ) + view.map { "member_${it.node}:${it.state.name.lowercase()},${it.incarnation}" } + ""
         return Reply.Bulk(body + lines.joinToString(CRLF).toByteArray(Charsets.ISO_8859_1))
-    }
-
-    /** What a peer forwarded, read exactly as this node's own clients are read. */
-    private fun parse(tokens: List<ByteArray>): Command = when (val parsed = parser.parse(tokens)) {
-        is Parsed.Ok -> parsed.command
-        is Parsed.Failed -> throw IllegalArgumentException(parsed.error.message)
     }
 
     private companion object {
