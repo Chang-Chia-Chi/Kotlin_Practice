@@ -254,6 +254,10 @@ class ClusterNode(
      * Loads this node's part of snapshot [id] and replays what its channels recorded (I12). A
      * startup operation on a fresh node: it neither flushes the engine nor resets the version
      * table (T36 deviation 6), so it runs before this node's first client, not beside one.
+     *
+     * The part has to be here and complete. An id this node has no complete part of fails with
+     * an `IllegalArgumentException` and changes nothing, rather than restoring the empty state a
+     * missing part looks like on disk: an operator's typo does not empty a node.
      */
     fun restoreSnapshot(id: String) = runBlocking {
         checkNotNull(distributed) { "$self was given no snapshot directory" }.restoreFrom(id)

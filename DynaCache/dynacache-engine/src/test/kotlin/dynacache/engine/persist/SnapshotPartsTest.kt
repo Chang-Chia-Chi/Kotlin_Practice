@@ -19,6 +19,7 @@ import java.time.ZoneOffset
 import java.util.Random
 import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
+import kotlin.io.path.name
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -103,6 +104,26 @@ class SnapshotPartsTest {
         val after = engine()
         parts(after).restore("s1")
         assertEquals(Reply.Bulk(bytes("1")), after.submit(Command.Get(Key(bytes("k")))).get())
+    }
+
+    /**
+     * A part is held from the cut that puts its state on disk, and by the one node that cut it.
+     * A set never cut here, and an id of a shape this adapter refuses, are both answered rather
+     * than thrown: a restore's id is an operator's and a typo in one is an ordinary mistake.
+     * Restoring what is not held would load an empty state and so empty the node (I12).
+     */
+    @Test
+    fun a_part_is_held_from_the_cut_that_wrote_its_state() {
+        val parts = parts(engine())
+        assertFalse(parts.holds("s1"), "nothing was cut here")
+        assertFalse(parts.holds("../escape"), "an id this adapter cannot carry is held by nobody")
+        parts.cut("s1")
+        assertTrue(parts.holds("s1"))
+        assertFalse(parts(engine(), self = "node-2").holds("s1"), "the same set, another node's part")
+
+        val failure = assertThrows(IllegalArgumentException::class.java) { parts.restore("s2") }
+        assertTrue(failure.message!!.contains("s2"), failure.message)
+        assertEquals(listOf("s1"), root.listDirectoryEntries().map { it.name }, "the refused restore wrote nothing")
     }
 
     @Test

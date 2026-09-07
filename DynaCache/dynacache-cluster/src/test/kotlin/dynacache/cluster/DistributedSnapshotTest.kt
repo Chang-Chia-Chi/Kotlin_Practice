@@ -301,6 +301,51 @@ class DistributedSnapshotTest {
         cluster.close()
     }
 
+    /**
+     * A restore names a set this node has no part of, which is what an operator's typo looks
+     * like. Before this ticket the missing state file restored as an empty state, so the typo
+     * emptied a live node without a word; now the ask fails and every key reads as before (I12).
+     */
+    @Test
+    fun restore_of_a_missing_id_is_an_error_and_changes_nothing() = runTest {
+        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
+        assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
+        cluster.snapshot(cluster.nodes[0]).initiate("s1")
+        cluster.drainMessages()
+
+        for (node in cluster.nodes) {
+            val failure = failureOf { cluster.snapshot(node).restoreFrom("s2") }
+            assertTrue(failure is IllegalArgumentException, "restoring a set $node has no part of: $failure")
+        }
+
+        assertEquals(Reply.Bulk("1".toByteArray()), cluster.readVia(cluster.nodes[0], keys[0]), "the refused restore cleared nothing")
+        assertEquals(List(3) { Reply.Bulk("1".toByteArray()) }, cluster.readAllReplicas(keys[0]).values.toList())
+        cluster.close()
+    }
+
+    /**
+     * The part is on disk but its channels are still recording: the state is cut and the
+     * envelopes that were in flight at the cut are still arriving, so restoring it now would
+     * drop them (I12). A part is restorable once it is complete, and this one is not.
+     */
+    @Test
+    fun restore_of_an_incomplete_part_is_an_error() = runTest {
+        val node = Lone(clock, backgroundScope)
+        assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
+        node.snapshot.initiate("s1")
+        assertTrue(dir.resolve("s1").resolve(self.name).resolve("dump.rdb").exists(), "the state is cut")
+        assertFalse(node.snapshot.complete("s1"), "$peer never closed its channel")
+
+        val failure = failureOf { node.snapshot.restoreFrom("s1") }
+        assertTrue(failure is IllegalArgumentException, "restoring a part still recording: $failure")
+
+        assertEquals(one, node.engine.submit(Command.Get(counted)).await(), "the engine is untouched")
+        node.close()
+    }
+
+    /** What a suspending call threw, or null: `assertThrows` takes no suspending lambda. */
+    private suspend fun failureOf(block: suspend () -> Unit): Throwable? = runCatching { block() }.exceptionOrNull()
+
     private val self = NodeId("node-1")
     private val peer = NodeId("node-2")
     private val counted = Key("n")
