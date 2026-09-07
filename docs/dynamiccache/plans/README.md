@@ -12,7 +12,7 @@ Ticket files live in `.scratch/dynacache/issues/`; the progress log is `../progr
 | P4 | [p4-persistence.md](p4-persistence.md) | T31 to T37 | RDB plus WAL warm restart, Chandy-Lamport snapshot and restore |
 | P5 | [p5-cp-subsystem.md](p5-cp-subsystem.md) | T38 to T46 | Raft-backed locks, counters, semaphores, latches, CAS on `cp:*` |
 | P6 | [p6-review-fixes.md](p6-review-fixes.md) | T48 to T76, T80 to T84 | review bugs closed at root cause, codec, versioned store, one inbound loop; 74 to 76 and 80 to 84 are what the fix loop itself found |
-| P7 | [p7-performance.md](p7-performance.md) | T77 to T79, T85 | the three benchmark anomalies fixed and re-measured, plus a shutdown drain |
+| P7 | [p7-performance.md](p7-performance.md) | T77 to T79, T85, T86 | the three benchmark anomalies fixed and re-measured, plus a shutdown drain and a clean baseline |
 
 The April 2026 plans (superpowers-style, with code listings and AssertJ) are gone; the spec
 sections and named tests they cited are unchanged and are the fixed assertions here.

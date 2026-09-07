@@ -1,7 +1,6 @@
 package dynacache.cluster
 
 import dynacache.engine.Value
-import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertSame
@@ -165,8 +164,11 @@ class MergeTest {
     private fun zset(vararg members: Pair<String, Double>) =
         Value.ZSet(SkipList(1)).apply { for ((member, score) in members) writeScore(score, member.toByteArray()) }
 
-    private fun hash(vararg fields: Pair<String, String>) =
-        Value.Hash(HashTable<String, ByteArray>().apply { for ((name, text) in fields) put(name, text.toByteArray()) })
+    private fun hash(vararg fields: Pair<String, String>): Value.Hash {
+        val hash = Value.Hash()
+        for ((name, text) in fields) hash.fields.put(name, text.toByteArray())
+        return hash
+    }
 
     /** The part of a merged value that no pairing order can change. */
     private fun stable(value: Value): Any = when (value) {
