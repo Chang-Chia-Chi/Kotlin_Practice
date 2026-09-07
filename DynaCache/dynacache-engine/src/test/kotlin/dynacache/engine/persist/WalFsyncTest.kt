@@ -1,12 +1,15 @@
 package dynacache.engine.persist
 
 import dynacache.engine.testkit.MutableClock
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.ByteBuffer
 import java.nio.file.Path
+import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
@@ -20,6 +23,9 @@ class WalFsyncTest {
     lateinit var dir: Path
 
     private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
+
+    /** How long a group-commit batch stays open, read off the policy the writer runs. */
+    private val deadline: Duration = checkNotNull(FsyncPolicy.GROUP_COMMIT.deadline)
 
     @Test
     fun wal_fsync_always_durable() {
@@ -101,6 +107,84 @@ class WalFsyncTest {
     }
 
 
+    @Test
+    fun C14_group_commit_replies_only_after_fsync() {
+        val sink = CountingSink(FileChannelSink(dir.resolve("c14-group.wal")))
+        val appends = mutableListOf<WalAppend>()
+        // The sink is the boundary a reply must not cross first: whatever is waiting when a force
+        // begins is still waiting.
+        sink.beforeFsync = { assertTrue(appends.none { it.durable.isDone }, "a waiter completed before its force") }
+
+        writer(sink, FsyncPolicy.GROUP_COMMIT).use { writer ->
+            repeat(3) { i -> appends += writer.append(OP_SET, byteArrayOf(i.toByte())) }
+            assertEquals(0, sink.fsyncs.get(), "written is not forced")
+            assertTrue(appends.none { it.durable.isDone }, "written is not durable")
+
+            clock.advance(deadline)
+            writer.tick()
+
+            assertEquals(1, sink.fsyncs.get(), "one force covers the batch")
+            assertTrue(appends.all { it.durable.isDone && !it.durable.isCompletedExceptionally })
+        }
+    }
+
+    @Test
+    fun group_commit_forces_at_the_deadline_when_the_batch_stays_open() {
+        val sink = CountingSink(FileChannelSink(dir.resolve("deadline.wal")))
+
+        writer(sink, FsyncPolicy.GROUP_COMMIT).use { writer ->
+            val lonely = writer.append(OP_SET, byteArrayOf(1))
+
+            clock.advance(deadline.minusNanos(1))
+            writer.tick()
+            assertEquals(0, sink.fsyncs.get(), "a batch inside its deadline is not forced")
+            assertFalse(lonely.durable.isDone)
+
+            clock.advance(Duration.ofNanos(1))
+            writer.tick()
+            assertEquals(1, sink.fsyncs.get(), "the deadline forces the open batch")
+            assertTrue(lonely.durable.isDone)
+
+            writer.tick()
+            assertEquals(1, sink.fsyncs.get(), "an idle tick forces nothing")
+        }
+    }
+
+    @Test
+    fun group_commit_forces_once_per_batch_not_per_write() {
+        val sink = CountingSink(FileChannelSink(dir.resolve("once.wal")))
+
+        writer(sink, FsyncPolicy.GROUP_COMMIT).use { writer ->
+            val appends = (1..50).map { writer.append(OP_SET, byteArrayOf(it.toByte())) }
+            assertEquals(0, sink.fsyncs.get(), "fifty writes and no deadline passed, no force")
+
+            clock.advance(deadline)
+            writer.tick()
+
+            assertEquals(1, sink.fsyncs.get(), "fifty writes, one force")
+            assertTrue(appends.all { it.durable.isDone && !it.durable.isCompletedExceptionally })
+        }
+    }
+
+    @Test
+    fun reused_batch_buffer_writes_each_batch_whole() {
+        val path = dir.resolve("reuse.wal")
+        val sink = CountingSink(FileChannelSink(path))
+        val big = ByteArray(96 * 1024) { it.toByte() }
+
+        writer(sink, FsyncPolicy.NEVER).use { writer ->
+            // The first batch grows the reused buffer; the second must carry its own bytes only.
+            writer.append(OP_SET, big)
+            writer.append(OP_SET, byteArrayOf(7))
+        }
+
+        val onDisk = WalReader(path).readAll()
+        assertEquals(WalStop.CLEAN_END, onDisk.stop)
+        assertEquals(2, onDisk.entries.size)
+        assertArrayEquals(big, onDisk.entries[0].payload)
+        assertArrayEquals(byteArrayOf(7), onDisk.entries[1].payload)
+    }
+
     /**
      * [count] appenders on their own threads. The first to flush is held inside its fsync until
      * every other appender has enqueued and returned, so the batch that follows holds them all.
@@ -139,12 +223,17 @@ class WalFsyncTest {
         @Volatile
         var holdFirstFsync: CountDownLatch? = null
 
+        /** Run at the head of every fsync, before the force it counts. */
+        @Volatile
+        var beforeFsync: () -> Unit = {}
+
         override fun write(bytes: ByteBuffer) {
             writes.incrementAndGet()
             delegate.write(bytes)
         }
 
         override fun fsync() {
+            beforeFsync()
             if (fsyncs.incrementAndGet() == 1) holdFirstFsync?.let { assertTrue(it.await(5, TimeUnit.SECONDS)) }
             delegate.fsync()
         }

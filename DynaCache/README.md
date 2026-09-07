@@ -33,7 +33,7 @@ the ring, and no command ever reaches both.
 A single node, with everything optional defaulted:
 
 ```
-dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER] [cp-self] [cp-members]
+dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER|GROUP_COMMIT] [cp-self] [cp-members]
 ```
 
 `dir` turns on persistence: the last snapshot and the log after it are restored before the port
@@ -43,6 +43,7 @@ opens, and one more snapshot is written at shutdown. `cp-members` is `id@host:po
 ```bash
 dynacache                                   # port 6379, 16 partitions, no disk, no CP
 dynacache 6379 16 /var/lib/dynacache ALWAYS # persistent, fsync on every write
+dynacache 6379 16 /var/lib/dynacache GROUP_COMMIT # persistent, one fsync per 2 ms of writers
 dynacache 6379 16 /var/lib/dynacache EVERY_SECOND n1 n1@10.0.0.1:9001,n2@10.0.0.2:9001,n3@10.0.0.3:9001
 ```
 
