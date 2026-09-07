@@ -19,7 +19,7 @@ import kotlinx.coroutines.sync.withLock
  * business: this class holds the marker rules and the channel bookkeeping, and hands the
  * adapter one channel's name and one envelope's bytes at a time.
  *
- * [initiate] is step 1, [receive] steps 2 and 3 fed by the node's inbound loop, [complete] step 4
+ * [start] is step 1, [receive] steps 2 and 3 fed by the node's inbound loop, [complete] step 4
  * for this node; the whole snapshot is complete when every node's part is. A part starts by
  * cutting the state and only then opens its channels, and the demux waits out the cut, so an
  * envelope is in the state or on a channel, never both (C10, I12). Recording happens beside
@@ -57,13 +57,6 @@ class DistributedSnapshot(
      * receiver cuts on the demux's own coroutine.
      */
     private val cutting = Mutex()
-
-    /**
-     * Step 1: this node records its state and sends a marker on every outgoing channel. [id] is
-     * an operator's, not the wire's, so an id [parts] refuses fails here rather than being
-     * dropped: what this node initiates always has the shape the adapter accepts.
-     */
-    suspend fun initiate(id: String) = start(id)
 
     /** Step 4 for this node: a marker arrived on every incoming channel. */
     fun complete(id: String): Boolean = open[id]?.isEmpty() == true
@@ -111,10 +104,16 @@ class DistributedSnapshot(
         }
     }
 
-    private suspend fun start(id: String) {
+    /**
+     * Step 1: this node records its state and sends a marker on every outgoing channel. An
+     * operator's [id] arrives here unasked about, so one [parts] refuses fails rather than being
+     * dropped: what this node starts always has the shape the adapter accepts. An id off the
+     * wire is asked about in [receive] before it reaches here.
+     */
+    suspend fun start(id: String) {
         require(!open.containsKey(id)) { "snapshot $id already started on $self" }
         // The state before the channels (spec 2.8 step 1, then step 2). `open` is what tells the
-        // demux -- another coroutine on a real node, where `initiate` runs on the node's scope --
+        // demux -- another coroutine on a real node, where `start` runs on the node's scope --
         // that it may start appending, and the lock holds it off while the state is being cut:
         // what it applied before the cut is in the state, what it records is applied after the
         // cut, and nothing is in both.
