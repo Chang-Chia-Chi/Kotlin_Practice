@@ -6,8 +6,8 @@ Companion to: `docs/dynamiccache/design-spec.md` (AP engine, C1 to C15, I1 to I1
 Purpose: break DynaCache into tickets small enough for one fresh subagent each, with fixed
 contracts and fixed assertions, so implementations may vary but assertions may not.
 
-Tickets are `T01` to `T73`: `T01` to `T46` grouped into phases `P1` to `P5`, `T47` a
-measurement addendum to P1, and `T48` to `T73` the review fixes and deepening of `P6` (one
+Tickets are `T01` to `T76`: `T01` to `T46` grouped into phases `P1` to `P5`, `T47` a
+measurement addendum to P1, and `T48` to `T76` the review fixes and deepening of `P6` (74 to 76 are follow-ups found during the fix loop) (one
 file per phase under `plans/`). Ticket files live in `.scratch/dynacache/issues/NN-<slug>.md`. The progress log is
 `docs/dynamiccache/progress.md`. This directory is the authority for spec, plan and progress;
 `DynaCache/CONTEXT.md` is the glossary and `DynaCache/docs/adr/` holds the architecture

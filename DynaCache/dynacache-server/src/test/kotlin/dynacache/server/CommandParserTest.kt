@@ -1,6 +1,8 @@
 package dynacache.server
 
 import dynacache.engine.Command
+import dynacache.engine.CpNamespace
+import dynacache.engine.Key
 import dynacache.engine.Reply
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -36,6 +38,8 @@ private fun row(wire: String, variant: KClass<out Command>, means: (Command) -> 
     Row(wire, variant, means)
 
 private fun at(secondsFromNow: Long): Instant = FIXED_CLOCK.instant().plusSeconds(secondsFromNow)
+
+private fun key(text: String) = Key(text)
 
 class CommandParserTest {
 
@@ -462,6 +466,74 @@ class CommandParserTest {
                 assertDoesNotThrow(words.joinToString(" ")) { parse(*words) }
             }
         }
+    }
+
+    // ---- The cp: namespace rule (T71) --------------------------------------------------------
+
+    /**
+     * CP spec 9.5 defines the Redis-compat-for-CP set as these fifteen names. [CpNamespace.COMPAT]
+     * is that set written once, as the commands the names parse to, so a name the parser collapses
+     * into another command (`SETEX` into `SET`, `DECR` into `INCRBY`) is still covered by it.
+     */
+    @Test
+    fun compat_set_matches_cp_spec_9_5() {
+        val nine_five = listOf(
+            "SET k v", "GET k", "DEL k", "EXISTS k", "INCR k", "DECR k", "INCRBY k 1", "DECRBY k 1",
+            "SETEX k 10 v", "EXPIRE k 10", "PEXPIRE k 10000", "TTL k", "PTTL k", "PERSIST k", "TYPE k",
+        )
+        nine_five.forEach { wire ->
+            val parsed = command(*wire.split(" ").toTypedArray())
+            assertTrue(parsed::class in CpNamespace.COMPAT, "$wire parses to ${parsed::class}, outside the compat set")
+        }
+        // And nothing else: a Redis command outside the set never reaches the CP engine (C16).
+        listOf("LPUSH k v", "STRLEN k", "APPEND k v", "HSET k f v", "MGET a b").forEach { wire ->
+            val parsed = command(*wire.split(" ").toTypedArray())
+            assertFalse(parsed::class in CpNamespace.COMPAT, "$wire parses to ${parsed::class}, inside the compat set")
+        }
+    }
+
+    /**
+     * The parser emits the CP verb for a `cp:` key itself (T71), so the dispatcher only routes.
+     * `EXPIRE` matters most: the span is what the CP log evaluates against log time (CP spec 5),
+     * so it goes to the verb whole rather than becoming an instant here and a span again there.
+     */
+    @Test
+    fun the_parser_emits_cp_verbs_for_cp_keys() {
+        assertEquals(Command.Cp.LongIncr(key("cp:counter:x")), command("incr", "cp:counter:x"))
+        assertEquals(Command.Cp.LongGet(key("cp:counter:x")), command("get", "cp:counter:x"))
+        assertEquals(Command.Cp.LongSet(key("cp:counter:x"), 5), command("set", "cp:counter:x", "5"))
+        assertEquals(Command.Cp.RefGet(key("cp:ref:r")), command("get", "cp:ref:r"))
+        assertEquals(
+            Command.Cp.LongTtl(key("cp:counter:x"), Command.Ttl.Precision.MILLIS),
+            command("pttl", "cp:counter:x"),
+        )
+        assertEquals(Command.Cp.LongPersist(key("cp:counter:x")), command("persist", "cp:counter:x"))
+
+        val ttl = Duration.ofSeconds(10)
+        assertEquals(Command.Cp.LongExpire(key("cp:counter:x"), ttl), command("expire", "cp:counter:x", "10"))
+        assertEquals(Command.Cp.LongExpire(key("cp:counter:x"), ttl), command("pexpire", "cp:counter:x", "10000"))
+        assertEquals(Command.Cp.RefExpire(key("cp:ref:r"), ttl), command("expire", "cp:ref:r", "10"))
+        assertEquals(
+            Command.Cp.RefExpire(key("cp:ref:r"), ttl),
+            command("expireat", "cp:ref:r", "${FIXED_CLOCK.instant().epochSecond + 10}"),
+        )
+        assertEquals(
+            Command.Cp.RefExpire(key("cp:ref:r"), ttl),
+            command("pexpireat", "cp:ref:r", "${FIXED_CLOCK.instant().toEpochMilli() + 10_000}"),
+        )
+        // A plain key still becomes the AP command it always was.
+        assertEquals(Command.Expire(key("k"), at(10)), command("expire", "k", "10"))
+    }
+
+    /**
+     * A command the namespace refuses is left as it parsed: the refusal belongs to the dispatcher,
+     * where it stays an execution error rather than a parse error that would abort a `MULTI`.
+     */
+    @Test
+    fun a_refused_cp_command_is_left_for_the_dispatcher() {
+        assertTrue(command("get", "cp:lock:x") is Command.Get, "a kind mismatch was refused at parse time")
+        assertTrue(command("del", "cp:counter:x") is Command.Del, "a compat verb with no CP verb was refused early")
+        assertTrue(command("expire", "cp:lock:x", "10") is Command.Expire)
     }
 }
 

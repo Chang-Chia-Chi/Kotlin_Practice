@@ -15,15 +15,15 @@ fixed in ticket 54 cannot recur because there is one lookup.
 
 **Nature:** routing, C16, C22, I22 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache c4a87a68, merged into misc/ai_gen)
 
-- [ ] One function from key to CP kind and one compat-set definition exist in DynaCache;
+- [x] One function from key to CP kind and one compat-set definition exist in DynaCache;
       `-NOTCP` is produced from one place
-- [ ] `cp_kind_lookup_covers_every_prefix` and `compat_set_matches_cp_spec_9_5`
-- [ ] The parser emits CP verbs for `cp:` keys; no instant-to-duration round trip remains
-- [ ] `I22_namespaces_never_cross`, `C16_`, `C22_` and every dispatcher, compat, routing and P5
+- [x] `cp_kind_lookup_covers_every_prefix` and `compat_set_matches_cp_spec_9_5`
+- [x] The parser emits CP verbs for `cp:` keys; no instant-to-duration round trip remains
+- [x] `I22_namespaces_never_cross`, `C16_`, `C22_` and every dispatcher, compat, routing and P5
       acceptance test pass; the kind-mismatch reply is tested and its choice recorded
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

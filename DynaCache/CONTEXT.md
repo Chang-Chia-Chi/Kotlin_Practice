@@ -16,11 +16,25 @@ _Avoid_: data engine, store, service
 
 **Dispatcher**:
 The router in front of both engines that sends a command to the AP or the CP engine by the
-namespace rules of the CP spec. The one thing it does to a command is **re-target** it: a Redis
-command of the compat set on a `cp:` key becomes the CP verb it means, so `INCR cp:counter:x` and
-`CP.LONG.INCR cp:counter:x` are one command by the time an engine sees them. It never rewrites a
-reply and never sends one command to both engines.
+**namespace rule**. Routing is all it does: it never rewrites a reply and never sends one
+command to both engines.
 _Avoid_: gateway, front controller, translator
+
+**Namespace rule**:
+The one answer to "is this a CP key, which primitive kind owns it, and which Redis commands may
+touch it", written beside the CP command hierarchy in the engine and read by the parser, the
+dispatcher, both CP engines and the AP engine. It **re-targets** a Redis command of the compat
+set on a `cp:` key onto the CP verb the key's kind means, so `INCR cp:counter:x` and
+`CP.LONG.INCR cp:counter:x` are one command by the time an engine sees them, and it produces the
+namespace's two refusals: `-NOTCP` for a command the namespace does not answer, `-WRONGTYPE` for
+a verb of one primitive aimed at another primitive's key (CP spec 6.8).
+_Avoid_: routing table, prefix check
+
+**CP kind**:
+Which primitive owns a `cp:` key, read from the sub-namespace it is written in (CP spec 2):
+counter, lock, semaphore, latch, reference, session. A `cp:` key in none of them is **untyped**
+and the counter answers it.
+_Avoid_: type, class, primitive type
 
 **Redis-compat set**:
 The Redis commands the `cp:` namespace answers (`SET`, `GET`, the `INCR` family, `SETEX` and the

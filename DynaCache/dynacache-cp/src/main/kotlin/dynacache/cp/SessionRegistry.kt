@@ -9,7 +9,9 @@ import dynacache.engine.Reply
  * next id. A session lapses when its timeout has run out since its last heartbeat; who notices
  * and who releases what it held is the composite's business, this only keeps the book.
  */
-class SessionRegistry {
+class SessionRegistry : CpPrimitive {
+
+    override val id = CpPrimitive.SESSIONS
 
     private val sessions = HashMap<Long, Session>()
     private var lastId = 0L
@@ -37,15 +39,25 @@ class SessionRegistry {
     fun lapsed(now: Long): List<Long> =
         sessions.filterValues { it.lastHeartbeat + it.timeoutMs <= now }.keys.toList()
 
-    fun snapshot() = State(lastId, HashMap(sessions))
+    /** The id the next session will get, then every live session; sorted, so equal state is equal bytes. */
+    override fun snapshot(): ByteArray = CpWire.bytes {
+        writeLong(lastId)
+        writeInt(sessions.size)
+        sessions.toSortedMap().forEach { (sessionId, session) ->
+            writeLong(sessionId)
+            writeLong(session.lastHeartbeat)
+            writeLong(session.timeoutMs)
+        }
+    }
 
-    fun restore(state: State) {
-        lastId = state.lastId
+    override fun restore(bytes: ByteArray) {
+        val (restoredLastId, restored) = CpWire.read(bytes) {
+            readLong() to List(readInt()) { readLong() to Session(readLong(), readLong()) }.toMap()
+        }
+        lastId = restoredLastId
         sessions.clear()
-        sessions.putAll(state.sessions)
+        sessions.putAll(restored)
     }
 
     data class Session(val lastHeartbeat: Long, val timeoutMs: Long)
-
-    data class State(val lastId: Long, val sessions: Map<Long, Session>)
 }

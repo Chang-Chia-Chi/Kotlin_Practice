@@ -312,3 +312,44 @@ under parallel agents schedule 68 after 64.
 - **Acceptance:** MULTI/EXEC, EVAL, Lua, P1 and P5 acceptance unchanged; no batch code outside
   the AP engine and the handler.
 - **Model:** Opus. **Size:** small.
+
+---
+
+## Addendum: findings from the fix loop (T74 to T76)
+
+T55 found three pre-existing gaps in the snapshot path while moving the part adapter out of the
+cluster. Each is its own ticket, all blocked by T55; 74 first (data loss), then 75 (trust
+boundary), then 76.
+
+### T74 - The live WAL never lives inside a snapshot part
+
+- **Goal:** C14; spec 2.8 recovery. A node with both a data and a snapshot directory rotates its
+  live WAL into the part at the cut, and an aborted set deletes it, losing every acked write
+  after the cut.
+- **Deliverables:** the live WAL always continues under the data directory; a part holds the log
+  up to the cut only; deleting a part cannot remove a file recovery needs.
+- **Blocked by:** T55.
+- **Fixed contracts:** C14; spec 2.8; I12.
+- **Acceptance:** `C14_writes_after_the_cut_survive_an_aborted_snapshot_set`,
+  `snapshot_part_holds_the_log_up_to_the_cut_only`.
+- **Model:** Fable. **Size:** medium.
+
+### T75 - A marker with an unusable snapshot id is dropped
+
+- **Goal:** a wire-supplied snapshot id can never become an unintended path; a marker whose id
+  the adapter refuses is dropped and the node lives (no per-envelope catch in the inbound loop,
+  so no throw).
+- **Blocked by:** T55.
+- **Fixed contracts:** C10; the marker protocol otherwise unchanged.
+- **Acceptance:** `snapshot_id_outside_the_safe_shape_is_refused_by_the_adapter`,
+  `marker_with_an_unusable_id_is_dropped_and_the_node_lives`.
+- **Model:** Opus. **Size:** small.
+
+### T76 - Restoring a missing snapshot id is an error, not an empty node
+
+- **Goal:** a restore of an unknown or incomplete part answers an error and changes nothing.
+- **Blocked by:** T55.
+- **Fixed contracts:** I12.
+- **Acceptance:** `restore_of_a_missing_id_is_an_error_and_changes_nothing`,
+  `restore_of_an_incomplete_part_is_an_error`.
+- **Model:** Opus. **Size:** small.

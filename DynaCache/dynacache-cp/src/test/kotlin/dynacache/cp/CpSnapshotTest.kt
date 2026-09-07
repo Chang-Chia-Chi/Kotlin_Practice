@@ -126,6 +126,52 @@ class CpSnapshotTest {
         )
     }
 
+    /**
+     * C17 across a snapshot: a member brought up by an installed snapshot holds the token that
+     * snapshot carried, the next holder is granted a strictly greater one, and the sessions the
+     * snapshot carried are alive on that member, permits and all.
+     */
+    @Test
+    fun cp_snapshot_install_preserves_tokens_and_sessions() {
+        val session = populate()
+        val leader = kit.leader().config.nodeId
+        val member = kit.live().first { it != leader }
+        // Far more than the log keeps after a snapshot, so the member can only be brought up by one.
+        kit.killMember(member)
+        repeat(40) { submit(Command.Cp.LongIncr(counter)) }
+        snapshotOn(leader)
+
+        kit.restartMember(member)
+        kit.awaitApplied(member, commitIndex())
+
+        assertTrue(kit.runtime(member).node.report().log.lastSnapshotIndex > 0, "it came up on a snapshot")
+        assertEquals(1L, tokenOn(member), "the token the snapshot carried")
+        assertEquals(
+            tableOn(leader, CpPrimitive.SESSIONS),
+            tableOn(member, CpPrimitive.SESSIONS),
+            "the sessions came with the snapshot, heartbeats and timeouts included",
+        )
+
+        submit(Command.Cp.LockUnlock(lock, session, token = 1))
+        val granted = submit(Command.Cp.LockTry(lock, session, Duration.ofHours(1))) as Reply.Array
+        submit(Command.Cp.SemRelease(semaphore, session, 2))
+        kit.awaitApplied(member, commitIndex())
+
+        assertEquals(Reply.Integer(2), granted.items[1], "C17: the next token is strictly greater")
+        assertEquals(2L, tokenOn(member), "and the member that came up on the snapshot agrees")
+        assertEquals(
+            Reply.Integer(3),
+            kit.runtime(member).stateMachine.read(Command.Cp.SemAvailable(semaphore)),
+            "the permits the snapshot's session held were still there to give back",
+        )
+    }
+
+    /** The fencing token [member] holds for [lock] at its own applied index. */
+    private fun tokenOn(member: NodeId): Long =
+        ((kit.runtime(member).stateMachine.read(Command.Cp.LockState(lock)) as Reply.Array).items[1] as Reply.Integer).value
+
+    private fun tableOn(member: NodeId, id: Int) = stateOf(member).tables.first { it.id == id }
+
     private fun io.microraft.RaftNode.report() = getReport().get(REPLY_TIMEOUT_SECS, SECONDS).result
 
     private companion object {

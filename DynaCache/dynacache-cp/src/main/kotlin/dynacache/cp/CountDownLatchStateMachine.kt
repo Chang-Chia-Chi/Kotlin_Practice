@@ -10,7 +10,9 @@ import dynacache.engine.Reply
  * it is armed only from zero: a latch nobody has set counts zero, and a latch that has run out may
  * be armed again, but one still counting down may not be moved under the parties waiting on it.
  */
-class CountDownLatchStateMachine {
+class CountDownLatchStateMachine : CpPrimitive {
+
+    override val id = CpPrimitive.LATCHES
 
     private val latches = HashMap<Key, Int>()
 
@@ -36,10 +38,7 @@ class CountDownLatchStateMachine {
             Reply.Simple("OK")
         }
 
-    fun snapshot(): Map<Key, Int> = HashMap(latches)
+    override fun snapshot(): ByteArray = CpWire.encodeTable(latches) { writeInt(it) }
 
-    fun restore(state: Map<Key, Int>) {
-        latches.clear()
-        latches.putAll(state)
-    }
+    override fun restore(bytes: ByteArray) = CpWire.decodeTable(bytes, latches) { readInt() }
 }

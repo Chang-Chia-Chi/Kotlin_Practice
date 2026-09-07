@@ -38,7 +38,11 @@ class SnapshotEngine(
     private val interval: Duration = Duration.ofSeconds(300),
     private val seeds: Random = Random(),
     private val sink: (Path) -> OutputStream = { Files.newOutputStream(it) },
-    /** How the log is forced to disk; null is a node with snapshots and no log. */
+    /**
+     * How the log is forced to disk; null is snapshots with no log of their own, and such an
+     * engine never rotates, replays or deletes a log file: the engine's log, if it has one, is
+     * another [SnapshotEngine]'s to checkpoint.
+     */
     private val fsync: FsyncPolicy? = null,
 ) : AutoCloseable {
 
@@ -59,15 +63,20 @@ class SnapshotEngine(
         Files.move(temp, file, ATOMIC_MOVE, REPLACE_EXISTING)
         lastSave = now
         // Only now is everything at or below the cut in a snapshot on disk.
-        for (log in logs()) if (seqOf(log) < snapshot.walSeq) Files.delete(log)
+        if (fsync != null) for (log in logs()) if (seqOf(log) < snapshot.walSeq) Files.delete(log)
         return snapshot.walSeq
     }
 
-    /** Runs at the cut with every partition parked: the log continues in a file named for the checkpoint. */
+    /**
+     * Runs at the cut with every partition parked: the checkpoint's seq, and when the log is this
+     * engine's, the log continues in a file named for it. A snapshots-only engine (a snapshot
+     * set's part, T74) stamps the seq and leaves the log where it is: rotating it here would move
+     * the live log under a directory that is deleted whole when the set is aborted (C14).
+     */
     private fun cut(): Long {
         val wal = engine.wal ?: return 0
         val seq = wal.lastSeq
-        wal.rotate(FileChannelSink(logFile(seq)))
+        if (fsync != null) wal.rotate(FileChannelSink(logFile(seq)))
         return seq
     }
 
