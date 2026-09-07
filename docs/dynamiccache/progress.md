@@ -6120,3 +6120,389 @@ and it is testable without a cluster: `ApEngine.atomically` with two hash-tagged
 `MGET` over both. Whoever takes it should note that `Batch.execute`'s `else` is currently doing
 two jobs -- refusing what spans partitions and refusing what this partition cannot interpret --
 and only the first is about keys.
+
+---
+
+## T69 - CP primitives tested at the state machine, without Raft
+
+The five primitive suites (lock, session, semaphore, latch, reference) no longer start a Raft
+member. Each drives the composite `CpStateMachine` directly through one small test fixture,
+`Primitives`, and the tests that genuinely need a log moved to three clearly named kit-backed
+classes. No production file changed: the seam was already there, in `CpStateMachine.runOperation`
+taking a stamped `CpOp`, so the ticket's "small test-facing constructor or entry point on
+`CpStateMachine`" allowance was not needed.
+
+### The fixture's interface
+
+`DynaCache/dynacache-cp/src/test/kotlin/dynacache/cp/Primitives.kt`, 53 lines, no production
+dependency beyond the state machine and the engine test kit's `MutableClock`:
+
+- `apply(command: Command.Cp): Reply` - stamps the command the way `RaftRuntime.stamp` does
+  (`max(clock now, last applied ts + 1, last stamped + 1)`, CP spec 5) and applies it, answering
+  the composite's reply.
+- `advance(by: Duration)` - moves the fixture's clock; no entry carries the new time until the
+  next `apply` or `tick`.
+- `tick(after: Duration = ZERO)` - advances, then appends what a leader appends when the group is
+  idle: one `TtlTick`, then one `SessionClosed` per session `lapsedSessions()` reports. This is
+  the same order `RaftRuntime.tick` uses, so a lease or a session expires here exactly as it does
+  on a real leader.
+
+The stamp rule is what lets the moved assertions stay verbatim: with the clock standing still a
+stamp climbs by one millisecond per entry, in the fixture as in a group, so `remaining =
+LEASE.toMillis() - 2` still means "two entries after the TRY". The fixture starts on the kit's
+epoch (2026-09-06T00:00:00Z) for the same reason - a stamp printed by a failing assertion means
+the same in both worlds.
+
+### Moved to the state machine (25 tests, 5 suites, no Raft member)
+
+- `FencedLockTest` (9): `lock_try_acquire_release_roundtrip`, `lock_fencing_token_monotonic`,
+  `lock_reentrant_same_session`, `lock_unlock_wrong_session_rejected`,
+  `lock_unlock_wrong_token_rejected`, `lock_ttl_expires` (CP spec 10.1), `lock_ttl_renew`,
+  `lock_renew_by_non_holder_rejected`, `lock_force_unlock_overrides`.
+- `SessionTest` (5): `session_create_heartbeat_close`, `session_op_without_session_rejected`
+  (10.6), `session_timeout_closes` (10.6), `session_heartbeat_keeps_alive`, and one new test,
+  below.
+- `SemaphoreTest` (6): `sem_init_acquire_release`, `sem_over_acquire_fails`,
+  `sem_over_release_rejected`, `sem_session_death_releases`, `sem_drain`,
+  `sem_drain_of_unknown_key_leaves_it_initialisable`.
+- `CountDownLatchTest` (3): `latch_set_down_get`, `latch_down_at_zero_stays_zero`,
+  `latch_reset_only_at_zero`.
+- `AtomicReferenceTest` (3): `ref_set_get_roundtrip`, `ref_cas_byte_equality`, `ref_ttl_expires`.
+
+Every spec-named test kept its name verbatim.
+
+### New (1 test)
+
+`SessionTest.C18_close_releases_every_lock_and_permit_in_one_entry` - the direct session-close
+cascade the ticket asks for (C18, I15): one session holds two locks and two semaphore permits,
+and the single applied `SESSION_CLOSE` entry gives back all three. The kit could only ever show
+this as a commit-index count; at the state machine the "one entry" claim is the assertion itself,
+and it is the only test covering the semaphore leg of the CLOSE path (the lapse leg was already
+covered by `sem_session_death_releases`).
+
+### Kept on the kit (12 tests, 3 new classes)
+
+- `FencedLockFailoverTest` (4), from `FencedLockTest`: `cp_leader_failover_preserves_state`
+  (10.7), `I18_lock_held_across_leader_failover`,
+  `I19_lease_expires_late_never_early_across_failover`,
+  `C17_lease_expires_after_skewed_failover` (the T50 skew case). A lock across a leader change is
+  a fact about the log, not about the primitive.
+- `SessionLogTest` (3), from `SessionTest`: `I15_no_lock_owned_after_session_closed_index`
+  (asserts the index the close landed on and that two members applied it),
+  `C18_release_is_one_log_entry` (asserts the commit index moved by exactly one),
+  `C18_session_lapses_after_skewed_failover` (the T50 skew case, a lapse on a successor's own
+  idle ticks).
+- `CpConcurrencyTest` (5), one from each of four suites: `lock_mutual_exclusion` (I13),
+  `sem_concurrent_acquire_exactly_permits_succeed`, `latch_concurrent_down_correct_count`,
+  `ref_concurrent_cas_exactly_one_wins`, `I21_concurrent_cas_exactly_one_wins`. What these test
+  is that the log puts simultaneous clients in an order; applied one at a time to a state machine
+  they would assert nothing. The four private `race` helpers they used to carry are now one.
+
+`CpEngineTest`, `CpSnapshotTest`, `ChaosInvariantTest`, `CpWireTest` and `GrpcCpTest` are
+untouched.
+
+### Wall time (surefire `time`, same machine, three other Maven builds running alongside)
+
+The five primitive suites:
+
+| suite | before | after |
+| --- | --- | --- |
+| FencedLockTest | 6.043 s | 0.012 s |
+| SessionTest | 1.257 s | 0.016 s |
+| AtomicReferenceTest | 0.160 s | 0.094 s |
+| SemaphoreTest | 0.032 s | 0.011 s |
+| CountDownLatchTest | 0.029 s | 0.015 s |
+| **total** | **7.521 s** | **0.148 s** |
+
+Under the one-second acceptance bar by a factor of about fifty. The three new kit-backed classes
+carry the elections that used to sit inside the primitive suites: `FencedLockFailoverTest`
+5.332 s, `SessionLogTest` 1.481 s, `CpConcurrencyTest` 0.154 s. The point of the ticket was never
+the total, which is roughly unchanged; it is that a primitive-semantics test now costs
+milliseconds and a reader can see at a glance which twelve tests need a log.
+
+`mvn test -pl dynacache-cp -am` is green: engine 151, cluster 86, cp 96. The brief's expected
+base of engine 148 and cluster 84 is stale for those two modules, which this ticket does not
+touch; cp is the 95 the brief named, plus the one new cascade test.
+
+### Red before green
+
+The moved tests were checked against two deliberate mutations of production code, then reverted:
+
+- `FencedLockStateMachine.Lock.at(now)` made to never expire a lease - `lock_ttl_expires` failed.
+- `CpStateMachine.closeSession` made to skip `semaphores.releaseAllOf(session)` -
+  `sem_session_death_releases` and `C18_close_releases_every_lock_and_permit_in_one_entry`
+  failed.
+
+Three failures out of the 26 tests then in the five direct suites, each the test that should
+notice. `session_timeout_closes` correctly did not fail on the lease mutation: the lock it checks
+is released by the session cascade, not by lease expiry.
+
+### Deviations
+
+- **No production entry point added.** The ticket allowed a small test-facing constructor or
+  entry point on `CpStateMachine`; none was needed, since `runOperation(commitIndex, CpOp)` is
+  already public and already the seam. Zero production lines changed.
+- **A third kit-backed class.** The ticket named the failover cases; the concurrency races needed
+  a home too, since they test the log rather than a primitive. `CpConcurrencyTest` is that home.
+- **`lock_mutual_exclusion` now races through one shared helper** rather than two hand-written
+  `submit` calls. Same assertions, same property, one fewer bespoke fixture.
+- **Net diff +141 lines** (95 added and 397 removed across the five suites, 443 added in the four
+  new files), against a 200-600 budget. A move of five suites is mostly deletion; the raw diff is
+  935 lines touched. Test count in `dynacache-cp` rises by one, from 95 to 96, for the new C18
+  cascade test.
+- **Merge with T62 expected.** T62 edits `FencedLockStateMachine` (the UNLOCK reply) and
+  `FencedLockTest` in parallel. The unlock assertions were carried over verbatim into the new
+  `FencedLockTest` and `FencedLockFailoverTest`, so the conflict is a move, not a rewrite: T62's
+  changed expectations land on whichever of the two files now holds each test.
+
+### For the next ticket (T70, each CP primitive owns its snapshot bytes)
+
+- `Primitives` gives T70 a snapshot round trip with no group: build state through `apply`, take
+  `CpStateMachine.state`, restore into a second machine, compare. Only
+  `cp_snapshot_install_preserves_tokens_and_sessions` and the install-through-Raft cases need
+  `CpSnapshotTest` and the kit.
+- `CpStateMachine.takeSnapshot`/`installSnapshot` and the `Snapshot` data class are unchanged by
+  this ticket, so T70 starts from the shape recorded in the spec (10.7).
+- The fixture deliberately exposes no accessor for the state machine itself. T70 will want one
+  (to read `state` and to install a snapshot); adding a single `val stateMachine` to `Primitives`
+  is the smallest change, and was left out here under YAGNI rather than guessed at.
+
+---
+
+## T64 - A forward carries codec bytes
+
+The RESP spelling of a command no longer crosses the cluster seam. A `Forward` carries the engine
+command codec's bytes, and the coordinator decodes them with the same codec, so the two ends of a
+forward are one encoding rather than a writer in the server module and a reader in the parser.
+
+**The envelope.** `Forward`'s `repeated bytes token = 2` is gone and `bytes command = 3` replaces
+it; tag 2 and the name `token` are `reserved`. The field was removed rather than deprecated
+because nothing persists a `Forward` and both ends of the wire are this repository: a forward
+lives for one round trip between two nodes of the same build. A new tag rather than a reuse of
+tag 2, so a stale peer's tokens decode as an absent field rather than as a corrupt command.
+
+**The router.** `Router`'s constructor lost `tokens: (Command) -> List<ByteArray>` and
+`parse: (List<ByteArray>) -> Command`; nothing is injected in their place. Two private companion
+functions hold the framing T63 specified: `encode` is `CommandCodec.encode(command)` with no `now`
+(so a `SET`'s TTL crosses as the duration the client wrote and the coordinator decides its
+deadline), framed as `byteArrayOf(op) + body`; `decode` is
+`CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()`. `single` is not a bet:
+only a `SET` the log wrote with a decided deadline decodes to two commands, and a forward passes
+no `now`.
+
+`coordinate`'s `runCatching` stayed. An unreadable forward is now impossible between peers of this
+build - the codec wrote it, so the codec reads it - but a corrupted envelope or an older peer's
+tokens still arrive as an empty or unknown-op `command` field, and a throw on the demux would
+leave `run` dead and take the node's gossip down with its forwarding. The guard is cheap and the
+failure it prevents is the whole node.
+
+**What was deleted, and what was not.** Deleted: the two constructor parameters and the two
+arguments at each of the three call sites (`ClusterNode`, the kit's `InProcessCluster`,
+`RouterTest`).
+
+**`commandToTokens` is still alive, and its remaining caller is `Replication`.** The ticket allowed
+either deletion or a named caller; this is the named caller.
+`dynacache-server/.../ClusterNode.kt` still passes `tokens = ::commandToTokens, parse = ::parse` to
+the `Replication` constructor, and `Replication` still spells a `Replicate` and a `Read` in RESP
+tokens (`Replication.kt:131` and `:154`). The same holds for the test kit's `TokenCodec`: the kit's
+`InProcessCluster` still hands it to `Replication` and to `seed`, and `DistributedSnapshotTest`,
+`ReadRepairTest` and `ReplicationTest` still use it. T65 moves replicates onto the codec and both
+files go then. `CommandTokensTest` in the server module is untouched and still passes.
+
+**Tests.** `forward_round_trips_every_keyed_variant` in
+`dynacache-cluster/src/test/kotlin/dynacache/cluster/RouterTest.kt`: 38 keyed variants and all 4
+fanned ones, run in an order that builds the string, hash, list and sorted-set keys before it
+reads them, each once through the key's coordinator and once through a node that has to forward,
+asserted equal. The conditional `SET` with a TTL is the first sample; the multi-key read is
+`MGET`. Two guards keep the equality from being vacuous: the direct run must not answer an error
+(two matching "unreadable forwarded command" replies would otherwise pass), and a fanned sample's
+keys must all share a coordinator, which the `{multi}` hash tag gives them, so the direct run
+forwards nothing at all. A `classify` function with a `when` exhaustive over `Command` stops the
+build when a variant is added to the engine.
+
+Counts: engine 158, cluster 86 to 87, cp 95, server 100, all green. Diff 6 files, +233/-27.
+
+**Deviation 1: the round-trip test builds its own routers rather than using `InProcessCluster`.**
+The kit puts `Replication` under every router, and `Replication.write` calls `tokens(...)`
+eagerly, before the quorum, so even at n=1/w=1 a forwarded `APPEND`, `PERSIST`, `HMSET`, `HDEL`,
+`LSET`, `LREM`, `POP`, `ZINCRBY` or `ZREM` dies in the test kit's `TokenCodec`, which knows six
+writes. Growing that codec to 38 variants is exactly the RESP re-encoding this ticket removes and
+T65 deletes, so the test builds three routers straight over three `ApEngine`s on one
+`InMemoryTransport` instead - about 35 lines, an inner class in `RouterTest`. That is also the
+honest seam for this ticket: what it asserts is the forward's own round trip, with nothing under
+it. The four existing router tests still run through the kit, unchanged.
+
+**Deviation 2: `router_unreadable_forward_is_an_error_and_the_node_lives` changed its garbage.**
+It sent the RESP token `NOSUCH`, which no longer has a field to sit in. It now sends op code 99,
+which no command has. The test's name, shape and claim are unchanged; only the spelling of
+"unreadable" moved with the envelope.
+
+**Also touched:** `GrpcTransportTest`'s one-envelope-per-oneof-case fixture built its `Forward`
+with `addAllToken`; it now carries `GET k` as the codec writes it. No assertion changed.
+
+**For the next ticket (T65).**
+
+- `Replication`'s `tokens`/`parse` parameters and `Replication.decided()` are what is left. The
+  same two-line framing this ticket put in `Router`'s companion (`byteArrayOf(op) + body`, and
+  `decode(bytes[0], rest).single()`) is what a `Replicate` and a `Read` need. When T65 writes the
+  second copy, lifting both onto `CommandCodec` as a framed pair is worth it; one copy did not
+  justify it.
+- A `Replicate` differs from a forward in one way that matters: it passes `encode` the
+  coordinator's `now`, which is the same decision as the message's `expiresAtMillis` field, and a
+  `SET` with a deadline then decodes to two commands, so `single()` is wrong there and the list is
+  the point.
+- Deleting `commandToTokens` (`dynacache-server/.../CommandTokens.kt`) and its
+  `CommandTokensTest`, and the kit's `TokenCodec.kt`, falls out of T65 once `Replication` and
+  `InProcessCluster.seed` stop calling them. Nothing else references either file.
+
+---
+
+## T55 - A snapshot-set part is a persist adapter
+
+The cluster module no longer touches the filesystem. A node's part of a snapshot set is written
+and read by `SnapshotParts` in `dynacache.engine.persist`, and `DistributedSnapshot` keeps only
+the marker rules and the channel bookkeeping. Plan 2.2's rule that `java.nio.file` appears only
+in the engine's persist package and the cp module holds again for the cluster: there is no
+`java.nio.file`, `kotlin.io.path` or `java.io.File` import left under `dynacache-cluster/src/main`.
+
+### The interface
+
+`dynacache-engine/src/main/kotlin/dynacache/engine/persist/SnapshotParts.kt`, shaped after
+`DotCeilingStore` and `WalSink` in the same package. Set ids and channel names are opaque strings
+and the recorded bytes are opaque bytes, so nothing in the engine knows what a marker, an
+envelope or a protobuf is.
+
+```kotlin
+interface SnapshotParts {
+    fun cut(id: String)                                        // open this node's part, state into it
+    fun record(id: String, channel: String, bytes: ByteArray)  // append one whole record
+    fun restore(id: String)                                    // the state back into the engine
+    fun replay(id: String, channel: String): List<ByteArray>   // every whole record, in order
+    fun delete(id: String)                                     // the whole set, every node's part
+}
+```
+
+The one adapter is `FileSnapshotParts(root, self, engine, clock)`: a set is `<root>/<id>/`, a part
+is `<root>/<id>/<self>/`, its state is the T32 snapshot's `dump.rdb` in it, and a channel is
+`from-<peer>.wal` beside that.
+
+### Record format, crc and torn tail
+
+A channel log is an ordinary WAL: `WalWriter`/`WalReader` are reused as-is, so a record is the
+spec 2.8 entry `[crc32:u32][length:u32][seq:u64][op:u8][payload]` with the envelope's bytes as
+the payload. The header is not command-specific, so no new record writer was needed.
+
+- Torn tail (a crash mid-append): `WalReader` reports `TORN_TAIL` and `replay` answers every
+  whole record before it and stops. Covered by
+  `snapshot_part_with_torn_channel_log_replays_the_complete_prefix`.
+- Checksum failure: `replay` throws `IOException`. A torn tail is the shape a crash leaves at the
+  end of a file; a crc mismatch is corruption, and nothing at or past it is trusted. The old
+  delimited-protobuf loop had neither check.
+- Every record carries `seq = 0` and `op = 0`. A channel's order is its file order and nothing
+  reads the seq back, so the log is not a sequenced WAL, only a crc'd record file in the WAL's
+  format. Deliberate: reusing the writer is cheaper than a second record format.
+- A recorded envelope is **not** fsynced (`FsyncPolicy.NEVER`), which is exactly what the old
+  `Files.newOutputStream(...).use { writeDelimitedTo }` did. Recording happens on the node's
+  inbound path, and forcing the disk there would stall it.
+- A failed append is surfaced: `record` joins the append's `durable` future, because `WalWriter`
+  hands an `IOException` to that future and nowhere else, and under `NEVER` nothing later forces
+  it. Found in the code-review self-pass; without the join a full disk would silently drop an
+  in-flight envelope and break I12 with no error anywhere.
+
+### Compatibility with parts written before this ticket: **rejected, with a clear error**
+
+The channel log's name changed from `from-<peer>.log` to `from-<peer>.wal`, so an old part is
+recognisable. `restore` refuses one:
+`IOException("<path> predates the checksummed channel log and cannot be restored")`. Old records
+are length-delimited protobuf with no header and cannot be read as WAL records; restoring the
+state without them would silently drop everything that was in flight at the cut (I12), which is
+worse than refusing. `restore` runs before any `replay` on the only path that reads a part
+(`DistributedSnapshot.restoreFrom`), so no part can be half-restored. Covered by
+`a_part_written_before_the_channel_log_became_a_wal_is_rejected`.
+
+### What moved out of the cluster
+
+`DistributedSnapshot` lost its `engine`, `dir` and `clock` constructor parameters and gained
+`parts: SnapshotParts`; the class is 67 lines shorter in the diff. Gone from it: the
+`java.nio.file` imports, `Files.createDirectories`, the `SnapshotEngine` construction in `start`
+and `restoreFrom`, the delimited-protobuf append and `generateSequence { parseDelimitedFrom }`
+loop, the `deleteRecursively` in `abort`, and the `part(root, id)` path helper. What stayed: the
+marker rules, `open`/`aborted`, the `cutting` mutex and T49's cut-then-open order, the deadline
+timer, and the peer iteration on replay.
+
+`restoreFrom(from: Path, id: String)` became `restoreFrom(id: String)`. Every caller passed the
+same directory the adapter is already built on, so the parameter carried no information.
+
+T49's ordering is preserved and is now slightly stronger. The part directory used to be created
+before the `cutting` mutex was taken; `parts.cut(id)` now creates it and writes the state inside
+the mutex. Nothing can observe the gap: `record` is reachable only from `receive`, which takes
+the same mutex and iterates `open`, and `open[id]` is published inside the mutex strictly after
+`cut` returns.
+
+### Tests and counts
+
+New: `dynacache-engine/src/test/kotlin/dynacache/engine/persist/SnapshotPartsTest.kt`, six tests
+(`a_channel_replays_what_was_recorded_on_it_in_order`,
+`snapshot_part_with_torn_channel_log_replays_the_complete_prefix`,
+`a_channel_log_with_a_corrupt_record_is_rejected`, `a_part_holds_the_state_it_cut`,
+`a_set_is_deleted_as_a_whole`, `a_part_written_before_the_channel_log_became_a_wal_is_rejected`).
+
+| Module | Before | After |
+|---|---|---|
+| engine | 158 | 164 |
+| cluster | 86 | 86 |
+| cp | 102 | 102 |
+| server | 103 | 103 |
+
+Every Chandy-Lamport test passes unchanged in name and assertion: `chandy_lamport_consistent_cut`,
+`chandy_lamport_restorable`, `chandy_lamport_timeout_aborts`, `C10_marker_on_every_channel`,
+`I12_reads_after_restore_return_snapshot_time_values`, `I12_write_during_the_cut_is_restored_once`,
+`C10_state_is_cut_before_any_channel_opens`; `P4AcceptanceTest` passes.
+
+### Deviations
+
+1. **`snapshot_set_deleted_as_a_whole_on_deadline` does not exist and was not added.** The ticket
+   names it; no test under that name has ever existed. The deadline-abort test that must keep
+   passing is `chandy_lamport_timeout_aborts` (`DistributedSnapshotTest`), and it does, asserting
+   that `<dir>/s1` is gone after the deadline. The new unit-level `a_set_is_deleted_as_a_whole`
+   covers `delete` itself, without a deadline.
+2. **`SnapshotParts` is a seam with one adapter, which plan 2.1 forbids** ("A seam exists only
+   where a second adapter is real, and every seam has one in the test kit"). Built as an interface
+   because the ticket and the orchestrating brief both name an interface as the deliverable, and
+   the concrete `FileSnapshotParts` would satisfy plan 2.2 on its own. Collapsing the interface
+   into the class is a one-line change at five call sites if the plan's rule is meant to win.
+3. **The cluster test helper `recorded` reads a part's records through the adapter but still
+   finds its channels by listing `from-*.wal`.** The code-review self-pass called the glob
+   coupling to a layout the adapter now owns and suggested deriving the channels from the set's
+   node list instead. That was tried and is wrong: a peer whose envelopes were recorded need not
+   have a part of its own, which is exactly the `Lone` node in
+   `C10_state_is_cut_before_any_channel_opens` and `I12_write_during_the_cut_is_restored_once`,
+   and the refactor made that test read an empty channel map. Which channels a part recorded is a
+   fact only the files hold. Reverted, with the reason written into the helper's KDoc. If the
+   coupling is worth removing later, the adapter needs a `channels(id)` listing, which the ticket
+   did not ask for and nothing in main sources needs.
+
+### For the next ticket (T66)
+
+1. **A distributed snapshot rotates the node's live WAL into the snapshot part, and an abort
+   deletes it.** Pre-existing since T36 and moved verbatim here, not introduced by T55, but
+   `FileSnapshotParts.cut` now owns the line. `SnapshotEngine.save()` calls `cut()`, which does
+   `wal.rotate(FileChannelSink(logFile(seq)))` with `logFile` resolved under the **part**
+   directory. On a node with both `dataDir` and `snapshotDir` (which is how `clusterMain` wires
+   every persisting node: `snapshotDir = dataDir.resolve("snapshots")`) the live WAL therefore
+   continues inside the snapshot part, and `DistributedSnapshot.abort` `deleteRecursively`s the
+   set at the deadline, taking the open log file with it. Every write acked after the cut is then
+   unrecoverable on restart, since recovery reads `dataDir` only. C14 and spec 2.8's recovery
+   sequence. Not fixed here: the fix is in `SnapshotEngine`'s save/rotate contract, outside this
+   ticket's seams. No test covers it because no test wires `dataDir` and `snapshotDir` together
+   and then aborts.
+2. **A snapshot id arrives on a marker from the wire and becomes a path segment unchecked.**
+   `envelope.marker.snapshotId` reaches `root.resolve(id)` in `FileSnapshotParts`, and `abort`
+   turns that into `deleteRecursively`. Pre-existing and identical before T55. Not fixed here: a
+   bare `require` would swap a traversal for a node kill, because `Router.run` has no per-envelope
+   catch by design, so the real fix is for the marker path to ignore an unusable id, and the brief
+   put the marker protocol off-limits. Worth a ticket: validate in the adapter and have
+   `DistributedSnapshot.receive` drop a marker whose id the adapter refuses.
+3. Restoring an id that was never cut is a silent no-op that leaves the engine empty
+   (`SnapshotEngine.restore` on a missing `dump.rdb`). `ClusterNode.restoreSnapshot("typo")`
+   therefore empties a node without complaint.

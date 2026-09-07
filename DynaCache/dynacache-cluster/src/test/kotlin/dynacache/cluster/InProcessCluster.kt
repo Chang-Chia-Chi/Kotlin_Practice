@@ -11,6 +11,7 @@ import dynacache.engine.Value
 import dynacache.engine.view
 import dynacache.engine.install
 import dynacache.engine.persist.DotCeilingStore
+import dynacache.engine.persist.FileSnapshotParts
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
@@ -59,7 +60,8 @@ class InProcessCluster(
     private val loops = HashMap<NodeId, List<Job>>()
     private val snapshots: Map<NodeId, DistributedSnapshot> = nodes.associateWith { node ->
         DistributedSnapshot(
-            node, nodes - node, engines.getValue(node), transports.getValue(node), snapshotDir, clock,
+            node, nodes - node, transports.getValue(node),
+            FileSnapshotParts(snapshotDir, node.name, engines.getValue(node), clock),
             demux = { routers.getValue(node).receive(it) },
             scope = scope,
         )
@@ -104,8 +106,6 @@ class InProcessCluster(
             n = n,
             local = replication,
             transport = transport,
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
             scope = scope,
             others = { if (!replication.receive(it) && !antiEntropy.receive(it)) gossiped.getValue(node).add(it) },
             snapshots = snapshots.getValue(node)::receive,
