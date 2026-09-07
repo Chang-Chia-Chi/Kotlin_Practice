@@ -6773,3 +6773,62 @@ Net diff: 16 files, +488 / -165, net +323 (2 new files). Commit a0e5cdb4 on bran
   `CpSnapshotTest`; the spec was not edited.
 - **One new test file** rather than a snapshot case added to each of the five existing primitive
   suites, which are about semantics rather than persistence.
+
+## T74: The live WAL never lives inside a snapshot part
+
+### Built
+
+The root cause was in `SnapshotEngine`, not in the part adapter: `save()` always rotated the
+engine's live log into a file under its own directory, and `FileSnapshotParts.cut` runs a save
+rooted at the part. A `SnapshotEngine` built with `fsync = null` was already documented as
+"snapshots and no log"; that is now the ownership rule. Such an engine stamps the checkpoint's
+seq into the RDB it writes and neither rotates nor deletes a log file; the engine's log, if it
+has one, is another `SnapshotEngine`'s to checkpoint (the data directory's). Two one-token
+guards in `SnapshotEngine.cut` and `SnapshotEngine.save`, plus the contract written into the
+`fsync` parameter, `cut`'s KDoc and `SnapshotParts.cut`.
+
+A part therefore holds `dump.rdb` (the state at the cut, stamped with the log's seq at the
+cut) and its channel logs, never a `wal.*`. The live log keeps running under the data
+directory across a cut, an abort deletes the set without touching it, and recovery from the
+data directory replays every write acked after the cut. T49's cut-then-open order and T55's
+`SnapshotParts` interface are unchanged; `DistributedSnapshot` is untouched.
+
+### Tests
+
+- engine: `SnapshotPartsTest.snapshot_part_holds_the_log_up_to_the_cut_only` (new). A node
+  with a data directory cuts a part, writes on, restarts: no `wal.*` under the snapshot root,
+  the part's checkpoint seq equals the log's seq at the cut and its state holds only the
+  pre-cut value, the data directory's `wal.0` holds every entry, and the restart reads the
+  post-cut writes.
+- cluster: `DistributedSnapshotTest.C14_writes_after_the_cut_survive_an_aborted_snapshot_set`
+  (new). The test's `Lone` node gained an optional data directory (restored through
+  `SnapshotEngine`, `FsyncPolicy.NEVER`) and a deadline; its peer never answers the marker,
+  the set is aborted at 30s of virtual time, the node crashes without a save, and the restart
+  reads both writes acked after the cut. Red before the fix with the exact data-loss symptom
+  (`expected <Bulk(2)> but was <Bulk(1)>`).
+
+| Module | Tests |
+|---|---|
+| engine | 165 |
+| cluster | 88 |
+| cp | 103 |
+| server | 103 |
+
+`chandy_lamport_restorable`, `I12_reads_after_restore_return_snapshot_time_values`, every WAL
+and recovery test and `P4AcceptanceTest` pass unchanged.
+
+### Deviations
+
+1. **A part holds no log file at all.** The ticket allowed "a copy or a sealed segment of the
+   log up to the cut"; the part's RDB is that log folded, stamped with the cut's seq. A copied
+   segment would be dead weight: a part is restored by a no-log `SnapshotEngine`, which never
+   replays, and a replay would skip every entry at or below the checkpoint anyway. The
+   acceptance test asserts the checkpoint seq and the state instead of file bytes.
+2. Well under the 200-line floor (about 110 lines including tests): the fix is two guards.
+
+### For the next ticket
+
+- `SnapshotEngine.close()` still does `engine.wal?.close()` regardless of `fsync`. No caller
+  closes a part's engine, so it is harmless today; the same guard belongs there if one appears.
+- T76 could stop reading `fsync == null` as "no log" by splitting a `RdbStore` out of
+  `SnapshotEngine`; not needed for anything yet.
