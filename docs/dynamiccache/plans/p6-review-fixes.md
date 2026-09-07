@@ -353,3 +353,73 @@ boundary), then 76.
 - **Acceptance:** `restore_of_a_missing_id_is_an_error_and_changes_nothing`,
   `restore_of_an_incomplete_part_is_an_error`.
 - **Model:** Opus. **Size:** small.
+
+---
+
+## Addendum 2: what the fix loop left behind (T80 to T84)
+
+Five findings that survived P6: one bug T75 found and left, the standards review's one
+unresolved hard violation, two cleanups nobody's ticket owned, and one deliberate improvement
+to a working protocol. All five are independent; only 83 is sequenced, and only to avoid a
+merge with 81 in the same file.
+
+### T80 - A failed snapshot cut abandons the snapshot, not the node
+
+- **Goal:** availability. An ordinary `IOException` out of the cut (full disk, lost permission)
+  reaches an inbound loop with no per-envelope catch and kills the node, so one node's disk
+  problem takes its third of the keyspace with it.
+- **Deliverables:** a failed cut abandons that set locally, reports it, and the node reads its
+  next envelope; the policy's boundary is explicit, not a blanket catch that would hide bugs.
+- **Blocked by:** none. Found by T75, pre-existing since T36.
+- **Fixed contracts:** C10; T49's cut order, T74's WAL placement and T75's id check unchanged.
+- **Acceptance:** `a_cut_that_cannot_write_abandons_the_set_and_the_node_lives`,
+  `a_failed_cut_leaves_no_half_written_part`.
+- **Model:** Fable. **Size:** medium.
+
+### T81 - File operations leave the server module
+
+- **Goal:** plan 2.2 for the server, the standards review's last open hard violation. The
+  composition root needs a path as configuration; it does not need to do file work.
+- **Deliverables:** no file operation in the server's main sources; the rule's sentence
+  rewritten to say what is intended, so rule and code agree.
+- **Blocked by:** none.
+- **Fixed contracts:** plan 2.2 (amended by this ticket); the module graph otherwise.
+- **Acceptance:** no `Files`/`File`/`kotlin.io.path` operation in the server module; a node
+  still creates its data directory on first start.
+- **Model:** Opus. **Size:** small, likely net negative.
+
+### T82 - Delete the two pass-through aliases
+
+- **Goal:** the review's Middle Man list. `initiate` forwards to `start`; `reschedule` forwards
+  to `schedule` and only tests call it.
+- **Blocked by:** none.
+- **Fixed contracts:** none; no behaviour change, test names unchanged.
+- **Acceptance:** neither alias exists; every caller names the real method.
+- **Model:** Opus. **Size:** a few lines.
+
+### T83 - The CP assembly moves out of the server file
+
+- **Goal:** the review's Divergent Change finding. One 513-line file changes for the socket,
+  the handler, `main` and the whole CP wiring.
+- **Deliverables:** the CP assembly beside the CP code it wires; the server file keeps the
+  socket, the handler and `main`.
+- **Blocked by:** T81, to avoid a merge in the same file, not functionally.
+- **Fixed contracts:** the module graph; how a node starts and what a client sees.
+- **Acceptance:** existing acceptance tests unchanged in both single-node and cluster mode.
+- **Model:** Opus. **Size:** a move; report what is genuinely new.
+
+### T84 - Anti-entropy descends the tree over the wire
+
+- **Goal:** collect the property the Merkle tree exists for. The roots are compared over the
+  wire, but a mismatch ships the peer's entire leaf list and descends locally, so one bad key
+  in a large range costs the whole range.
+- **Deliverables:** a descent across the exchange, leaves only under a subtree that differs, a
+  matching range still one comparison, and a stated bound on the requests one step may issue
+  (plan 2.5's "every fan-out bounded" currently reads as "at most two requests" here).
+- **Blocked by:** none. Chosen over recording the shortcut as a deviation; the value is the
+  idea, not a measured problem at three nodes.
+- **Fixed contracts:** C6; the conflict rule, the versioned store and what a leaf is.
+- **Acceptance:** `a_single_divergent_key_costs_a_descent_not_the_range` (asserts the count),
+  `a_matching_range_still_costs_one_comparison`, plus the existing anti-entropy and
+  convergence tests unchanged.
+- **Model:** Fable. **Size:** medium.

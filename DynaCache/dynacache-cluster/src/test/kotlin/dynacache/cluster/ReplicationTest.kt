@@ -2,6 +2,7 @@ package dynacache.cluster
 
 import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.ReplicateAck
+import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
@@ -15,7 +16,6 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
-import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
@@ -125,17 +125,16 @@ class ReplicationTest {
         val (coordinator, first, second) = ring.preferenceList(key, 3)
         val network = InMemoryTransport()
         val replicas = listOf(first, second).associateWith { network.endpoint(it) }
+        val engine = ApEngine(partitionCount = 1, clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC))
         val replication = Replication(
             self = coordinator,
             ring = ring,
             config = ReplicationConfig(n = 3, w = 3, r = 1),
-            engine = RecordingEngine(),
+            engine = engine,
+            store = VersionedStore(engine, DotCounter.of(coordinator, emptyList())),
             transport = network.endpoint(coordinator),
             membership = ScriptedMembership(nodes),
-            counter = DotCounter.of(coordinator, emptyList()),
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
-            view = { CompletableFuture.completedFuture(null) },
-            install = { CompletableFuture.completedFuture(null) },
             scope = backgroundScope,
         )
         backgroundScope.launch { for (envelope in network.endpoint(coordinator).inbound) replication.receive(envelope) }
@@ -145,9 +144,15 @@ class ReplicationTest {
             replicas.getValue(from).send(coordinator, envelope)
         }
         suspend fun replicateId(): Long {
-            yield()
-            network.drain()
-            return replicas.getValue(first).inbound.receive().replicate.id
+            repeat(10) {
+                // Waits out the partition thread the write runs on, as the kit's drain does, so
+                // the write's completion is queued before the yield that runs its next step.
+                engine.submit(Command.DbSize).get()
+                yield()
+                network.drain()
+                replicas.getValue(first).inbound.tryReceive().getOrNull()?.let { return it.replicate.id }
+            }
+            error("no Replicate reached $first")
         }
 
         val sameNodeTwice = replication.submit(Command.Set(key, "v1".toByteArray()))
@@ -169,6 +174,7 @@ class ReplicationTest {
         network.drain()
         yield()
         assertEquals(Reply.Simple("OK"), twoNodes.await())
+        engine.close()
     }
 
     /**

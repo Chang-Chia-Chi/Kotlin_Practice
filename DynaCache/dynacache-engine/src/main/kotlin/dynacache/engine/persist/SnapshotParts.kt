@@ -16,9 +16,9 @@ import java.time.Clock
  * a protobuf is: the Chandy-Lamport rules stay with the caller and the file stays here.
  *
  * A set is written once and read once. [cut] opens this node's part and puts the state in it,
- * [record] appends to a channel, and [restore] with [replay] is the way back. A part that was
- * never cut restores as an empty state with no channels. [delete] takes the whole set, every
- * node's part of it, which is what an aborted snapshot does at its deadline.
+ * [record] appends to a channel, and [restore] with [replay] is the way back, over a part this
+ * adapter [holds]. [delete] takes the whole set, every node's part of it, which is what an
+ * aborted snapshot does at its deadline.
  *
  * The one adapter is [FileSnapshotParts].
  */
@@ -50,7 +50,21 @@ interface SnapshotParts {
      */
     fun record(id: String, channel: String, bytes: ByteArray)
 
-    /** Loads the state this node cut into set [id] back into the engine. */
+    /**
+     * Whether this node's part of set [id] is here with its state in it, which is what [restore]
+     * needs. False for a set this node never cut and for an id [accepts] refuses, so an
+     * operator's typo is an answer here and never a throw or a path.
+     *
+     * A part being here says nothing about whether its channels have closed: whether a part is
+     * complete is the marker rules' answer, held by the caller, and a restore wants both.
+     */
+    fun holds(id: String): Boolean
+
+    /**
+     * Loads the state this node cut into set [id] back into the engine. The part must be one this
+     * adapter [holds]; restoring one it does not hold would put an empty state into the engine
+     * and so empty the node without a word (I12), and that fails instead.
+     */
     fun restore(id: String)
 
     /** Every whole record on [channel]'s log in this node's part of [id], in the order recorded. */
@@ -100,7 +114,10 @@ class FileSnapshotParts(
             .use { it.append(CHANNEL_RECORD, bytes).durable.join() }
     }
 
+    override fun holds(id: String): Boolean = accepts(id) && Files.isRegularFile(SnapshotEngine.stateFile(part(id)))
+
     override fun restore(id: String) {
+        require(holds(id)) { "$self has no part of snapshot set $id" }
         rejectPreWalChannelLogs(id)
         SnapshotEngine(engine, part(id), clock).restore()
     }

@@ -17,18 +17,18 @@ gets its first deterministic seam and its regression test here.
 
 **Nature:** conflict resolution semantics, spec 2.5 and 5.3, concurrency (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache c8d5674e, merged into misc/ai_gen; anti-entropy now carries tombstones, closing T28 dev 3 and T30 dev 1/6)
 
-- [ ] `read_never_pairs_a_value_with_another_installs_version`: a write interleaved between
+- [x] `read_never_pairs_a_value_with_another_installs_version`: a write interleaved between
       the store's value read and version read, driven deterministically through the store's
       seam, cannot produce a stale value with a newer version
-- [ ] `spec_5_3_decided_once`: the same concurrent pair arriving as a replicate and as an
+- [x] `spec_5_3_decided_once`: the same concurrent pair arriving as a replicate and as an
       anti-entropy value produces the same stored outcome
-- [ ] Replication, anti-entropy and snapshot restore have no direct reference to the version
+- [x] Replication, anti-entropy and snapshot restore have no direct reference to the version
       table or the engine's view/install hooks; the recording engine double is deleted
-- [ ] Every existing read-repair, anti-entropy, convergence, snapshot and acceptance test
+- [x] Every existing read-repair, anti-entropy, convergence, snapshot and acceptance test
       passes unchanged; the convergence checker reads the pair from the store
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; this one may reach 800 lines
 including tests because it moves three call sites, but no further; JUnit 5 + Mockito only,
