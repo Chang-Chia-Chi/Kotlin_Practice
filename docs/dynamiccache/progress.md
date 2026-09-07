@@ -6661,3 +6661,115 @@ the machine at the time. Not touched by this ticket and green in every isolated 
    `COMPAT` records that they are in the set. Behaviour is unchanged from before this ticket.
 3. **`DynaCache/CONTEXT.md` gained a "Namespace rule" and a "CP kind" entry** and lost the
    dispatcher's claim to the re-target, since the rule moved out from under it.
+
+---
+
+## T70 - Each CP primitive owns its snapshot bytes
+
+Adding a CP primitive was a five-file change: the composite exposed every table as a public
+field, its snapshot type listed a map per primitive, and `CpWire` knew every primitive's field
+layout. Now a primitive is one class, one line in the composite's list, one branch in its `when`,
+and nothing at all in the codec.
+
+### The primitive interface
+
+`CpPrimitive` (`dynacache-cp/src/main/kotlin/dynacache/cp/CpPrimitive.kt`) is what the composite
+sees of a primitive - everything it does to all of them alike, and nothing else:
+
+- `val id: Int` - its byte in a snapshot, one of the constants on `CpPrimitive`'s companion
+  (`LONGS` 1, `LOCKS` 2, `SEMAPHORES` 3, `LATCHES` 4, `REFERENCES` 5, `SESSIONS` 6), spelled out
+  and never reused, since a snapshot on disk outlives the order the composite lists them in.
+- `fun sweep(now: Long)` - the TTL tick, defaulted to a no-op (latches and sessions keep it).
+- `fun releaseAllOf(session: Long)` - the session-close cascade, defaulted to a no-op.
+- `fun snapshot(): ByteArray` / `fun restore(bytes: ByteArray)` - its table as bytes only it reads.
+
+The six implementations are the five primitive state machines and `SessionRegistry`, which is a
+primitive too. Each encodes through `CpWire.encodeTable`/`decodeTable` (keyed by `Key`) or, for
+the session registry, `CpWire.bytes`/`read` directly, all on the length-prefixed `writeBlob`
+helper that was already there.
+
+### Snapshot layout and version
+
+`CpStateMachine.Snapshot(lastAppliedTs, tables: List<Table>)`, where `Table(id, bytes)` compares
+by content. On the wire and on disk:
+
+```
+byte  SNAPSHOT_VERSION = 2
+long  lastAppliedTs
+int   table count
+      repeat: byte primitive id, int length, length bytes
+```
+
+`CpWire` no longer reads inside a table. Version 2 is the bump: the layout before this ticket
+opened with the log-time long, whose top byte reads here as version 0, so every pre-T70 snapshot
+is refused by `CpWire.UnsupportedSnapshotVersion`, which names the version it found. Pre-release,
+so no migration.
+
+Rows are written sorted - table keys by unsigned byte order, semaphore holders and session ids by
+id - so two members holding the same state write byte-identical snapshots. That is what lets the
+existing "two members agree" assertions compare snapshots as values now that a table is bytes.
+
+### The session cascade across primitives
+
+`closeSession` still closes the session first (so a second closing is a no-op) and then offers the
+dead session to every primitive in the list: `if (sessions.close(session)) primitives.forEach {
+it.releaseAllOf(session) }`. Locks and semaphores override it, the rest keep the default no-op, so
+C18/I15 stays one entry and a new primitive that holds something for a session overrides one
+method rather than editing the composite. Order in the list is unchanged (locks before
+semaphores).
+
+### What became private
+
+Every primitive table on `CpStateMachine` (`longs`, `locks`, `semaphores`, `latches`,
+`references`, `sessions`) is now private, as is the new `primitives` list. The four tests that
+read a table directly go through one new seam instead:
+
+`fun read(command: Command.Cp): Reply` - what a read verb answers at this member's applied index,
+appending nothing. `valueOf(key)` now delegates to it, so there is one path from the composite
+into a primitive, not two. `CpStateMachine.takeSnapshot`, `installSnapshot`, `lastAppliedTs` and
+`lapsedSessions` are unchanged in shape; `installSnapshot` is now a loop that errors if a
+snapshot carries no table for a primitive this build has.
+
+### Tests and counts
+
+New `CpPrimitiveSnapshotTest` (7): one round trip per primitive through its own bytes, each
+restored into a second instance and asked what it holds, plus `composite_snapshot_restores_every_primitive`,
+which takes `Primitives().stateMachine.state`, installs it into a fresh `CpStateMachine`, and then
+runs a `SessionClosed` on the restored machine so the cascade is shown to still cross primitives
+after a restore. `Primitives` gained `val stateMachine` (T69's guidance).
+
+`CpWireTest` (+2): `snapshot_round_trips_through_its_bytes` (six tables, version and all) and
+`a_snapshot_from_before_the_version_bump_is_refused`. Its snapshot fixture is now built by
+driving `Primitives` rather than by naming every primitive's state class.
+
+`CpSnapshotTest` (+1): `cp_snapshot_install_preserves_tokens_and_sessions` - a member killed,
+lapped by 40 entries and brought up by an installed snapshot holds the token that snapshot
+carried (1), agrees on the strictly greater token (2) the next holder is granted (C17), carries
+the leader's sessions table byte for byte, and still has the permits that session held to give
+back.
+
+| Module | Before | After |
+|---|---|---|
+| dynacache-cp | 103 | 113 |
+| dynacache-server | 103 | 103 |
+| dynacache-engine | 158 | not re-counted, module untouched, build green |
+| dynacache-cluster | 86 | not re-counted, module untouched, build green |
+
+Net diff: 16 files, +488 / -165, net +323 (2 new files). Commit a0e5cdb4 on branch `t70`.
+
+### Deviations
+
+- **`apply` is not on `CpPrimitive`.** The ticket's design guidance lists it. The composite still
+  routes a command through an exhaustive `when` over the sealed `Command.Cp` (`answer`), because
+  the compiler checks that routing is total and each primitive keeps a typed command parameter;
+  an `apply(Command.Cp, Long)` on the interface would need a cast inside every primitive and
+  would turn an unrouted verb from a compile error into a runtime one. Sweep, the session cascade,
+  snapshot and restore are loops over the list, which is what the acceptance criteria name.
+- **One new read seam.** `CpStateMachine.read` was added so the tables could go private;
+  `ChaosInvariantTest`, `FencedLockFailoverTest`, `SessionLogTest` and `valueOf` use it.
+- **Sorted rows.** Not asked for, but required once a snapshot is compared as bytes.
+- **`cp_snapshot_install_preserves_tokens_and_sessions` did not exist.** The plan entry names it,
+  the spec's 10.7 table lists only `cp_snapshot_restore_roundtrip`. Written fresh in
+  `CpSnapshotTest`; the spec was not edited.
+- **One new test file** rather than a snapshot case added to each of the five existing primitive
+  suites, which are about semantics rather than persistence.
