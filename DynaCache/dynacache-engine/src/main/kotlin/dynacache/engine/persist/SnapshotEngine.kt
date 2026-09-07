@@ -1,6 +1,7 @@
 package dynacache.engine.persist
 
 import dynacache.engine.ApEngine
+import dynacache.engine.Command
 import dynacache.engine.Value
 import java.io.IOException
 import java.io.OutputStream
@@ -92,7 +93,10 @@ class SnapshotEngine(
 
     /**
      * Loads the last snapshot into the engine, if there is one, then redoes the log after it and
-     * attaches the log to the engine; answers how many keys the snapshot held.
+     * attaches the log to the engine; answers how many keys the snapshot held, tombstones
+     * included. The versions come back with the values: the file's, then the ones the log
+     * carried after the checkpoint, so a key written after the last snapshot is held under the
+     * version it was written under and not the one the snapshot froze (T67, I2).
      */
     @Synchronized
     fun restore(): Int {
@@ -102,6 +106,7 @@ class SnapshotEngine(
             throw IOException("$file holds a sorted set with no members")
         }
         engine.restore(snapshot.entries).join()
+        for (entry in snapshot.entries) if (entry.dvv.isNotEmpty()) engine.versions.restored(entry.key, entry.dvv)
         if (fsync != null) {
             check(engine.wal == null) { "the log is already attached" }
             engine.wal = replay(snapshot.walSeq, fsync)
@@ -113,8 +118,9 @@ class SnapshotEngine(
      * Redo: every logged entry after [checkpoint], oldest file first, through the engine's own
      * `submit`, so accounting, the wheel and the kind checks all apply. An entry at or below the
      * last one applied is skipped, which is what makes replay idempotent: an entry the log holds
-     * twice redoes once. The newest file continues as the log, cut at its last whole entry so
-     * nothing is ever appended after a torn tail.
+     * twice redoes once. An entry's opaque trailer is the version its key was written under and
+     * goes back into the table with it (T67). The newest file continues as the log, cut at its
+     * last whole entry so nothing is ever appended after a torn tail.
      */
     private fun replay(checkpoint: Long, policy: FsyncPolicy): WalWriter {
         var applied = checkpoint
@@ -122,7 +128,12 @@ class SnapshotEngine(
         for (log in logs()) {
             val scan = WalReader(log).readAll()
             for (entry in scan.entries) if (entry.seq > applied) {
-                CommandCodec.decode(entry.op, entry.payload).forEach { engine.submit(it).join() }
+                val commands = CommandCodec.decode(entry.op, entry.payload)
+                commands.forEach { engine.submit(it).join() }
+                // The version the entry carried, after the commands it belongs to: a `DEL` and
+                // its version together are the tombstone the cluster deleted the key under.
+                val key = (commands.first() as? Command.Keyed)?.key
+                if (key != null && entry.trailer.isNotEmpty()) engine.versions.restored(key, entry.trailer)
                 applied = entry.seq
             }
             FileChannel.open(log, WRITE).use { it.truncate(scan.stoppedAt) }

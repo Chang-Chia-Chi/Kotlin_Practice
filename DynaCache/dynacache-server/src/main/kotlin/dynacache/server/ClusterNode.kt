@@ -95,8 +95,10 @@ class ClusterNode(
     /**
      * This node's dots resume above the ceiling it last reserved at `<dataDir>/dots` (T51), so a
      * restart never re-stamps a write with a dot its replicas already hold. A node with no data
-     * directory forgets its ceiling as it forgets its keys; the version table itself is not
-     * persisted yet, so the scan the counter also takes as a floor is empty here.
+     * directory forgets its ceiling as it forgets its keys. The counter's other floor is the
+     * version table, which [start] rebuilds from this node's snapshot and log before the port
+     * opens and which raises the counter key by key on the way in (T67), so nothing is scanned
+     * here: the table is empty until then.
      */
     private val counter = DotCounter.of(
         self, emptyList(), dataDir?.let { DotCeilingStore.inFile(it.resolve(DOT_CEILING_FILE)) } ?: DotCeilingStore.inMemory(),

@@ -108,6 +108,47 @@ class WalTest {
         return WalReader(wal).readAll()
     }
 
+    /**
+     * T67: an entry may carry an opaque trailer behind its payload -- the cluster's version for
+     * the key the command wrote. The writer never looks inside it and the reader hands it back
+     * whole, split from the payload the command codec reads.
+     */
+    @Test
+    fun wal_entry_carries_an_opaque_trailer() {
+        val wal = dir.resolve("trailer.wal")
+
+        WalWriter(wal, firstSeq = 1L).use { writer ->
+            writer.append(OP_SET, "alpha".toByteArray(), "version-of-alpha".toByteArray())
+            writer.append(OP_DEL, "beta".toByteArray())
+            writer.append(OP_SET, ByteArray(0), "v".toByteArray())
+        }
+
+        val scan = WalReader(wal).readAll()
+
+        assertEquals(WalStop.CLEAN_END, scan.stop)
+        assertEquals(Files.size(wal), scan.stoppedAt)
+        // The op code reads back as the command's own: the trailer flag is the file's, not the codec's.
+        assertEquals(listOf(OP_SET, OP_DEL, OP_SET), scan.entries.map { it.op })
+        assertEquals(listOf("alpha", "beta", ""), scan.entries.map { String(it.payload) })
+        assertEquals(listOf("version-of-alpha", "", "v"), scan.entries.map { String(it.trailer) })
+    }
+
+    /**
+     * The WAL entry format's version bump is the op code's high bit, so an entry written before
+     * T67 -- and every channel-log record, which carries no version at all -- still reads back,
+     * with no trailer, which is exactly what it held.
+     */
+    @Test
+    fun wal_entry_without_a_trailer_reads_back_with_none() {
+        val wal = writeThreeEntries("untrailered.wal")
+
+        val scan = WalReader(wal).readAll()
+
+        assertEquals(WalStop.CLEAN_END, scan.stop)
+        assertEquals(listOf(0, 0, 0), scan.entries.map { it.trailer.size })
+        assertEquals(WalEntry(1L, OP_SET, PAYLOAD), scan.entries.first())
+    }
+
     private fun writeThreeEntries(name: String): Path {
         val wal = dir.resolve(name)
         WalWriter(wal, firstSeq = 1L).use { writer ->
