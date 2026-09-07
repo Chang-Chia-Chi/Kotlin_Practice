@@ -168,6 +168,90 @@ class PartitionStoreTest {
         assertEquals(6, store.size, "the threshold still holds six entries")
     }
 
+    /**
+     * What this ticket is for: the charge after a command reads the value's own running total
+     * instead of walking it, so a hundred-thousand-element list costs the store exactly what a
+     * one-element list costs. Counted in elements read, off the list's own counter -- a recharge
+     * that walked would read every one of them -- and never timed, which would only ever measure
+     * the machine.
+     */
+    @Test
+    fun list_charge_is_constant_in_list_length() {
+        val one = Value.List(listOf(element(0)))
+        val many = Value.List((0 until BIG).map(::element))
+
+        assertEquals(
+            chargeVisits(one) { one.items.visits },
+            chargeVisits(many) { many.items.visits },
+            "recharging a $BIG-element list must read what recharging a 1-element list reads",
+        )
+        assertLive({ many.items.visits }) { many.items.sumOf { it.size.toLong() } }
+    }
+
+    /** The same for a hash: the recharge reads the running total, not the fields. */
+    @Test
+    fun hash_charge_is_constant_in_field_count() {
+        val one = hash(1)
+        val many = hash(BIG)
+
+        assertEquals(
+            chargeVisits(one) { one.fields.visits },
+            chargeVisits(many) { many.fields.visits },
+            "recharging a $BIG-field hash must read what recharging a 1-field hash reads",
+        )
+        assertLive({ many.fields.visits }) { many.fields.entries().sumOf { it.value.size.toLong() } }
+    }
+
+    /** And for a sorted set, whose members are counted off the score map. */
+    @Test
+    fun zset_charge_is_constant_in_member_count() {
+        val one = zset(1)
+        val many = zset(BIG)
+
+        assertEquals(
+            chargeVisits(one) { one.scores.visits },
+            chargeVisits(many) { many.scores.visits },
+            "recharging a $BIG-member sorted set must read what recharging a 1-member one reads",
+        )
+        assertLive({ many.scores.visits }) { many.scores.entries().sumOf { it.key.length.toLong() } }
+    }
+
+    /** An element of an aggregate: eight bytes, distinct per [i] so nothing folds two into one. */
+    private fun element(i: Int) = "e%07d".format(i).toByteArray()
+
+    /** A hash of [fields] fields, each field name its own value, so no two cost the same. */
+    private fun hash(fields: Int) = Value.Hash().also { hash ->
+        repeat(fields) { hash.fields.put(fieldName(element(it)), element(it)) }
+    }
+
+    /** A sorted set of [members] members, each at its own score, so none is a move over another. */
+    private fun zset(members: Int) = Value.ZSet(SkipList(3)).also { zset ->
+        repeat(members) { zset.writeScore(it.toDouble(), element(it)) }
+    }
+
+    /**
+     * How many elements the store reads out of [value] to recharge it: what the value's own
+     * [visits] counter shows across the one call [Partition.execute] makes after a keyed command.
+     */
+    private fun chargeVisits(value: Value, visits: () -> Long): Long {
+        val store = uncapped()
+        val key = Key("charged")
+        store.put(key, now(), value)
+        val before = visits()
+        store.account(key)
+        return visits() - before
+    }
+
+    /**
+     * That the counter the charge was measured with is not a dead number: a from-scratch [walk]
+     * of the same aggregate moves it by every one of the [BIG] elements it reads.
+     */
+    private fun assertLive(visits: () -> Long, walk: () -> Unit) {
+        val before = visits()
+        walk()
+        assertEquals(BIG.toLong(), visits() - before, "a from-scratch walk reads every element")
+    }
+
     /** A Zipf key: five characters wide whatever its number, so every entry costs the same. */
     private fun zipfKey(i: Int) = Key("z%04d".format(i))
 
@@ -228,5 +312,8 @@ class PartitionStoreTest {
     private companion object {
         const val TICK_MILLIS = 1000L
         const val STEPS = 2_000
+
+        /** A big aggregate: enough elements that walking one instead of reading its total shows. */
+        const val BIG = 100_000
     }
 }

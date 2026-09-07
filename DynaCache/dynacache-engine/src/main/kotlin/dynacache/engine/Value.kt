@@ -23,22 +23,29 @@ sealed class Value(val kind: Kind) {
      * Field names are held as ISO-8859-1 text: that charset maps every byte to one character and
      * back, so a binary-safe field name survives and the table hashes text.
      */
-    class Hash(val fields: HashTable<String, ByteArray> = HashTable()) : Value(Kind.HASH)
+    class Hash : Value(Kind.HASH) {
+        val fields = ElementTable<ByteArray> { it.size.toLong() }
+    }
 
     /**
-     * An ordered sequence. Kotlin's own [ArrayDeque] is a circular buffer, so both ends push and
-     * pop in O(1) (spec 2.1) and `LINDEX`, `LSET` and `LRANGE` still index in O(1).
+     * An ordered sequence. Kotlin's own [ArrayDeque] is a circular buffer under [ElementList], so
+     * both ends push and pop in O(1) (spec 2.1) and `LINDEX`, `LSET` and `LRANGE` still index in
+     * O(1).
      */
-    class List(val items: ArrayDeque<ByteArray> = ArrayDeque()) : Value(Kind.LIST)
+    class List(elements: Collection<ByteArray> = emptyList()) : Value(Kind.LIST) {
+        val items = ElementList(elements)
+    }
 
     /**
      * The dual index of spec 2.1: [scores] answers "what does this member score" in O(1) and is
      * where member uniqueness lives, [order] answers every question about position in O(log n).
-     * The two are one value and are written together; nothing may update one without the other.
+     * The two are one value and are written together; nothing may update one without the other,
+     * which is why [writeScore] and [removeMember] are the only ways in and out.
      * Member names are held as ISO-8859-1 text for the same reason [Hash] holds field names so.
      */
     class ZSet(val order: SkipList) : Value(Kind.ZSET) {
-        val scores = HashTable<String, Double>()
+        /** A score is a `Double`, so every member costs the same beside its own name. */
+        val scores = ElementTable<Double> { Long.SIZE_BYTES.toLong() }
 
         /**
          * Writes one (member, score) into both indexes at once, answering whether the member was
@@ -56,6 +63,17 @@ sealed class Value(val kind: Kind) {
             if (previous != score) order.updateScore(previous, member, score)
             return false
         }
+
+        /**
+         * Drops [member] from both indexes at once, answering whether it was there. The score map
+         * says whether the member was there and the list is then told the same thing, so one index
+         * cannot silently disagree with the other about what was removed.
+         */
+        fun removeMember(member: ByteArray): Boolean {
+            val score = scores.remove(fieldName(member)) ?: return false
+            order.remove(score, member)
+            return true
+        }
     }
 
     /**
@@ -67,23 +85,124 @@ sealed class Value(val kind: Kind) {
      * Approximate by design and by name, as Redis's own `used_memory` is: an exact count would
      * mean walking the JVM's object graph.
      *
-     * ponytail: O(elements), so the cost of measuring a big aggregate is the aggregate's size.
-     * [PartitionStore] charges it once per command for the one key that command touched, which is
-     * same order as the command's own work for a String and more than it for one field of a big
-     * hash. Per-element deltas threaded through every mutation site would make it O(1) and cost
-     * a running total in every structure.
+     * Read, never counted: every aggregate keeps the running total its own mutations book, so
+     * [PartitionStore]'s recharge after a command is O(1) whatever the value holds. A list command
+     * costs the same on a hundred thousand elements as on one.
      */
     fun approximateBytes(): Long = when (this) {
         is Str -> bytes.size.toLong()
-        is Hash -> fields.entries().sumOf { it.key.length + it.value.size + ELEMENT_BYTES }
-        is List -> items.sumOf { it.size + ELEMENT_BYTES }
-        is ZSet -> scores.entries().sumOf { it.key.length + Long.SIZE_BYTES + ELEMENT_BYTES }
+        is Hash -> fields.bytes
+        is List -> items.bytes
+        is ZSet -> scores.bytes
     }
 
     internal companion object {
         /** What one element of an aggregate costs beyond its own bytes. */
         const val ELEMENT_BYTES = 16L
     }
+}
+
+/**
+ * The elements of a [Value.List] and what they cost. Every mutation books its own byte delta, so
+ * [bytes] is read rather than counted and the charge after a list command is O(1) in the list's
+ * length (spec 2.7). Kotlin's own [ArrayDeque] is underneath, so both ends still push and pop in
+ * O(1) and every index still reads in O(1).
+ */
+class ElementList(elements: Collection<ByteArray> = emptyList()) : AbstractMutableList<ByteArray>() {
+
+    private val items = ArrayDeque(elements)
+
+    /** What these elements cost: their own bytes plus [Value.ELEMENT_BYTES] each. */
+    var bytes: Long = items.sumOf { it.size + Value.ELEMENT_BYTES }
+        private set
+
+    /**
+     * How many elements have been read out of this list, over its whole life. A caller measures
+     * one operation by the difference across it, which is how the constant-charge test proves the
+     * recharge reads no element at all; that is why nothing resets it. After [SkipList.comparisons].
+     */
+    var visits: Long = 0L
+        private set
+
+    override val size: Int get() = items.size
+
+    override fun get(index: Int): ByteArray {
+        visits++
+        return items[index]
+    }
+
+    override fun set(index: Int, element: ByteArray): ByteArray {
+        val replaced = items.set(index, element)
+        bytes += element.size - replaced.size
+        return replaced
+    }
+
+    override fun add(index: Int, element: ByteArray) {
+        items.add(index, element)
+        bytes += element.size + Value.ELEMENT_BYTES
+    }
+
+    override fun removeAt(index: Int): ByteArray {
+        val removed = items.removeAt(index)
+        bytes -= removed.size + Value.ELEMENT_BYTES
+        return removed
+    }
+
+    fun addFirst(element: ByteArray) = add(0, element)
+
+    fun addLast(element: ByteArray) = add(size, element)
+
+    fun removeFirst(): ByteArray = removeAt(0)
+
+    fun removeLast(): ByteArray = removeAt(size - 1)
+
+    fun removeLastOrNull(): ByteArray? = if (isEmpty()) null else removeLast()
+}
+
+/**
+ * The named elements of an aggregate -- a [Value.Hash]'s fields, a [Value.ZSet]'s scored members
+ * -- and what they cost. Every put and remove books its own byte delta, so [bytes] is read rather
+ * than counted and the charge after a command is O(1) in the number of names (spec 2.7). Names are
+ * ISO-8859-1 text, one character to the byte; [valueBytes] is what one value costs beside its name.
+ */
+class ElementTable<V>(private val valueBytes: (V) -> Long) {
+
+    private val table = HashTable<String, V>()
+
+    /** What these elements cost: their names, their values and [Value.ELEMENT_BYTES] each. */
+    var bytes: Long = 0L
+        private set
+
+    /** How many elements have been read out of this table; see [ElementList.visits]. */
+    var visits: Long = 0L
+        private set
+
+    val size: Int get() = table.size
+
+    fun get(name: String): V? {
+        visits++
+        return table.get(name)
+    }
+
+    /** Stores [value] under [name]; answers the value it replaced, null when the name was new. */
+    fun put(name: String, value: V): V? {
+        val previous = table.put(name, value)
+        bytes += if (previous == null) name.length + valueBytes(value) + Value.ELEMENT_BYTES
+        else valueBytes(value) - valueBytes(previous)
+        return previous
+    }
+
+    /** Drops [name]; answers the value that was under it, null when there was none. */
+    fun remove(name: String): V? = table.remove(name)?.also {
+        bytes -= name.length + valueBytes(it) + Value.ELEMENT_BYTES
+    }
+
+    /** Every element, in no defined order. Do not mutate the table while iterating. */
+    fun entries(): Sequence<Map.Entry<String, V>> = table.entries().onEach { visits++ }
+
+    /** This table's share of an `HSCAN` or a `ZSCAN`; the cursor to continue from comes back. */
+    fun scan(cursor: Long, count: Int, keep: (String, V) -> Boolean, emit: (String, V) -> Unit): Long =
+        walk(table, cursor, count, keep, emit)
 }
 
 /** The error Redis answers when an argument that should be a score is not one. */
