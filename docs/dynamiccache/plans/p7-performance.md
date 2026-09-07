@@ -116,7 +116,11 @@ because the other session committed T80 to T84 while this was still a draft.
 - **Acceptance:** `close_completes_the_force_in_flight_rather_than_interrupting_it`,
   `close_forces_whatever_is_still_parked_before_it_returns`,
   `close_past_its_grace_bound_reports_and_returns`.
-- **Model:** Fable. **Size:** small to medium (200 to 500 lines).
+- **Model:** Opus. Section 4 routes a ticket of this shape to Fable, but Fable ran out of usage
+  credits on this account on 2026-09-07 and its agents die within two minutes of spawning having
+  done nothing. Any ticket picking this up records the swap as a deviation. The same applies to
+  T78, already relaunched on Opus after losing its first agent this way.
+  **Size:** small to medium (200 to 500 lines).
 
 
 ### T86 - Replace the contended single-node baseline
