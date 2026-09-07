@@ -79,8 +79,13 @@ dynacache-server   cp (cluster until T38) + Netty + LuaJ
 
 Rules: the engine never imports coroutines, Netty, gRPC, LuaJ or MicroRaft. LuaJ appears only
 in `dynacache.server`. Generated protobuf and gRPC classes appear in `dynacache.cluster`,
-`dynacache.cp` and the server's adapters, never in the engine. `java.nio.file` appears only in
-`dynacache.engine.persist` and `dynacache.cp`. Vocabulary is `DynaCache/CONTEXT.md`;
+`dynacache.cp` and the server's adapters, never in the engine. Every file *operation* -- creating
+a directory, testing existence, listing, reading, writing, deleting -- lives in
+`dynacache.engine.persist` or `dynacache.cp`, which own the layout on disk; a `Path` may be
+carried as a configuration *value* anywhere, since the composition root reads a data directory
+from the command line and hands it to what persists (T81). The test is `Files`, not `Path`: a
+module outside those two that reaches for `java.nio.file.Files`, `java.io.File` or
+`kotlin.io.path` is the violation. Vocabulary is `DynaCache/CONTEXT.md`;
 architecture decisions are `DynaCache/docs/adr/`.
 
 ### 2.3 Seams (public surface budget)

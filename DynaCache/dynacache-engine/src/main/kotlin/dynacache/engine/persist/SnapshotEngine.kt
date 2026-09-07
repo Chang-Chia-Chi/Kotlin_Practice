@@ -46,6 +46,16 @@ class SnapshotEngine(
     private val fsync: FsyncPolicy? = null,
 ) : AutoCloseable {
 
+    init {
+        // The directory is this engine's, not its caller's (T81). A caller hands over a path that
+        // came from configuration -- a command-line argument, a set's part -- and everything done
+        // to that path is done here, so a node started on a data directory that does not exist yet
+        // gets one rather than a caller above the persist package reaching for `Files`. First of
+        // all this engine does, and so before the clock is read: the directory is there from the
+        // moment the constructor returns, and from before it for anyone watching the disk.
+        Files.createDirectories(dir)
+    }
+
     private val file = stateFile(dir)
     private val temp = dir.resolve("dump.rdb.tmp")
     private var lastSave: Instant = clock.instant()
