@@ -7260,3 +7260,145 @@ no error at all, `failure` was null), `a_part_is_held_from_the_cut_that_wrote_it
   own ticket.
 - `restore` is still not atomic: a part that fails halfway (a corrupt channel log, `replay`
   throwing) leaves the engine holding the restored state and none of the replay. Unchanged here.
+
+---
+
+## T66 - A versioned store beside the engine
+
+One module, `VersionedStore` in `dynacache-cluster/.../VersionedStore.kt`, now owns this node's
+`Key -> Dvv` table and is the only caller of the engine's store hooks. Replication, read repair,
+anti-entropy and the convergence checker read and install the (value, version) pair through it;
+nothing else in the cluster or server module names the table or a hook (grep: every `versions[`
+is inside the store). Snapshot restore needed no change: it never touched the table (the RDB
+version slot is still empty until T67) and its replay goes through `Router.receive`, so a
+replicated write in flight at the cut lands through the store like any other.
+
+**The store's interface.** `version(key)` (the version alone, for tests and the counter's
+floor); `held(key)` answering `Held(key, value?, expiresAt, dvv)` or null when no version is
+held, a null value being a tombstone; `held(keys)` and `held(holds)` answering every held pair
+among the keys or in the range, tombstones included, for anti-entropy's key exchange and
+Merkle build; `write(command)` (spec
+5.1 step 4, C2: the bump and the command as one step, answering `(reply, dvv)`); `read(command)`
+(spec 5.2 steps 1 and 2: the reply and the version it read under); `apply(commands, remote)` for
+a pair arriving as the logged entry (a replicate, ADR 0003), answering an `Outcome`;
+`install(key, value?, expiresAt, remote)` for a pair arriving as a value (a repair's push, an
+anti-entropy leaf), answering `Installed(outcome, held)`. `Outcome` is `KEPT`, `TAKEN` or
+`MERGED`: spec 5.3's three branches, named once and decided by one private function.
+
+**The engine hook.** `Stored.kt` lost `ApEngine.view(holds)`, `view(keys)` and `install` and
+gained `StoreAccess` (view by keys, view by predicate, install, execute) plus
+`ApEngine.onPartitionOf(key) { access -> }` and `onEveryPartition { id, access -> }`, each one task on the
+partition's executor (`Partition.withStore`, the same `task` funnel `submit` and `atomically`
+use, so the WAL's reply-after-durable rule holds for a command run inside). `Partition`'s two
+async `view`s became the synchronous bodies of that access object; `install` drops a copy
+already past its deadline instead of skipping it, so an install never leaves the old value
+under the new version. `ApEngine.restore` is untouched.
+
+**Atomicity.** Every store operation is one `onPartitionOf` task: the version table is one map
+per partition, read and written only on that partition's thread, next to the value read or
+write of the same task. No global lock and no per-key lock; the maps are concurrent only
+because `version(key)` is read from outside (tests, and T67's counter floor). The review's race (`Replication.read` reading the
+value and then the version, with a write's early bump in between) is gone with the two-step
+shape: `push`'s before-and-after version recheck is deleted because there is no longer a window
+to guard. `read_never_pairs_a_value_with_another_installs_version` parks the partition thread
+with a blocking `atomically` task, queues a read, a write, a read, an install and a read behind
+it, releases, and asserts each read saw one install's pair whole. Under the old shape the
+queued read paired v1 with the write's already-bumped version.
+
+**Spec 5.3, decided once, and what differs by arrival.** `decide(held, remote)`: nothing held
+or `remote` dominates -> TAKEN; dominated or equal -> KEPT; concurrent -> MERGED under a version
+descending from both. A command arrival that is MERGED is applied over the local value under
+`held.merge(remote)` (ADR 0003's consequence, unchanged); a value arrival that is MERGED goes
+through `Merge.kt`'s type merge under `merge()`'s own descending version. `spec_5_3_decided_once`
+seeds two stores with the same local pair and hands one the concurrent write as a `SET` and the
+other as the string value: same outcome (MERGED), same stored value, both versions dominate
+both siblings, both dots this node's; the same for a hash, where `HSET f2` over `{f1}` and the
+field union of `{f1}` and `{f2}` are the same by construction. The two routes cannot be made
+identical for every type without a value-shipping replicate: a string whose *local* side is the
+last writer keeps the local value on the value route (spec 2.5) and takes the command's value
+on the command route. That difference is pinned in the store's test
+`spec_5_3_command_arrival_applies_over_local_where_a_value_arrival_keeps_last_writer` and in the
+store's KDoc; the two nodes are one anti-entropy round from agreeing either way, since the
+versions descend from both. Anti-entropy's rot rule (equal versions, different encodings: the
+greater encoding wins on both sides) moved into the store's value install, so a repair push now
+follows it too. A tombstone concurrent with a value merges to the last writer's side whole
+(there is no value on the other side to merge with); a taken tombstone deletes through a logged
+`DEL`, as the repair path already did.
+
+**The finding: a faithful spec 5.3 needs tombstones in anti-entropy.** The first full run
+failed `I1_all_replicas_equal_after_heal_drain_sync` on seed 2: a key deleted through its
+coordinator (tombstone under `(node-2, 2)`'s successor) was still live on a replica that missed
+the `DEL`. Before this ticket anti-entropy built its "mine" from the engine's live view alone,
+so the tombstone's version never took part and the replica's value was installed back on the
+coordinator, undoing the delete (T28 deviation 3's "resurrection", which T30 deviation 1
+recorded as client-visible debt with the fix spelled out: tombstone leaves, a `Held` with no
+value, a delete-versus-concurrent rule, a `DEL` on install). The store decides 5.3 against
+the held version whichever way the pair arrives, so the tombstone now defends the coordinator
+and the resurrection stops; for the cluster to converge the delete has to reach the replica
+instead. It does: `held(holds)` and `held(keys)` answer tombstones (a version in the table with
+no live value), anti-entropy's leaf for one is the hash of no bytes, it crosses as a `Version`
+with an empty value, `decode` reads an empty value as a tombstone, and the store's install
+takes a dominating one through a logged `DEL`. The delete-versus-concurrent rule is spec 2.5's
+tiebreak: the last writer's side whole. `assertConverged` now compares a deleted key's
+tombstone version across replicas too (T30's "one `?.let` away"); a value the store holds no
+version for still compares as absent. This closes T28 deviation 3 and T30 deviations 1 and 6.
+Debt that stays: tombstones live in the table forever (the table never shrank before either),
+and a value restored without a version is taken over by any peer's tombstone, as it already
+was by any peer's value (T28 deviation 2), until T67 persists versions.
+
+**Deleted.** `RecordingEngine.kt` and `RecordingEngineTest.kt`; the `versions` table,
+`installVersion`, the `view`/`install` constructor parameters and `counter` from `Replication`;
+the `engine`, `replication` and `counter` parameters from `AntiEntropy` along with its own
+merge, rot and deadline rules and `installVersion` call; `ApEngine.view`/`install` and
+`Partition`'s async views. `ReplicationTest.C4_write_needs_w_distinct_acks` and
+`RouterTest.router_executes_locally_when_coordinator` run over a one-partition `ApEngine`; the
+router test asserts the value on the engine and an empty network instead of a recorded submit.
+`Replication.version(key)` stays as a one-line delegate so the twenty-odd test call sites are
+unchanged; `InProcessCluster.store(node)` exposes the store, and `assertConverged` reads each
+node's pair from it as one.
+
+**Tests.** New: `VersionedStoreTest` (4: the two named tests, the command-versus-value
+difference, and dominated/equal/tombstone branches). Changed: the two RecordingEngine users
+above; `ReplicationTest.C4` now runs over a real engine, so each wait for the replica's inbox
+first waits out the partition thread and then yields, as the kit's drain does (its first shape
+raced the thread under a loaded machine and errored once); `ReadRepairTest.read_repair_does_not_delay_reply`'s
+inbox wait got the same treatment after erroring once more in the same way (the brief's known
+flake). Commit c8d5674e. Counts before: engine 174, cluster
+89, cp 113, server 106 (482). After: engine 174, cluster 92 (89 - 1 + 4), cp 113, server 106
+(485).
+
+**Deviations.**
+1. A value arriving at a repair's receiver concurrent with what it holds is now merged by type
+   (spec 5.3), where `installValue` used to drop it. The coordinator still pushes only to
+   replicas the winner dominates (CONTEXT.md "read repair": a sibling is left for the merge),
+   so this only changes a push that became concurrent in flight.
+2. A repair push whose version equals the held one but whose bytes differ now takes the
+   greater encoding (anti-entropy's rot rule), where it used to be ignored.
+3. The "already expired on arrival" check left `Replication` (which read its own clock) for
+   the partition's install, which reads the engine's clock: same clock on a node, one rule.
+4. `assertConverged` compares a value the store holds no version for as absent (it used to
+   compare it as `(value, deadline, null)`); such a value is invisible to anti-entropy too,
+   and every kit test converges through the store's pairs.
+5. Anti-entropy carries tombstones (the finding above): `AntiEntropy`'s "nothing is ever
+   deleted" is gone, a `DEL` one replica missed now reaches it through the Merkle exchange.
+   Not asked for by the ticket, forced by deciding spec 5.3 once.
+6. Plan 2.3's seam table still lists "the test kit's recording fake (T18)" as a
+   `CommandEngine` adapter; docs are out of this ticket's write set, so the row is stale
+   until an orchestrator edit removes it.
+
+**For the next ticket (T67).** The store is the one place to persist and rebuild: the tables
+are written in exactly three places (`write`'s compute, `apply`'s TAKEN/MERGED arms, `put`),
+so a WAL trailer or RDB slot hooks there; tombstones are rows with no engine value and must
+be persisted too, or a restart resurrects what a peer deleted. On load the store needs `(key, dvv)` pairs handed back
+before the first command (a `restore(pairs)` or a constructor argument), and `DotCounter.of`'s
+`localData` floor can then be the table's values instead of `emptyList()`, at `ClusterNode`
+and `InProcessCluster.start`. A value the engine restores without a version stays invisible
+until then; `held(key)` answering null for it is the seam that will start answering a pair.
+
+**Merge note (orchestrator).** The verification merge against `misc/ai_gen` cost five conflict
+hunks, resolved by putting T66's intent inside the newer structure: the `withStore` hook runs
+inside T72's split `Partition`/`PartitionStore`; `Replication` and `AntiEntropy` take T68's
+`Outbound` and this ticket's `VersionedStore` side by side and keep no `atomically` (T73);
+`ClusterNode` builds the store beside the one transport and the `BatchEngine` capability;
+`RecordingEngine.kt` was deleted (T66 removed its last use, T73 had only stripped its batch
+method). Verified green on the merged tree: 497 tests, engine 181, cluster 95, cp 113, server 108.
