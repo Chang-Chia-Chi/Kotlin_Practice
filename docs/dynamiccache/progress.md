@@ -6916,3 +6916,60 @@ happens first, exactly as it did for a refused conditional `SET` before this tic
   settled deadline, drop the `single()` and pass the codec a `now` on the forwarding side.
   `expires_at_millis` on `Replicate` is now redundant with the bytes; it stays only for
   `HintStore.pending`'s expiry sweep without a decode.
+
+## T72: The partition's store is split from its command interpreter
+
+**Built**
+
+- `PartitionStore` (engine, 299 lines): a kind-agnostic deep module owning the entry table, the
+  entries themselves, deadlines and the timer wheel, the running byte total and the eviction
+  policy. Six operations are what the interpreter asks for -- `get`, `put`, `forget`, `expireAt`,
+  `account`, `evictUntil` -- plus the keyspace walk `KEYS`, `SCAN`, `INFO`, `RANDOMKEY`,
+  `FLUSHDB` and the replication views need (`peek`, `entries`, `scan`, `purgeExpired`, `clear`,
+  `randomKey`, `tick`, `size`, `usedBytes`).
+- `Partition` fell from 772 to 574 lines and is now the command interpreter and its executor. It
+  holds no entry table, no used-bytes arithmetic, no wheel, no policy and no eviction step; the
+  command `when` stayed exactly where it was (spec 2.7, 5.4, 5.5, I6; ADR 0001 unchanged).
+- `evictUntil(now, keeping)` never takes the key the command was writing. Before this, a value
+  too big for the partition's share emptied the store and then deleted itself, having replied
+  `OK` as though it had been stored. The key is an ordinary candidate on every later step.
+- `EXPIRE` and `PERSIST` now go through `expireAt` rather than rewriting the entry, so a key
+  keeps its recency and its policy standing for having been given a new deadline.
+- The `SCAN` cursor loop became one top-level `walk`, shared by the store's key walk and the
+  interpreter's `HSCAN` and `ZSCAN` field walks. `ENTRY_BYTES`, `SAMPLE` and `MAX_EVICTIONS`
+  moved to the store's companion; nothing outside referenced them.
+
+**Tests**
+
+Full reactor, 460 tests, no failures: engine 167, cluster 87, cp 103, server 103.
+
+New `PartitionStoreTest` (5 tests, driving the store directly with no engine in front of it):
+
+- `store_used_bytes_equals_sum_of_entries_after_any_sequence`: 2000 seeded steps over all four
+  value kinds -- writes with and without a TTL, in-place growth and shrinkage of hash, list and
+  sorted set, deletions, deadline changes, lazy reads, wheel ticks and evictions -- recounting
+  the entries after every step and asserting the running total equals them. It also asserts the
+  sequence actually evicted, so the invariant is not proved on a store that never filled.
+- `eviction_never_evicts_the_key_being_written`, parameterized over both policies. Red first
+  against the extracted store with no protection (both policies deleted the new key), green with
+  `keeping`.
+- `tinylfu_admits_frequent` and `tinylfu_hit_ratio_beats_lru_on_zipf` moved out of the
+  1245-line `CommandEngineTest` and now run against the store. `CommandEngineTest` is 61 tests,
+  93 lines lighter, none of the remaining ones changed.
+
+**Deviations**
+
+- `INFO` still reads `store.usedBytes` to report it. The interpreter maintains no byte total and
+  makes no threshold decision, but a number that `INFO` exists to report has to be read
+  somewhere; putting a `Reply` inside a kind-agnostic store would have been the worse trade.
+- Sparing the key being written is a behaviour change, not a pure extraction. It is what the
+  ticket's named test asks for and the spec does not speak to it (5.5 fixes the order, not the
+  candidate set).
+- Progress written here rather than appended to `docs/dynamiccache/progress.md`, per the task.
+
+**For the next ticket**
+
+- `purgeExpired` is still the O(n) walk four keyspace commands pay for. It is now one method on
+  one class, so an expiry index would be a change to `PartitionStore` alone.
+- `Partition` at 574 lines is now almost entirely the command `when` and its Redis-shape helpers.
+  The next split there is by command family, not by concern.

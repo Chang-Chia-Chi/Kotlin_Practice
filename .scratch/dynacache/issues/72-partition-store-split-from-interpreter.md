@@ -14,15 +14,15 @@ commands. The interpreter's command `when` stays where it is.
 
 **Nature:** eviction and accounting, spec 2.7, 5.4, 5.5 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 2fde7c06, merged into misc/ai_gen)
 
-- [ ] `store_used_bytes_equals_sum_of_entries_after_any_sequence`: a seeded random sequence
+- [x] `store_used_bytes_equals_sum_of_entries_after_any_sequence`: a seeded random sequence
       of writes, deletes, expiries and evictions over every value kind keeps the invariant
-- [ ] `eviction_never_evicts_the_key_being_written` and the TinyLFU admission tests run
+- [x] `eviction_never_evicts_the_key_being_written` and the TinyLFU admission tests run
       against the store directly, not through the 1200-line engine test
-- [ ] The interpreter has no reference to used bytes; every existing engine, eviction, expiry
+- [x] The interpreter has no reference to used bytes; every existing engine, eviction, expiry
       and P1 acceptance test passes unchanged
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; this one may reach 800 lines
 including tests because it moves a store out of a large unit, but no further; JUnit 5 +
