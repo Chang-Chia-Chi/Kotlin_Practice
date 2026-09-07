@@ -7830,3 +7830,135 @@ it. Git conflicted on the method and auto-merged the call site clean, so the obv
 compiles, passes every test this ticket wrote, and leaves the availability fix bypassed at its
 only production call site. Resolved by keeping the method and putting the caller back on it.
 Verified on the merged tree: 516 tests, engine 192, cluster 103, cp 113, server 108.
+
+---
+
+## T67 - Versions survive restart
+
+**Built:** a node's versions now outlive its process. The versioned store of T66 is what
+persists: it implements a new engine seam and registers itself with the engine it is built over,
+so a snapshot writes every version down beside its value, the write-ahead log carries each
+version behind the command that moved it, and recovery hands them all back before the node
+serves anyone. A restarted replica therefore answers a quorum read under the version it always
+had, read repair finds nothing to fix, and anti-entropy sees the same tombstones it saw before
+the crash (I2). The dot counter takes each restored version as a floor on the way in, so it
+resumes above every dot the node ever gave a write (C2) and is now exact rather than a block
+high: T51's persisted ceiling is still the other floor, and the larger of the two wins.
+
+**The seam.** `dynacache.engine.persist.KeyVersions`, in the engine's persist package for the
+same reason `DotCeilingStore` is (plan 2.2: that package and cp are the only ones that touch
+persistence, and version vectors live in the cluster module the engine cannot depend on). Three
+methods, all handing plain bytes the engine never looks inside: `on(partition)` is one
+partition's whole table, read inside the snapshot's cut; `of(key)` is one key's version, read
+right after the command that moved it; `restored(key, version)` is recovery's hand-back. Two
+implementations: `KeyVersions.NONE` for a single node, which versions nothing, and
+`VersionedStore`, whose `init` sets `engine.versions = this`. Registering in the constructor
+rather than at each assembly is deliberate: there is one store per engine and nothing else for
+the engine to persist versions for, so `ClusterNode`, `InProcessCluster` and every test wire it
+by building the store they already build.
+
+**What the RDB carries now, and its version bump (2 -> 3).** The entry's `dvv` slot, which the
+format has always had and nothing has ever filled, is filled on save from the partition's own
+table, read on the partition thread inside the cut so a value is never paired with a later
+install's version. The format's new part is the tombstone: `type` 255 is a version with no value,
+no deadline and no value bytes. Tombstones had to reach the file or a restart would resurrect
+through anti-entropy exactly what T66 closed - a key deleted on this node, its tombstone
+forgotten, taken back from a replica that still holds the value. A key whose value expired but
+whose version the table still holds is written the same way, which is what `held(key)` already
+answered for it in memory. **Old-file decision: a version 2 file is rejected**, by the reader's
+existing `UNSUPPORTED_VERSION` fault, whose message names version 3. Rejecting costs no new code
+and fails loudly at startup, where an operator can delete the snapshot and let anti-entropy
+refill the node; reading it with empty versions would have started the node silently in the
+state T66 recorded as debt (a value with no version is invisible to anti-entropy and is taken
+over by any peer's tombstone). `rdb_pre_tombstone_version_rejected` pins the fault and message.
+
+**What the WAL carries now, and its version bump.** The spec's entry header has no room for a
+format version (`[crc32][length][seq][op][payload]`, spec 2.8), so **bit 7 of the op code is the
+version**: set, the payload ends with the opaque trailer and then the trailer's length as a u32,
+and the reader answers the op code with the bit cleared again. Every op code is below 64, so an
+entry written before this ticket - and every channel-log record of a distributed snapshot, which
+carries no version at all - has the bit clear and **reads back with an empty trailer, which is
+exactly what it held**: the WAL's old files are read, not rejected. The writer and reader never
+interpret the trailer; `WalWriter.append` takes it and `WalEntry.trailer` hands it back, and the
+engine's log hook fills it from `versions.of(key)` on the partition thread, where the store has
+already moved the version before running the command (T66: the bump and the command are one
+task). `whatChanged` decides what is logged as before, and a fanned or keyless entry carries no
+trailer.
+
+**How the table and the counter are rebuilt.** `SnapshotEngine.restore` hands back the file's
+versions after the values are in, then replay hands back each entry's trailer after the commands
+it belongs to, so the last version a key was written under is the one it ends held under -
+including a key written after the last snapshot, which the RDB knows nothing about. A `DEL` and
+its trailer together are the tombstone. `VersionedStore.restored` decodes the bytes, writes the
+table and calls `DotCounter.saw(dvv)`, which raises the counter's floor to the highest counter of
+this node's own inside that version. `DotCounter.of`'s `localData` argument now folds through the
+same `saw`, so the "highest own dot" rule is written once instead of twice, and the private
+constructor lost its `scanned` parameter. Recovery is single-threaded and runs before the node
+serves anyone, so `restored` writing the table off the partition thread is safe; the maps were
+already concurrent.
+
+**Tests.** New: `VersionedRestartTest` (3) in the cluster module -
+`I2_versions_survive_restart` (write two keys, snapshot, then a fresh key, an overwrite and a
+delete, crash, recover: every key's version equals its pre-crash version and the delete comes
+back as a tombstone with no value), `dvv_no_counter_reuse` (the restarted node's dot ceiling has
+never been reserved, so the rebuilt table is its only floor, and the next dot is still above
+every dot handed out before the crash), and
+`restarted_replica_answers_quorum_read_with_its_version` (a kit replica saves, restarts and
+restores off its own snapshot; it holds the version it had, the quorum read answers the value,
+and the coordinator counts zero divergent reads and zero repairs sent). New in the engine module
+(4): `wal_entry_carries_an_opaque_trailer`, `wal_entry_without_a_trailer_reads_back_with_none`,
+`rdb_tombstone_roundtrip`, `rdb_pre_tombstone_version_rejected`. Changed: `RdbTest`'s `entry` and
+`shape` helpers take a nullable value.
+
+Red before green at each seam: the WAL and RDB tests failed to compile against the old
+signatures, then passed; the three restart tests were run with the store's engine registration
+commented out and failed exactly as a pre-T67 node behaves (`alpha=null, bravo=null,
+charlie=null` after recovery, and a dot counter that restarts at 1 after handing out 4), then
+passed with it restored.
+
+Counts before: engine 179, cluster 97, cp 113, server 108 (497). After: engine 183, cluster 100,
+cp 113, server 108 (**504**). Diff 476 insertions, 47 deletions across 12 files. Commit sha
+recorded in the report.
+
+**Deviations.**
+1. **Model.** Plan section 4 routes this ticket to Fable 5.1 as durability and causal-order
+   work. Fable was out of usage credits, so it was built by Opus 5 (1M context).
+2. The brief's per-module base counts (engine 181, cluster 95) did not match the tree; the
+   measured base is engine 179, cluster 97, and the total 497 is the same either way.
+3. The WAL's format version is a flag bit on the op code rather than a version field, because
+   the spec's entry header has none and adding a file header would have touched rotation,
+   replay and the distributed snapshot's channel logs. The consequence is the friendlier of the
+   ticket's two options for the WAL (old entries read with empty versions) while the RDB, which
+   does have a version byte, takes the stricter one (rejected).
+4. Restoring a **distributed snapshot** part now restores versions too, since a part is an
+   ordinary RDB. T36 deviation 6 recorded that a part restore "neither flushes the engine nor
+   resets the version table"; it now adds the versions the part carried, which is what I12 asks
+   for and what the values already did. Not asked for by this ticket, forced by filling the slot.
+5. `SnapshotEngine.restore`'s answer ("how many keys the snapshot held") now counts tombstone
+   rows. No caller branches on it; `SnapshotEngineTest` asserts exact counts and still passes
+   because a node with no cluster holds no tombstones.
+
+**Debt this leaves.**
+1. **A repair's install is still not logged.** `StoreAccess.install` writes the value straight
+   into the store rather than through `execute`, so neither the value nor the version of an
+   anti-entropy leaf or a read-repair push reaches the WAL; both are lost together by a crash
+   before the next snapshot, and anti-entropy repairs the node again. Consistent, but it means
+   "every key's version survives" holds for writes and for anything the last snapshot caught,
+   not for an install in between. Fixing it needs a log op for an arbitrary value install, which
+   is a wider change than this ticket's budget.
+2. **Tombstones now live forever on disk as well as in memory.** T66 recorded that the table
+   never shrinks; every save now writes every tombstone it holds. A snapshot of a delete-heavy
+   keyspace grows without bound until tombstones get an expiry rule.
+3. A write inside a `MULTI`/`EXEC` batch goes straight to the engine without a version bump
+   (T22 deviation 5), so its log entry carries whatever version the key already held. Restoring
+   it re-installs the version the key already had, which is harmless, but the batch's write is
+   still invisible to the cluster, exactly as it was before this ticket.
+
+**Merge note (orchestrator).** T67 and T78 (group commit) both edited the head of `Wal.kt` and
+resolved as a union: T78's flusher buffer constant beside T67's trailer-carrying entry, with the
+pre-trailer entry class dropped since the equality methods below the conflict already read the
+trailer. Reachability was then checked rather than inferred from the green build, the lesson T80
+had just taught: the trailer is written by `encode` at enqueue, so entries reach the flusher
+already serialised and no batching can drop it, and there are exactly two production appends, the
+engine's log path which passes a version and the snapshot channel log which deliberately passes
+none. Verified on the merged tree: 523 tests, engine 199, cluster 103, cp 113, server 108.
