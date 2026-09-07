@@ -1,0 +1,68 @@
+# T78 - Group-commit WAL, before and after
+
+Measured by `DynaCache/bench/single-node.sh` with `BENCH_PLAN=t78`. Every number is a value
+`redis-benchmark --csv` printed; nothing is rounded, averaged or adjusted.
+
+## What is compared
+
+The two parents of one merge, whose trees differ by this ticket alone:
+
+| | commit |
+|---|---|
+| before | the `misc/ai_gen` head this branch merged (filled in with the pass) |
+| after | this branch's merge commit (filled in with the pass) |
+
+Not the ticket's base `ca75415f`, which stopped being the right baseline when the branch merged:
+a delta against it would carry another session's versioned store, inbound loop and narrowed
+engine seam as well as this change. The parents of the merge isolate this ticket against the code
+that ships. Progress entry deviation 0.
+
+**Two samples per side, not one.** T79 measured its read side once, saw a 2 to 15 percent gain
+that looked real, sampled again and found the noise band on the same binary was 1 to 32 percent.
+The apparent win was nothing. So the noise band is established first and any delta inside it is
+reported as a null.
+
+## Predictions
+
+**Written before any pass ran, and committed before the machine was touched, so that a reader can
+tell a prediction from a rationalisation.**
+
+1. **The `NEVER` before-and-after will probably come back a null.** It measures the reused batch
+   buffer alone, which removes one allocation and one copy per batch from a path whose other end
+   is a file write. A saving that small, against a syscall, is the kind the run-to-run band
+   swallows. If it is swallowed, that is the result and nothing is landed on the strength of it.
+   If it is instead a real gain, the reasoning above is wrong and the report has to say why, which
+   is a finding of its own.
+2. **The `GROUP_COMMIT` durability pass against `EVERY_SECOND` will carry a real effect, and in
+   orders of magnitude rather than percent.** `EVERY_SECOND`'s measured 53.30 requests per second
+   is arithmetic, not a slow path: fifty clients divided by a one-second fsync interval, with a
+   p50 of 1014.783 ms which is one interval. The deadline is 2 ms rather than 1000 ms and the
+   clients are the same fifty. If the mechanism is what this ticket says it is, the result lands
+   near what that arithmetic predicts; agreement between the two would be evidence the mechanism
+   is understood rather than merely observed, and a large disagreement is worth more than the
+   number itself.
+3. **The no-data-directory pass states the log's share separately.** A node started with no data
+   directory has no log at all, so the gap between it and the `NEVER` node is everything the log
+   costs a pipelined write, of which the buffer is one part.
+
+## Environment
+
+To be filled from `environment.txt` and `load.txt` with the passes: every pass records the other
+Java process count and the CPU idle it ran under, and a pass taken under contention is marked as
+such rather than quietly believed.
+
+## Pass 1: NEVER, plain and pipelined, `-t set,incr,hset,zadd`
+
+To be filled.
+
+## Pass 2: pipelined with no data directory
+
+To be filled.
+
+## Pass 3: durability, `SET` under `EVERY_SECOND` and `GROUP_COMMIT`
+
+To be filled.
+
+## Result
+
+To be filled, against the predictions above.
