@@ -131,7 +131,10 @@ class Router(
      * a per-sender queue of forwards is the repair if a pipelining client ever observes it.
      */
     private suspend fun coordinate(from: NodeId, request: Forward) {
-        val reply = runCatching { decode(request.command.toByteArray()) }.fold(
+        // `single` is not a bet: only a `SET` the log wrote with a decided deadline decodes to two
+        // commands, and a forward passes the codec no `now`, so it never carries one. A forward
+        // that did would be a bug worth an error reply rather than a silent half.
+        val reply = runCatching { CommandCodec.unframe(request.command.toByteArray()).single() }.fold(
             { local.submit(it).await() },
             { Reply.Error("ERR", "unreadable forwarded command: ${it.message}") },
         )
@@ -147,7 +150,7 @@ class Router(
         val id = ids.incrementAndGet()
         val answer = CompletableFuture<Reply>()
         pending[id] = answer
-        val body = Forward.newBuilder().setId(id).setCommand(ByteString.copyFrom(encode(command)))
+        val body = Forward.newBuilder().setId(id).setCommand(ByteString.copyFrom(CommandCodec.frame(command)))
         scope.launch {
             send(coordinator, Envelope.newBuilder().setForward(body))
             // The same coroutine is the deadline and the cleanup: an answer that arrived took
@@ -162,23 +165,6 @@ class Router(
 
     private suspend fun send(to: NodeId, envelope: Envelope.Builder) =
         transport.send(to, envelope.setFrom(self.name).setTo(to.name).build())
-
-    private companion object {
-
-        /** The codec's op code and body, concatenated: the one framing a `Forward` uses. */
-        fun encode(command: Command): ByteArray {
-            val (op, body) = CommandCodec.encode(command)
-            return byteArrayOf(op) + body
-        }
-
-        /**
-         * The inverse. `single` is not a bet: only a `SET` the log wrote with a decided deadline
-         * decodes to two commands, and a forward passes the codec no `now`, so it never carries
-         * one. A forward that did would be a bug worth an error reply rather than a silent half.
-         */
-        fun decode(bytes: ByteArray): Command =
-            CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()
-    }
 }
 
 /**

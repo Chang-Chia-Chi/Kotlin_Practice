@@ -82,18 +82,27 @@ message KeySyncReply {
   repeated Version version = 2;
 }
 
-// The coordinator's write to one replica (spec 5.1 step 5): the command's tokens with NX/XX
-// and the TTL already decided by the coordinator, the version the write created, and the TTL
-// as an absolute instant so clock skew between replicas cannot shorten or stretch it (spec 5.4).
+// The coordinator's write to one replica (spec 5.1 step 5, ADR 0003): the entry the coordinator
+// logged, as the engine command codec's bytes, with NX/XX decided and the TTL settled as an
+// absolute instant so clock skew between replicas cannot shorten or stretch it (spec 5.4); and
+// the version the write created.
 message Replicate {
   int64 id = 1;
-  repeated bytes token = 2;
+  // Tag 2 was the RESP tokens (T22 to T64). A hint outlives a build only in memory, so the old
+  // field is gone rather than deprecated, as Forward's is.
+  reserved 2;
+  reserved "token";
   bytes dvv = 3;
-  // Unix millis; 0 when the key has no TTL.
+  // The settled deadline, Unix millis; 0 when the key has no TTL. The same instant `command`
+  // carries, repeated here so a hint holder can drop a write that expired while it waited (T25)
+  // without decoding it.
   int64 expires_at_millis = 4;
   // Sloppy quorum (spec 2.4, T25): set when the receiver stands in for this dead preference-list
   // node. It stores the whole message as a hint instead of applying it, and acks toward W.
   string hint_for = 5;
+  // `CommandCodec.frame(whatChanged(command, reply), now)` on the coordinator: op code first. A
+  // `SET` with a deadline decodes to a `SET` and an `EXPIRE`; a replica submits each in order.
+  bytes command = 6;
 }
 
 // A replica's acknowledgement of a Replicate, under the same id; one per node counts (C4).
@@ -101,11 +110,14 @@ message ReplicateAck {
   int64 id = 1;
 }
 
-// The coordinator's read on one replica (spec 5.2 step 2): the read command's tokens, run
-// there as they are, so every read command replicates without a per-type message.
+// The coordinator's read on one replica (spec 5.2 step 2): the read command as the engine codec
+// frames it, run there as it is, so every read command replicates without a per-type message.
 message Read {
   int64 id = 1;
-  repeated bytes token = 2;
+  // Tag 2 was the RESP tokens; nothing persists a Read, so the field is gone, as Forward's is.
+  reserved 2;
+  reserved "token";
+  bytes command = 3;
 }
 
 // A replica's answer to a Read: its reply and the version it answered from (empty: none held).
