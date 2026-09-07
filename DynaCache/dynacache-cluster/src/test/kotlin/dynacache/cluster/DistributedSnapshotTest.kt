@@ -12,6 +12,8 @@ import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.FileSnapshotParts
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
+import dynacache.engine.persist.SnapshotParts
+import java.io.IOException
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
@@ -41,7 +43,7 @@ import org.junit.jupiter.api.io.TempDir
 
 /**
  * Chandy-Lamport distributed snapshots (spec 2.8, C10, I12) at the coordinator's seam,
- * `initiate` and `restoreFrom`, through the test kit's cluster. Every value is a causality
+ * `start` and `restoreFrom`, through the test kit's cluster. Every value is a causality
  * tag: write `i` completes (its quorum formed) before write `i + 1` is issued, so `i`
  * happened-before `i + 1`, and a consistent cut holding tag `i + 1` anywhere holds tag `i`.
  */
@@ -70,7 +72,7 @@ class DistributedSnapshotTest {
         val second = router(coordinator).submit(Command.Set(keys[1], "2".toByteArray()))
         untilInFlight()
         network.delay(rounds = 0..0, seed = 1)
-        snapshot((nodes - coordinator).first()).initiate(id)
+        snapshot((nodes - coordinator).first()).start(id)
         drainMessages()
         assertEquals(ok, second.await())
         nodes.forEach { assertTrue(snapshot(it).complete(id), "$it complete") }
@@ -139,7 +141,7 @@ class DistributedSnapshotTest {
         assertEquals(ok, cluster.writeVia(survivors[0], keys[0], "1".toByteArray()))
         cluster.network.kill(victim)
 
-        cluster.snapshot(survivors[0]).initiate("s1")
+        cluster.snapshot(survivors[0]).start("s1")
         cluster.drainMessages()
         assertTrue(dir.resolve("s1").exists(), "the survivors recorded their parts")
         assertEquals(ok, cluster.writeVia(survivors[1], keys[1], "2".toByteArray()), "the write path is open during a snapshot")
@@ -161,7 +163,7 @@ class DistributedSnapshotTest {
         val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], Key("k1"), "1".toByteArray()))
 
-        cluster.snapshot(cluster.nodes[1]).initiate("s1")
+        cluster.snapshot(cluster.nodes[1]).start("s1")
         cluster.drainMessages()
 
         val markers = cluster.network.sent.filter { it.hasMarker() }.groupingBy { it.from to it.to }.eachCount()
@@ -177,7 +179,7 @@ class DistributedSnapshotTest {
         val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
         assertEquals(ok, cluster.writeVia(cluster.nodes[1], keys[1], "2".toByteArray()))
-        cluster.snapshot(cluster.nodes[2]).initiate("s1")
+        cluster.snapshot(cluster.nodes[2]).start("s1")
         cluster.drainMessages()
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "9".toByteArray()))
         assertEquals(Reply.Integer(1), cluster.settle(cluster.router(cluster.nodes[1]).submit(Command.Del(keys[1]))))
@@ -197,7 +199,7 @@ class DistributedSnapshotTest {
 
     /**
      * The initiator's cut against its own demux (spec 2.8 step 1 before step 2). On a real node
-     * `initiate` runs on the node's scope while the router's inbound loop runs the demux, so here
+     * `start` runs on the node's scope while the router's inbound loop runs the demux, so here
      * the initiator runs on [Dispatchers.Default] and a [Gate] clock parks it at the state
      * save's first clock reading, before any partition's view is taken. A Replicate handed to
      * the demux there is restored with its effect applied once: it is in the state or on the
@@ -208,13 +210,13 @@ class DistributedSnapshotTest {
     fun I12_write_during_the_cut_is_restored_once() = runTest {
         val gate = Gate()
         val node = Lone(gate, backgroundScope)
-        val initiate = launch(Dispatchers.Default) { node.snapshot.initiate("s1") }
+        val starting = launch(Dispatchers.Default) { node.snapshot.start("s1") }
         assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
         val delivery = launch { node.demux(incr) }
         runCurrent()
         gate.release.countDown()
         delivery.join()
-        initiate.join()
+        starting.join()
         assertEquals(one, node.engine.submit(Command.Get(counted)).await(), "the live node applied the write once")
         node.close()
 
@@ -232,7 +234,7 @@ class DistributedSnapshotTest {
     fun C10_state_is_cut_before_any_channel_opens() = runTest {
         val gate = Gate()
         val node = Lone(gate, backgroundScope)
-        val initiate = launch(Dispatchers.Default) { node.snapshot.initiate("s1") }
+        val starting = launch(Dispatchers.Default) { node.snapshot.start("s1") }
         assertTrue(gate.blocked.await(5, SECONDS), "the initiator is inside its state save")
         val delivery = launch { node.demux(incr) }
         runCurrent()
@@ -240,7 +242,7 @@ class DistributedSnapshotTest {
         assertEquals(emptyList<Path>(), logs, "no channel is open while the state is being cut")
         gate.release.countDown()
         delivery.join()
-        initiate.join()
+        starting.join()
         node.close()
         val part = recorded("s1").getValue(self)
         assertEquals(Part(emptySet(), mapOf(peer to setOf(1))), part, "delivered during the cut: on the channel, not in the state")
@@ -257,7 +259,7 @@ class DistributedSnapshotTest {
         val data = dir.resolve("data")
         val node = Lone(clock, backgroundScope, dataDir = data, deadline = 30.seconds)
         assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
-        node.snapshot.initiate("s1")
+        node.snapshot.start("s1")
         assertEquals(ok, node.engine.submit(Command.Set(counted, "2".toByteArray())).await())
         assertEquals(ok, node.engine.submit(Command.Set(Key("after"), "3".toByteArray())).await())
 
@@ -294,7 +296,7 @@ class DistributedSnapshotTest {
         assertEquals(emptyList<Path>(), dir.listDirectoryEntries(), "the refused id recorded nothing")
         assertFalse(cluster.snapshot(target).complete("../x"), "no part was started for the refused id")
 
-        cluster.snapshot(sender).initiate("s1")
+        cluster.snapshot(sender).start("s1")
         cluster.drainMessages()
         cluster.nodes.forEach { assertTrue(cluster.snapshot(it).complete("s1"), "$it complete") }
         assertEquals(Reply.Bulk("1".toByteArray()), cluster.readVia(target, keys[0]), "the node still answers its clients")
@@ -310,7 +312,7 @@ class DistributedSnapshotTest {
     fun restore_of_a_missing_id_is_an_error_and_changes_nothing() = runTest {
         val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
         assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
-        cluster.snapshot(cluster.nodes[0]).initiate("s1")
+        cluster.snapshot(cluster.nodes[0]).start("s1")
         cluster.drainMessages()
 
         for (node in cluster.nodes) {
@@ -332,7 +334,7 @@ class DistributedSnapshotTest {
     fun restore_of_an_incomplete_part_is_an_error() = runTest {
         val node = Lone(clock, backgroundScope)
         assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
-        node.snapshot.initiate("s1")
+        node.snapshot.start("s1")
         assertTrue(dir.resolve("s1").resolve(self.name).resolve("dump.rdb").exists(), "the state is cut")
         assertFalse(node.snapshot.complete("s1"), "$peer never closed its channel")
 
@@ -343,6 +345,99 @@ class DistributedSnapshotTest {
         node.close()
     }
 
+    /**
+     * One node of a live cluster cannot write its part: its `dump.rdb.tmp` is a directory, so
+     * the state save's first write fails with an ordinary `IOException`. That node abandons the
+     * set and goes on reading its inbound channel. Before this ticket the exception left the cut,
+     * crossed an inbound loop with no per-envelope catch (T68) and ended the loop, so one node's
+     * disk problem stopped it answering for the third of the keyspace it coordinates (T75).
+     */
+    @Test
+    fun a_cut_that_cannot_write_abandons_the_set_and_the_node_lives() = runTest {
+        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
+        assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
+        val victim = cluster.nodes[0]
+        val initiator = cluster.nodes[1]
+        dir.resolve("s1").resolve(victim.name).resolve("dump.rdb.tmp").createDirectories()
+
+        cluster.snapshot(initiator).initiate("s1")
+        cluster.drainMessages()
+
+        assertFalse(cluster.snapshot(victim).complete("s1"), "$victim has no part of the set")
+        assertFalse(dir.resolve("s1").resolve(victim.name).exists(), "$victim recorded no part")
+        assertEquals(1, cluster.snapshot(victim).abandoned, "the abandoned set is what INFO reports")
+        assertEquals(ok, cluster.writeVia(victim, keys[1], "2".toByteArray()), "$victim still takes a write")
+        assertEquals(Reply.Bulk("1".toByteArray()), cluster.readVia(victim, keys[0]), "$victim still answers a read")
+        cluster.close()
+    }
+
+    /**
+     * The cut fails part way, with the part's directory already made. What is left is deleted
+     * whole, so no later restore can read the abandoned set as complete, and the id is refused
+     * afterwards the way an aborted one is: an operator naming it does not empty the node.
+     */
+    @Test
+    fun a_failed_cut_leaves_no_half_written_part() = runTest {
+        val node = Lone(clock, backgroundScope)
+        assertEquals(ok, node.engine.submit(Command.Set(counted, "1".toByteArray())).await())
+        dir.resolve("s1").resolve(self.name).resolve("dump.rdb.tmp").createDirectories()
+
+        node.demux(marker("s1"))
+
+        assertEquals(emptyList<Path>(), dir.listDirectoryEntries(), "the abandoned set left nothing behind")
+        val failure = failureOf { node.snapshot.restoreFrom("s1") }
+        assertTrue(failure is IllegalArgumentException, "an abandoned set is not restorable: $failure")
+        assertEquals(one, node.engine.submit(Command.Get(counted)).await(), "the engine is untouched")
+        assertEquals(1, node.snapshot.abandoned)
+        node.close()
+    }
+
+    /**
+     * The channel log is the cut's other file: a set whose recording fails is abandoned too, and
+     * the envelope that could not be recorded still gets its ordinary handling. Recording is
+     * beside the write path, so a disk that refuses a snapshot never refuses a client.
+     */
+    @Test
+    fun a_channel_that_cannot_be_recorded_abandons_the_set_and_the_envelope_is_handled() = runTest {
+        val node = Lone(clock, backgroundScope, wrap = { parts ->
+            object : SnapshotParts by parts {
+                override fun record(id: String, channel: String, bytes: ByteArray): Unit =
+                    throw IOException("no space left on device")
+            }
+        })
+        node.snapshot.initiate("s1")
+        assertTrue(dir.resolve("s1").resolve(self.name).exists(), "the state was cut")
+
+        node.demux(incr)
+
+        assertEquals(one, node.engine.submit(Command.Get(counted)).await(), "the envelope was handled")
+        assertFalse(dir.resolve("s1").exists(), "the set this node could not record on is gone")
+        assertEquals(1, node.snapshot.abandoned)
+        node.close()
+    }
+
+    /**
+     * The boundary this ticket's policy draws, by exception type and not by position: an
+     * `IOException` out of the part adapter is the environment and the set is abandoned;
+     * anything else is a bug in this build and reaches the inbound loop, which has no catch of
+     * its own on purpose (T68). Swallowing both would answer a broken build with a node that
+     * quietly records nothing.
+     */
+    @Test
+    fun a_bug_in_the_cut_is_not_swallowed() = runTest {
+        val node = Lone(clock, backgroundScope, wrap = { parts ->
+            object : SnapshotParts by parts {
+                override fun cut(id: String): Unit = throw IllegalStateException("a bug in this build")
+            }
+        })
+
+        val failure = failureOf { node.snapshot.receive(marker("s1")) }
+
+        assertTrue(failure is IllegalStateException, "a programming error reaches the loop: $failure")
+        assertEquals(0, node.snapshot.abandoned, "a bug is not an abandoned set")
+        node.close()
+    }
+
     /** What a suspending call threw, or null: `assertThrows` takes no suspending lambda. */
     private suspend fun failureOf(block: suspend () -> Unit): Throwable? = runCatching { block() }.exceptionOrNull()
 
@@ -350,6 +445,10 @@ class DistributedSnapshotTest {
     private val peer = NodeId("node-2")
     private val counted = Key("n")
     private val one = Reply.Bulk("1".toByteArray())
+
+    /** The peer's marker for set [id], as it arrives on this node's channel from it. */
+    private fun marker(id: String): Envelope = Envelope.newBuilder().setFrom(peer.name).setTo(self.name)
+        .setMarker(Marker.newBuilder().setSnapshotId(id)).build()
 
     /** What the peer replicates during the cut: not idempotent, so a second application shows. */
     private val incr: Envelope = Envelope.newBuilder().setFrom(peer.name).setTo(self.name)
@@ -368,6 +467,8 @@ class DistributedSnapshotTest {
         /** The node's own RDB and log (spec 2.8), restored at construction; null persists nothing. */
         dataDir: Path? = null,
         deadline: Duration = Duration.INFINITE,
+        /** The part adapter this node is given, wrapped: how a test makes its storage refuse. */
+        wrap: (SnapshotParts) -> SnapshotParts = { it },
     ) {
         val engine = ApEngine(1, clock)
         init {
@@ -375,7 +476,7 @@ class DistributedSnapshotTest {
         }
         val snapshot = DistributedSnapshot(
             self, listOf(peer), InMemoryTransport().endpoint(self),
-            FileSnapshotParts(dir, self.name, engine, snapshotClock),
+            wrap(FileSnapshotParts(dir, self.name, engine, snapshotClock)),
             demux = ::demux, scope = scope, deadline = deadline,
         )
 

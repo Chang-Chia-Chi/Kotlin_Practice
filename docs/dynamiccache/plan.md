@@ -79,8 +79,13 @@ dynacache-server   cp (cluster until T38) + Netty + LuaJ
 
 Rules: the engine never imports coroutines, Netty, gRPC, LuaJ or MicroRaft. LuaJ appears only
 in `dynacache.server`. Generated protobuf and gRPC classes appear in `dynacache.cluster`,
-`dynacache.cp` and the server's adapters, never in the engine. `java.nio.file` appears only in
-`dynacache.engine.persist` and `dynacache.cp`. Vocabulary is `DynaCache/CONTEXT.md`;
+`dynacache.cp` and the server's adapters, never in the engine. Every file *operation* -- creating
+a directory, testing existence, listing, reading, writing, deleting -- lives in
+`dynacache.engine.persist` or `dynacache.cp`, which own the layout on disk; a `Path` may be
+carried as a configuration *value* anywhere, since the composition root reads a data directory
+from the command line and hands it to what persists (T81). The test is `Files`, not `Path`: a
+module outside those two that reaches for `java.nio.file.Files`, `java.io.File` or
+`kotlin.io.path` is the violation. Vocabulary is `DynaCache/CONTEXT.md`;
 architecture decisions are `DynaCache/docs/adr/`.
 
 ### 2.3 Seams (public surface budget)
@@ -189,6 +194,17 @@ beside P3 and P4.
 Escalation: an Opus ticket that fails compile or tests on its second attempt, or that tries to
 change a seam of 2.3, is terminated and relaunched fresh on Fable with the error context. A
 Fable subagent that dies (HTTP 429) is relaunched fresh, never resumed.
+
+**Tier 1 unavailable, 2026-09-07.** Fable ran out of usage credits mid-wave: three tier 1
+subagents (T67, T80, T84) died within two minutes of spawning, having done nothing, and the
+tier was gone for the rest of the run. Those three, and T85 which was routed to tier 1 by
+shape, were done on Opus instead, each recording the swap in its progress entry. Read that as
+a fact about the tickets and not only about the billing: this table sends interleavings, causal
+orders and consistent cuts to tier 1 for a reason, so a run of tickets in that class carried by
+tier 2 is worth a second look if one of them later proves subtly wrong. When a tier is gone,
+prefer swapping the model to holding the ticket, and swap **before** dispatching into a
+resource someone else is holding open: an agent is cheap and replaceable, a quiet benchmark
+window costs another session a whole wave of dispatches to produce.
 
 ---
 

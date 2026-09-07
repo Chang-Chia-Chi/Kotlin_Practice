@@ -1,7 +1,6 @@
 package dynacache.cluster
 
 import dynacache.engine.Value
-import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
 import dynacache.engine.fieldBytes
 
@@ -47,9 +46,9 @@ private fun combine(earlier: Value, later: Value, seed: Long): Value = when {
  * value and applied per field; a concurrent `HDEL` is undone by the side still holding the field.
  */
 private fun union(earlier: Value.Hash, later: Value.Hash): Value.Hash {
-    val fields = HashTable<String, ByteArray>()
-    for (hash in listOf(earlier, later)) for ((name, bytes) in hash.fields.entries()) fields.put(name, bytes)
-    return Value.Hash(fields)
+    val merged = Value.Hash()
+    for (hash in listOf(earlier, later)) for ((name, bytes) in hash.fields.entries()) merged.fields.put(name, bytes)
+    return merged
 }
 
 /**
@@ -60,8 +59,8 @@ private fun union(earlier: Value.Hash, later: Value.Hash): Value.Hash {
  */
 private fun union(earlier: Value.List, later: Value.List): Value.List {
     val shared = earlier.items.zip(later.items).takeWhile { (a, b) -> a.contentEquals(b) }.size
-    if (shared == earlier.items.size || shared == later.items.size) return Value.List(ArrayDeque(later.items))
-    return Value.List(ArrayDeque(earlier.items + later.items.drop(shared)))
+    if (shared == earlier.items.size || shared == later.items.size) return Value.List(later.items)
+    return Value.List(earlier.items + later.items.drop(shared))
 }
 
 /** Every member of either side, at the higher of its two scores. */
