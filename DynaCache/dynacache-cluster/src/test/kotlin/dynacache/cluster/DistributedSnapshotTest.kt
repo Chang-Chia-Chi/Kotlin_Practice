@@ -2,6 +2,7 @@ package dynacache.cluster
 
 import com.google.protobuf.ByteString
 import dynacache.cluster.proto.Envelope
+import dynacache.cluster.proto.Marker
 import dynacache.cluster.proto.Replicate
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
@@ -269,6 +270,35 @@ class DistributedSnapshotTest {
         assertEquals(Reply.Bulk("2".toByteArray()), restarted.engine.submit(Command.Get(counted)).await(), "acked after the cut")
         assertEquals(Reply.Bulk("3".toByteArray()), restarted.engine.submit(Command.Get(Key("after"))).await(), "acked after the cut")
         restarted.close()
+    }
+
+    /**
+     * A marker whose snapshot id the part adapter refuses, arriving on a real channel. The
+     * inbound loop has no per-envelope catch, so the marker is consumed and dropped rather than
+     * thrown on: the id never becomes a path, no part is started or recorded for it, and the
+     * node goes on to take the snapshot the next marker asks for and to serve its clients.
+     */
+    @Test
+    fun marker_with_an_unusable_id_is_dropped_and_the_node_lives() = runTest {
+        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope, snapshotDir = dir)
+        assertEquals(ok, cluster.writeVia(cluster.nodes[0], keys[0], "1".toByteArray()))
+        val target = cluster.nodes[0]
+        val sender = cluster.nodes[1]
+        val crafted = Envelope.newBuilder().setFrom(sender.name).setTo(target.name)
+            .setMarker(Marker.newBuilder().setSnapshotId("../x")).build()
+
+        cluster.transport(sender).send(target, crafted)
+        cluster.drainMessages()
+
+        assertFalse(dir.parent.resolve("x").exists(), "the id never became a path outside the snapshot directory")
+        assertEquals(emptyList<Path>(), dir.listDirectoryEntries(), "the refused id recorded nothing")
+        assertFalse(cluster.snapshot(target).complete("../x"), "no part was started for the refused id")
+
+        cluster.snapshot(sender).initiate("s1")
+        cluster.drainMessages()
+        cluster.nodes.forEach { assertTrue(cluster.snapshot(it).complete("s1"), "$it complete") }
+        assertEquals(Reply.Bulk("1".toByteArray()), cluster.readVia(target, keys[0]), "the node still answers its clients")
+        cluster.close()
     }
 
     private val self = NodeId("node-1")
