@@ -6506,3 +6506,158 @@ Every Chandy-Lamport test passes unchanged in name and assertion: `chandy_lampor
 3. Restoring an id that was never cut is a silent no-op that leaves the engine empty
    (`SnapshotEngine.restore` on a missing `dump.rdb`). `ClusterNode.restoreSnapshot("typo")`
    therefore empties a node without complaint.
+
+---
+
+## T71 - One home for the cp: namespace rule
+
+The rule "is this a CP key, which primitive kind owns it, and which Redis commands may touch it"
+was written in four modules with five `-NOTCP` literals, the reference prefix was known only to
+the dispatcher, and the compat re-target undid the parser: an `EXPIRE` became an instant from the
+parser's clock and a span again from the dispatcher's. It is now one module in the engine, beside
+`Command.Cp`, and every other site reads it.
+
+### The rule and where it lives
+
+`dynacache-engine/src/main/kotlin/dynacache/engine/CpNamespace.kt` (~215 lines), three
+declarations:
+
+- `enum class CpKind(prefix)` - `COUNTER("cp:counter:")`, `LOCK("cp:lock:")`,
+  `SEMAPHORE("cp:sem:")`, `LATCH("cp:latch:")`, `REFERENCE("cp:ref:")`, `SESSION("cp:session")`,
+  `UNTYPED("cp:")`, the sub-namespaces of CP spec 2 in declaration order so `cp:` is read last and
+  never hides a longer prefix.
+- `sealed interface CpRouting` - `Ap` (names no `cp:` key), `Verb(Command.Cp)` (the CP verb this
+  command means), `Refused(Reply.Error)`.
+- `object CpNamespace` with six public members: `kindOf(Key): CpKind?`, `owns(Key): Boolean`,
+  `kindOf(Command.Cp): CpKind?`, `refusalFor(Command.Cp): Reply.Error?`, `route(Command):
+  CpRouting`, `expiry(Key, Duration): CpRouting`, plus `notCp(message)`, `keysOf(command)` and
+  `COMPAT`.
+
+`route` is total and is the whole of CP spec 9.5's three rules in order. `refusalFor` is the edge
+both CP engines check. `expiry` is the parser's, and is the only entry that takes a span, because
+a span is what the CP log evaluates against log time (CP spec 5).
+
+`COMPAT` is CP spec 9.5's fifteen names written once, as the command classes those names parse to
+(`SETEX` and `SETNX` both parse to `Command.Set`, `DECR` and `INCRBY` to `Command.IncrBy`), so the
+set is one declaration rather than fifteen. It earns its keep in production: a refusal inside the
+set reads "no CP verb answers this command yet" (`DEL`, `EXISTS`, `TYPE`) and one outside it reads
+"this is not a command it accepts" (`LPUSH`, `STRLEN`).
+
+### Sites that now read it, literals deleted
+
+| Site | Before | After |
+|---|---|---|
+| `CommandDispatcher.kt` | 145 lines: `isCpKey`, `keysOf`, `compat`, `Rejected`, `refuse`, `notAnInteger`, `asLong`, `REFERENCE_PREFIX`, a `Clock` | 55 lines: one `when` over `CpRouting`, no clock |
+| `CpEngine.submit` | two `Reply.Error("NOTCP", ...)`, own `Key.isCp()` | `CpNamespace.notCp` + `refusalFor` |
+| `ForwardingCpEngine.submit` | two `Reply.Error("NOTCP", ...)`, own `Key.isCp()` | `CpNamespace.notCp` + `refusalFor` |
+| `CommandEngine.submit` (AP) | one `Reply.Error("NOTCP", ...)` | `CpNamespace.notCp` |
+| `CommandParser` | built `Command.Expire` for every key | emits the CP verb for a `cp:` key |
+| `DynaCacheServer` | `CommandDispatcher(ap, cp, clock)`, server-local `keysOf` | `CommandDispatcher(ap, cp)`, `CpNamespace::keysOf` |
+
+Deleted: five `Reply.Error("NOTCP", ...)` literals (one producer remains, `CpNamespace.notCp`);
+three copies of `startsWith("cp:")` (`Key.isCp()` twice, `Key.isCpKey()` once); the dispatcher's
+`REFERENCE_PREFIX` and its private `Rejected` control-flow exception; the server's `keysOf`.
+
+### The parser decision: emit the CP verb, leave the refusal
+
+The parser emits CP verbs for `cp:` keys, as the ticket asks. It is done in two places:
+
+1. `parse` runs `cpVerb(dispatch(...))`, one line reading `CpNamespace.route`, which covers `GET`,
+   `SET`/`SETEX`/`SETNX`, the `INCR` family, `TTL`/`PTTL` and `PERSIST`.
+2. the four expiry spellings call `CpNamespace.expiry(key, ttl)` **before** an instant exists, so
+   `EXPIRE cp:counter:x 10` becomes `LongExpire(key, PT10S)` with no instant in between.
+
+A command the namespace **refuses** is deliberately left as it parsed and refused by the
+dispatcher. Refusing at parse time would turn an execution error into a parse error, and a parse
+error aborts an enclosing `MULTI` with `EXECABORT` where an execution error does not. That is a
+semantic change this ticket has no business making, so the refusal stayed where it was.
+
+The round trip is gone: the dispatcher has no `Clock` parameter any more, which is the mechanical
+proof. `EXPIRE`/`PEXPIRE` cost one clock read in the parser, and it is the overflow guard rather
+than a conversion: a span no clock can hold is still Redis's `invalid expire time` for a `cp:` key
+too, before the CP log has to add it to log time. `EXPIREAT`/`PEXPIREAT` cost the same one read,
+for the absolute-to-span conversion the wire genuinely requires.
+
+### The kind-mismatch decision: `-WRONGTYPE`, from CP spec 6.8
+
+CP spec 9.4 does not name a reply; it says only that "`EXPIRE` on a `cp:lock:*` key is rejected"
+(line 356). The reply is named one section earlier, in the error table of CP spec 6.8 (line 279):
+
+> `-WRONGTYPE` | Key exists as different primitive (e.g., LOCK on AtomicLong key)
+
+CP spec 2 (line 104) makes the sub-namespace the thing that says which primitive a key is. Putting
+the two together: **a verb of one kind aimed at a key of another kind is `-WRONGTYPE`**, whether it
+is spelled as a CP verb (`CP.LONG.INCR cp:lock:x`) or as the Redis command the compat set maps to
+one (`GET cp:lock:x`, `EXPIRE cp:lock:x`, `INCR cp:ref:r`). Decided once, in `CpNamespace`, rather
+than differently per verb.
+
+Three boundaries of that decision, all deliberate:
+
+- **A command outside the compat set stays `-NOTCP`, whatever kind owns the key.** CP spec 9.5
+  rule 2 is explicit that the `cp:` namespace only accepts the compat set, so `LPUSH cp:lock:x`
+  and `TYPE cp:lock:x` are commands aimed at no primitive rather than at the wrong one. Only the
+  six value verbs the counter and the reference share (`GET`, `SET`, the `INCR` family, `EXPIRE`,
+  `TTL`, `PERSIST`) can be aimed at the wrong primitive, and only those answer `-WRONGTYPE`.
+  (The first cut of this ticket had the mismatch swallow the whole else-branch; the code-review
+  pass caught it against spec 9.5 and it is now one line, `else -> refused(command)`.)
+
+- **An untyped `cp:` key is nobody's in particular.** `cp:x` is `CpKind.UNTYPED` and the counter
+  answers it, exactly as before this ticket. The mismatch check fires only when the key's kind is
+  one a primitive claims. Making unknown prefixes an error would reject `CP.LONG.INCR cp:x`, which
+  works today and which CP spec 2 permits ("conventionally prefixed").
+- **The check is on the key's sub-namespace, not on the key's existence.** CP spec 6.8 says "key
+  exists as different primitive"; nothing tracks per-key existence across state machines and this
+  ticket may not change them. The prefix is the spec's own way of saying which primitive a key is,
+  so it is what the check reads. This also closes the `ponytail:` comment the dispatcher carried
+  since T44: `GET cp:lock:x` no longer reads an empty counter, and `EXPIRE cp:lock:x` no longer
+  answers 0.
+
+This fixes the class of bug ticket 54 fixed, at its root: `INCR cp:ref:r` used to become
+`LongIncrBy` on a reference key because only `GET`/`SET`/`EXPIRE`/`TTL`/`PERSIST` consulted the
+reference prefix. There is now one lookup, so a verb cannot consult it for some commands and not
+others.
+
+### Tests
+
+New, `dynacache-engine/src/test/kotlin/dynacache/engine/CpNamespaceTest.kt` (9):
+`cp_kind_lookup_covers_every_prefix` (every prefix, and every enum entry reachable from a key, so
+no prefix is written twice or hidden), `C16_a_cp_verb_outside_the_cp_namespace_is_notcp`,
+`a_verb_of_one_kind_on_a_key_of_another_is_wrongtype`,
+`the_untyped_and_typed_counter_keys_read_the_same_verbs`,
+`the_reference_answers_its_own_value_and_ttl_verbs`, `a_plain_key_is_the_ap_engines`,
+`C16_a_fanned_command_naming_a_cp_key_is_refused_whole`,
+`a_command_no_cp_primitive_answers_is_notcp_whatever_the_kind`,
+`a_counter_takes_a_number_or_the_error_redis_gives_for_one`.
+
+New, `CommandParserTest` (3): `compat_set_matches_cp_spec_9_5` (each of the fifteen names parses
+to a class in `COMPAT`, and `LPUSH`/`STRLEN`/`APPEND`/`HSET`/`MGET` do not),
+`the_parser_emits_cp_verbs_for_cp_keys`, `a_refused_cp_command_is_left_for_the_dispatcher`.
+
+New, `CommandDispatcherTest` (1): `a_kind_mismatch_on_a_cp_key_is_wrongtype`.
+
+Moved: the two `Command.Expire` rows of `the compat set reaches the CP engine as the verb it
+means` are now the parser's, because the dispatcher no longer sees an `Expire` on a `cp:` key.
+`I22_namespaces_never_cross`, `C16_ap_engine_never_sees_cp_key`,
+`C22_no_cross_engine_state_leakage`, `compat_conditional_set_retargets_to_the_kinds_set_verb` and
+every `CpRoutingTest`, `CpSessionLifecycleTest` and P5 acceptance test are unchanged and green.
+
+Counts: engine 158 -> 167, cluster 86 -> 86, cp 102 -> 102, server 103 -> 107 (462 total, all
+green). Diff: 569 insertions, 147 deletions across 11 files, two of them new; the dispatcher alone
+is net -69.
+
+`CpSnapshotTest.lagging_member_is_brought_up_by_snapshot` failed once during a whole-repo run and
+passed on its own immediately after. It asserts that a restarted member's `lastSnapshotIndex` has
+caught up, which is MicroRaft install-snapshot timing; three other Maven builds were running on
+the machine at the time. Not touched by this ticket and green in every isolated run.
+
+### Deviations
+
+1. **The refusal did not move to the parser** (above): a parse error aborts a `MULTI` and an
+   execution error does not, and the ticket's seam list does not include `MULTI` semantics. The
+   parser emits every CP verb it can build; it never refuses.
+2. **`DEL`, `EXISTS` and `TYPE` still answer `-NOTCP` on a `cp:` key**, though CP spec 9.5 lists
+   them in the compat set. No CP primitive answers them and adding three CP verbs is another
+   ticket; the refusal now says so in as many words ("no CP verb answers this command yet"), and
+   `COMPAT` records that they are in the set. Behaviour is unchanged from before this ticket.
+3. **`DynaCache/CONTEXT.md` gained a "Namespace rule" and a "CP kind" entry** and lost the
+   dispatcher's claim to the re-target, since the rule moved out from under it.
