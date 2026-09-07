@@ -6832,3 +6832,87 @@ and recovery test and `P4AcceptanceTest` pass unchanged.
   closes a part's engine, so it is harmless today; the same guard belongs there if one appears.
 - T76 could stop reading `fsync == null` as "no log" by splitting a `RdbStore` out of
   `SnapshotEngine`; not needed for anything yet.
+
+---
+
+## T65 - A replicate carries codec bytes
+
+A replica applies exactly the entry the coordinator logged. The coordinator runs the write,
+passes `(command, reply)` through `whatChanged`, frames the result with its own instant through
+the engine command codec, and ships those bytes with the version. The replica decodes them and
+submits what they decode to, in order. No RESP spelling of a command is left anywhere on the
+cluster seam: T64 took the forward, this ticket takes the replicate and the read.
+
+This ticket was started by one agent, who landed the codec's framed pair, the proto change and
+the named test before dying on an API limit without committing, and finished by a second agent,
+who wrote everything else below from that inherited diff.
+
+**The envelope.** `Replicate`'s `repeated bytes token = 2` is gone and `bytes command = 6`
+replaces it; tag 2 and the name `token` are `reserved`, as `Forward`'s are (T64). The field was
+removed rather than deprecated because a hint outlives a build only in memory. `expires_at_millis`
+stays: it is the same instant the command's bytes carry, repeated so a hint holder can drop a
+write that expired while it waited (T25) without decoding it. `Read` lost its tokens the same
+way and carries `bytes command = 3`.
+
+**The framing helper's home.** `CommandCodec.frame(command, now)` is `encode` with the op code
+prepended to the body, one byte array; `CommandCodec.unframe(bytes)` is the inverse and answers
+the list `decode` does. T64's note said the second copy of `Router`'s private framing would
+justify lifting it onto the codec; this is the second copy, so `Router`'s companion is deleted
+and `Router`, `Replication`, the test kit and `DistributedSnapshotTest` all call the codec's
+pair. `Router.coordinate` still takes `single()` (a forward passes no `now`, so it never
+decodes to two commands); a replicate iterates the list.
+
+**Replication.** `write` is `whatChanged(command, reply) ?: return reply`, then
+`frame(changed, clock.instant())`. The hand-written rules are deleted with `Replication.decided()`:
+the refused-`SET` check (`whatChanged` answers null for an error or a nil bulk), the NX/XX
+stripping (`whatChanged` strips it), the TTL-to-instant conversion (`encode`'s `now` settles it)
+and the replica's second submit of an `EXPIRE` (a `SET` with a settled deadline decodes to the
+`SET` and then the `EXPIRE`, and the replica submits each). `replicate` takes its key from the
+first decoded command; bytes that do not decode are not acked, as unreadable tokens were not.
+The constructor lost `tokens` and `parse`; nothing is injected in their place, at every call
+site (`ClusterNode`, `InProcessCluster`, `ReadRepairTest`, `ReplicationTest`). `ClusterNode`
+also lost its `CommandParser` and the `parse` helper that were only there for replication.
+
+**The same-bytes comparison.** `replica_applies_exactly_the_logged_entry` in
+`dynacache-cluster/.../ReplicationTest.kt`: three nodes with W = 3, each engine under a
+`SnapshotEngine` with a never-fsynced WAL in a temp dir. A `SET NX` with a ten-second TTL goes
+through the coordinator. The coordinator's WAL holds one entry, asserted equal to
+`CommandCodec.encode(Set(key, value, ttl = 10s), EPOCH)`: condition gone, deadline settled. Both
+`Replicate` envelopes on the in-memory transport's `sent` log carry exactly `op + body` of that
+entry. Each replica's WAL holds the two entries the logged entry decodes to (`SET` without TTL,
+then `EXPIRE` at the deadline), byte for byte. Red by construction against the base: the
+`Replicate` message had no `command` field, so the test did not compile before the proto change.
+
+**What was deleted.** The test kit's `TokenCodec.kt` (the kit's partial command encoding), the
+server's `CommandTokens.kt` (`commandToTokens`) and `CommandTokensTest.kt`. `TokenCodec` was
+also the reason T64's round-trip test built its own routers; that test's comment no longer
+points at T65. `GrpcTransportTest`'s one-envelope-per-case fixture builds `Replicate` and `Read`
+with opaque `command` bytes, as it does for `dvv`. `DistributedSnapshotTest` reads a channel
+log's write tag out of the decoded command (a `SET`'s value, or the lone harness's `INCRBY`
+delta) instead of token 2.
+
+**Docs.** ADR 0003 gains the line: since T65 the command ships as the engine command codec's
+bytes, the entry the coordinator logged, framed op code first. `CONTEXT.md`'s hint entry and
+`HintStore`'s header say "the logged entry's bytes" where they said "tokens".
+
+**Tests.** engine 158, cluster 87 to 88, cp 103, server 103 to 102 (`CommandTokensTest` gone),
+all green. Diff 18 files, +138/-347. The three known flaky tests did not flake in the green run.
+
+**Deviations.** None from the ticket. One judgment call: a write whose reply is a nil bulk
+(an empty-list `LPOP`) used to be replicated and applied as a no-op on the replicas; now
+`whatChanged` says nothing changed and nothing ships. The coordinator's version bump still
+happens first, exactly as it did for a refused conditional `SET` before this ticket.
+
+**For the next ticket.**
+
+- T66 (the versioned store): `Replication.write` now has the shape T66 wants to move, a
+  `versions.compute` bump, an engine submit, a `whatChanged`, a frame; the replica side is
+  `versions[key]` + spec 5.3's three-way `when` + a loop of submits. The version bump before the
+  engine runs and the replicate's key coming from `commands.first()` are the two places a
+  versioned store takes over. `RecordingEngine` in `ReplicationTest` is still the double for
+  C4; T66 deletes it.
+- T73 (or whoever touches the wire next): `frame`/`unframe` are the only framing on the cluster
+  seam; `Router` keeps `single()` and a comment saying why. If a forward ever needs to carry a
+  settled deadline, drop the `single()` and pass the codec a `now` on the forwarding side.
+  `expires_at_millis` on `Replicate` is now redundant with the bytes; it stays only for
+  `HintStore.pending`'s expiry sweep without a decode.
