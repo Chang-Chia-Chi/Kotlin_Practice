@@ -9,8 +9,6 @@ import dynacache.cp.proto.InfoRequest
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.CpNamespace
-import dynacache.engine.Key
-import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import io.grpc.Grpc
 import io.grpc.InsecureChannelCredentials
@@ -73,9 +71,6 @@ class ForwardingCpEngine(
             CpWire.infoReply(stub(member).getInfo(InfoRequest.getDefaultInstance()))
         }
     }
-
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        throw NotImplementedError("CP has no batches: the Raft log already serializes every entry")
 
     override fun close() {
         scope.cancel()
