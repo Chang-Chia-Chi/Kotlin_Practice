@@ -94,6 +94,41 @@ class MerkleTreeTest {
         )
     }
 
+    /**
+     * The pieces T84's exchange descends with decide what [MerkleTree.diff] decides locally:
+     * the positions a descent suspects, and then the keys those positions really differ about.
+     * The wire path only ever sees the other side's leaves at the suspect positions, which is
+     * why this holds: outside them the two sides hold identical leaves.
+     */
+    @Test
+    fun merkle_descent_pieces_decide_what_diff_decides() {
+        val leaves = wide(300)
+        val mine = MerkleTree.of(leaves)
+        for (changed in listOf(listOf(0), listOf(17), listOf(299), listOf(3, 200))) {
+            val theirs = MerkleTree.of(changed.fold(leaves) { so, at -> so.replacing(at, wideLeaf(at, "rewritten")) })
+            val suspect = mine.suspectLeaves(theirs)
+
+            assertEquals(
+                mine.diff(theirs).flatMap { it.keys },
+                mine.divergentKeys(suspect, theirs.leavesAt(suspect)),
+                "the descent and the local diff name the same keys for $changed",
+            )
+        }
+    }
+
+    /** A peer's leaf count is all the sender needs to know whether the two trees line up. */
+    @Test
+    fun merkle_height_follows_from_the_leaf_count() {
+        for (count in listOf(0, 1, 2, 15, 16, 17, 255, 256, 257, 300)) {
+            assertEquals(MerkleTree.of(wide(count)).height, MerkleTree.heightOf(count), "$count leaves")
+        }
+    }
+
+    private fun wide(size: Int) = (0 until size).map { wideLeaf(it) }
+
+    private fun wideLeaf(at: Int, value: String? = null) =
+        "key%03d".format(at).let { leaf(it, value = value ?: "value-of-$it") }
+
     private fun List<MerkleLeaf>.without(at: Int) = toMutableList().apply { removeAt(at) }
 
     /** Keys are zero-padded so their byte order is their list order. */

@@ -5,6 +5,8 @@ import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.KeySync
 import dynacache.cluster.proto.KeySyncReply
 import dynacache.cluster.proto.Leaf
+import dynacache.cluster.proto.MerkleLevel
+import dynacache.cluster.proto.MerkleLevelReply
 import dynacache.cluster.proto.MerkleRoot
 import dynacache.cluster.proto.MerkleRootReply
 import dynacache.cluster.proto.Version
@@ -35,9 +37,16 @@ import kotlinx.coroutines.withTimeoutOrNull
  * value is gone) is a leaf over no bytes and crosses as a version with no value, so a `DEL`
  * one replica missed reaches it here rather than being undone (T66).
  *
- * Plan 2.5: one step touches one range, sends at most two requests and waits at most
- * [deadline] for each. [run] is the node's one coroutine, ticking every [interval]; tests
- * call [tick]. [rangesCompared] and [keysSynced] are what `INFO` reports.
+ * Plan 2.5: one step touches one range, waits at most [deadline] for each request and sends at
+ * most [REQUESTS_PER_STEP] of them. A step is the root exchange, then a descent of the peer's
+ * tree one level per request (T84), then the leaves under the subtrees that still differ, then
+ * the key sync: `tree height + 1` requests, so a fan-out of 16 keeps a range of 16^9 keys
+ * inside the budget. A tree deeper than [DESCENT_ROUNDS] ends the step where it stands and the
+ * range comes round again on a later tick, rather than this process issuing an unbounded number
+ * of requests before its deadline.
+ *
+ * [run] is the node's one coroutine, ticking every [interval]; tests call [tick].
+ * [rangesCompared] and [keysSynced] are what `INFO` reports.
  */
 class AntiEntropy(
     private val self: NodeId,
@@ -87,9 +96,14 @@ class AntiEntropy(
             ?.merkleRootReply ?: return
         rangesCompared.incrementAndGet()
         if (roots.root == root) return
-        val theirs = runCatching { MerkleTree.of(roots.leafList.map { leaf(it) }) }.getOrNull() ?: return
+        // Both sides state their width and descend only when the two match: a node position
+        // means nothing under another fan-out, and a shape neither side can read is worse than
+        // a range left for the next tick.
+        if (roots.fanout != tree.fanout) return
+        val keys = descend(peer, vnode, tree, roots.leafCount) ?: return
+        if (keys.isEmpty()) return
         val sync = KeySync.newBuilder()
-        for (key in tree.diff(theirs).flatMap { it.keys }) {
+        for (key in keys) {
             sync.addKey(ByteString.copyFrom(key.bytes))
             mine[key]?.let { sync.addVersion(it.wire()) }
         }
@@ -97,30 +111,108 @@ class AntiEntropy(
         for (version in answer.versionList) reconcile(mine[Key(version.key.toByteArray())], version)
     }
 
+    /**
+     * The keys the peer's copy of the range differs on, found by descending both trees over the
+     * wire: the root has already disagreed, so each round asks only for the children of the
+     * nodes that disagreed at the level above, and the last round asks for the leaves under the
+     * one subtree that is still different. Null when the peer went silent, answered a level
+     * malformed, or the tree is deeper than [DESCENT_ROUNDS] allows; the range comes round again.
+     *
+     * The peer answers each round over the tree it holds at that moment, so a write landing
+     * mid-descent can shift its positions. That costs a key this step at worst: the divergence
+     * is decided key by key at the bottom ([MerkleTree.divergentKeys]), never by position, and
+     * the range comes round again.
+     */
+    private suspend fun descend(peer: NodeId, vnode: Int, tree: MerkleTree, theirLeaves: Int): List<Key>? {
+        var level = tree.height - 1
+        var positions = listOf(0)
+        // Trees of different height have no level to line up. Every leaf is suspect then, which
+        // costs the range, exactly as the local descent does (MerkleTree.suspectLeaves).
+        if (MerkleTree.heightOf(theirLeaves, tree.fanout) != tree.height) {
+            level = 0
+            positions = (0 until maxOf(tree.size, theirLeaves)).toList()
+        }
+        var rounds = 0
+        while (level > 0) {
+            positions = tree.childrenOf(positions)
+            if (--level == 0) break
+            if (rounds++ >= DESCENT_ROUNDS) return null
+            val hashes = askLevel(peer, vnode, level, positions)?.hashList ?: return null
+            if (hashes.size != positions.size) return null
+            positions = tree.differing(level, positions, hashes.map { if (it.isEmpty) null else it.toByteArray() })
+            if (positions.isEmpty()) return emptyList()
+        }
+        val leaves = askLevel(peer, vnode, 0, positions) ?: return null
+        return tree.divergentKeys(positions, leaves.leafList.map { leaf(it) })
+    }
+
+    /** One round of the descent: the peer's hashes at [level] for [positions], or its leaves at level 0. */
+    private suspend fun askLevel(peer: NodeId, vnode: Int, level: Int, positions: List<Int>) =
+        ask(peer) { id ->
+            Envelope.newBuilder().setMerkleLevel(
+                MerkleLevel.newBuilder().setId(id).setVnode(vnode).setLevel(level).addAllPosition(positions)
+            )
+        }?.merkleLevelReply
+
     /** One inbound envelope; true when it was anti-entropy's, false when it belongs to someone else. */
     suspend fun receive(envelope: Envelope): Boolean {
         when (envelope.bodyCase) {
             Envelope.BodyCase.MERKLE_ROOT -> answerRoot(NodeId(envelope.from), envelope.merkleRoot)
+            Envelope.BodyCase.MERKLE_LEVEL -> answerLevel(NodeId(envelope.from), envelope.merkleLevel)
             Envelope.BodyCase.KEY_SYNC -> answerSync(NodeId(envelope.from), envelope.keySync)
             Envelope.BodyCase.MERKLE_ROOT_REPLY -> pending[envelope.merkleRootReply.id]?.complete(envelope)
+            Envelope.BodyCase.MERKLE_LEVEL_REPLY -> pending[envelope.merkleLevelReply.id]?.complete(envelope)
             Envelope.BodyCase.KEY_SYNC_REPLY -> pending[envelope.keySyncReply.id]?.complete(envelope)
             else -> return false
         }
         return true
     }
 
-    /** The peer's half of the root exchange: this node's root over the range, plus every leaf when the roots differ. */
+    /**
+     * The peer's half of the root exchange: this node's root over the range, and the shape of
+     * the tree it came from, which is all the sender needs to start descending (T84).
+     */
     private suspend fun answerRoot(from: NodeId, request: MerkleRoot) {
-        val range = ring.vnodes.getOrNull(request.vnode) ?: return
-        val mine = held(range)
-        val tree = MerkleTree.of(mine.values.map { it.leaf })
-        val reply = MerkleRootReply.newBuilder().setId(request.id).setRoot(ByteString.copyFrom(tree.root))
-        if (reply.root != request.root) {
-            for (held in mine.values) {
-                reply.addLeaf(Leaf.newBuilder().setKey(ByteString.copyFrom(held.key.bytes)).setValueHash(ByteString.copyFrom(held.leaf.valueHash)).setDvv(ByteString.copyFrom(held.dvv.encode())))
+        val tree = treeOf(request.vnode) ?: return
+        send(
+            from,
+            Envelope.newBuilder().setMerkleRootReply(
+                MerkleRootReply.newBuilder().setId(request.id).setRoot(ByteString.copyFrom(tree.root))
+                    .setFanout(tree.fanout).setLeafCount(tree.size)
+            ),
+        )
+    }
+
+    /**
+     * The peer's half of one descent round: this node's hashes at the level asked, in the order
+     * asked and empty where it has no node there, or, at level 0, the leaves it holds among
+     * those positions. The tree is rebuilt per round rather than remembered between them: a
+     * session would need a lifetime and an eviction of its own, and the sender is already
+     * bounded to [DESCENT_ROUNDS] of them.
+     */
+    private suspend fun answerLevel(from: NodeId, request: MerkleLevel) {
+        val tree = treeOf(request.vnode) ?: return
+        val reply = MerkleLevelReply.newBuilder().setId(request.id)
+        if (request.level == 0) {
+            for (leaf in tree.leavesAt(request.positionList)) {
+                reply.addLeaf(
+                    Leaf.newBuilder().setKey(ByteString.copyFrom(leaf.key.bytes))
+                        .setValueHash(ByteString.copyFrom(leaf.valueHash))
+                        .setDvv(ByteString.copyFrom(leaf.dvv.encode()))
+                )
+            }
+        } else {
+            for (hash in tree.hashesAt(request.level, request.positionList)) {
+                reply.addHash(ByteString.copyFrom(hash ?: NO_VALUE))
             }
         }
-        send(from, Envelope.newBuilder().setMerkleRootReply(reply))
+        send(from, Envelope.newBuilder().setMerkleLevelReply(reply))
+    }
+
+    /** This node's Merkle tree over the range at [vnode], or null when the ring has no such vnode. */
+    private suspend fun treeOf(vnode: Int): MerkleTree? {
+        val range = ring.vnodes.getOrNull(vnode) ?: return null
+        return MerkleTree.of(held(range).values.map { it.leaf })
     }
 
     /**
@@ -193,8 +285,18 @@ class AntiEntropy(
     private suspend fun send(to: NodeId, envelope: Envelope.Builder) =
         transport.send(to, envelope.setFrom(self.name).setTo(to.name).build())
 
-    private companion object {
+    companion object {
+        /**
+         * How many levels of the peer's tree one step will descend. Nine is every range a
+         * fan-out of 16 can hold up to 16^9 keys in; a deeper tree ends the step where it
+         * stands and comes round again, so the descent can never run away.
+         */
+        const val DESCENT_ROUNDS: Int = 9
+
+        /** The step's whole budget: the root, [DESCENT_ROUNDS] levels, the leaves, the key sync. */
+        const val REQUESTS_PER_STEP: Int = DESCENT_ROUNDS + 3
+
         /** A tombstone's encoding on the wire and under its leaf: no bytes at all. */
-        val NO_VALUE = ByteArray(0)
+        private val NO_VALUE = ByteArray(0)
     }
 }

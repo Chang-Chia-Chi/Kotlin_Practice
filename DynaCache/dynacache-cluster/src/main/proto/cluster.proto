@@ -34,6 +34,9 @@ message Envelope {
     // tombstone (the winner holds nothing under that version).
     Version replicate_value = 24;
     Repair repair = 25;
+    // Anti-entropy's descent (T84): one level of it, and the receiver's hashes or leaves there.
+    MerkleLevel merkle_level = 26;
+    MerkleLevelReply merkle_level_reply = 27;
   }
 }
 
@@ -45,11 +48,39 @@ message MerkleRoot {
   bytes root = 3;
 }
 
-// The receiver's root over the same range and, only when the roots differ, every leaf of its
-// tree so the sender can diff and name the divergent keys.
+// The receiver's root over the same range, the width of the tree it built and how many leaves
+// that tree holds. The two are what lets the sender descend (T84) rather than take the whole
+// range: node positions mean nothing under another fan-out, and the leaf count says whether the
+// two trees are the same height and so line up level by level.
 message MerkleRootReply {
   int64 id = 1;
   bytes root = 2;
+  // Tag 3 was every leaf of the range, sent on any mismatch (T28 to T84). Both ends of the wire
+  // are this repository and nothing persists the message, so the field is gone rather than
+  // deprecated, as Replicate's tokens are.
+  reserved 3;
+  reserved "leaf";
+  int32 fanout = 4;
+  int32 leaf_count = 5;
+}
+
+// One level of the descent (T84): the positions at `level` of the receiver's tree over `vnode`
+// whose hashes the sender still needs, `level` 0 being the leaves. The sender only ever asks for
+// the children of a node the two sides already disagreed about, so a subtree whose hash matches
+// is never opened and never crosses.
+message MerkleLevel {
+  int64 id = 1;
+  int32 vnode = 2;
+  int32 level = 3;
+  repeated int32 position = 4;
+}
+
+// The receiver's answer, over the tree it holds now: above the leaves, one `hash` per position
+// asked, in the order asked and empty where it has no node there; at level 0, the `leaf` it
+// holds at each position asked, in position order and skipping the positions it has nothing at.
+message MerkleLevelReply {
+  int64 id = 1;
+  repeated bytes hash = 2;
   repeated Leaf leaf = 3;
 }
 
