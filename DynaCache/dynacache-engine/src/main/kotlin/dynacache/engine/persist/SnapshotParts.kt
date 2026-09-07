@@ -25,6 +25,17 @@ import java.time.Clock
 interface SnapshotParts {
 
     /**
+     * Whether [id] is a name this adapter can carry a set under. A snapshot id arrives on a
+     * marker from the wire and becomes a name on this adapter's storage, so the caller asks
+     * before it starts a part and drops the marker when the answer is false.
+     *
+     * The answer is a value and not a throw on purpose: the caller's inbound loop has no
+     * per-envelope catch, so a throw here would turn a crafted id into a dead node. Every other
+     * method takes an id this answered true for; one it did not is a caller's bug and fails.
+     */
+    fun accepts(id: String): Boolean
+
+    /**
      * Opens this node's part of set [id] and writes the engine's state into it. The engine's own
      * log is left alone: it keeps running under the node's data directory, so the part holds the
      * state as of the log's seq at the cut and no log file, and [delete] can never take a file
@@ -71,6 +82,9 @@ class FileSnapshotParts(
     private val clock: Clock,
 ) : SnapshotParts {
 
+    override fun accepts(id: String): Boolean =
+        SAFE_ID.matches(id) && id != "." && id != ".." && id.substringBefore('.').uppercase() !in RESERVED
+
     override fun cut(id: String) {
         val part = part(id)
         Files.createDirectories(part)
@@ -100,7 +114,7 @@ class FileSnapshotParts(
     }
 
     override fun delete(id: String) {
-        root.resolve(id).toFile().deleteRecursively()
+        set(id).toFile().deleteRecursively()
     }
 
     /**
@@ -116,12 +130,36 @@ class FileSnapshotParts(
         throw IOException("$stale predates the checksummed channel log and cannot be restored")
     }
 
-    private fun part(id: String): Path = root.resolve(id).resolve(self)
+    /**
+     * Set [id]'s directory. Every path this adapter builds goes through here, so an id the
+     * shape refuses can never become a directory to write under or a tree to delete, whichever
+     * method it came in by ([accepts] is how a caller avoids the failure).
+     */
+    private fun set(id: String): Path {
+        require(accepts(id)) { "snapshot id is not a usable name" }
+        return root.resolve(id)
+    }
+
+    private fun part(id: String): Path = set(id).resolve(self)
 
     private fun log(id: String, channel: String): Path = part(id).resolve("from-$channel.wal")
 
     private companion object {
         /** The op every channel record is written under: a channel log holds one kind of record. */
         const val CHANNEL_RECORD: Byte = 0
+
+        /**
+         * The shape of a usable set name: one path segment of at most 64 characters drawn from
+         * letters, digits, `.`, `-` and `_`, so no separator, no control character, no drive
+         * letter and no empty name can be one. `.` and `..` match it and are refused beside it.
+         */
+        val SAFE_ID = Regex("[A-Za-z0-9._-]{1,64}")
+
+        /**
+         * Names Windows keeps for devices, with or without an extension. They are of the safe
+         * shape and no directory can carry one, so a marker holding one would fail the cut and,
+         * with no per-envelope catch above, take the node down: they are refused with the rest.
+         */
+        val RESERVED = setOf("CON", "PRN", "AUX", "NUL") + (0..9).flatMap { listOf("COM$it", "LPT$it") }
     }
 }

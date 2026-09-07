@@ -58,7 +58,11 @@ class DistributedSnapshot(
      */
     private val cutting = Mutex()
 
-    /** Step 1: this node records its state and sends a marker on every outgoing channel. */
+    /**
+     * Step 1: this node records its state and sends a marker on every outgoing channel. [id] is
+     * an operator's, not the wire's, so an id [parts] refuses fails here rather than being
+     * dropped: what this node initiates always has the shape the adapter accepts.
+     */
     suspend fun initiate(id: String) = start(id)
 
     /** Step 4 for this node: a marker arrived on every incoming channel. */
@@ -80,7 +84,10 @@ class DistributedSnapshot(
             return false
         }
         val id = envelope.marker.snapshotId
-        if (id in aborted) return true
+        // The id came off the wire and is a name on [parts]' storage, so the adapter is asked
+        // before it is used. A refused id is dropped here and recorded nowhere: the inbound loop
+        // has no per-envelope catch, so throwing would answer a crafted id by killing the node.
+        if (!parts.accepts(id) || id in aborted) return true
         if (!open.containsKey(id)) start(id)
         open[id]?.remove(from)
         return true

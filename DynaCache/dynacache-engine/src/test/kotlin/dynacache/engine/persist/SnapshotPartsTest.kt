@@ -18,6 +18,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.util.Random
 import kotlin.io.path.exists
+import kotlin.io.path.listDirectoryEntries
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -144,6 +145,29 @@ class SnapshotPartsTest {
         SnapshotEngine(restarted, data, clock, fsync = FsyncPolicy.NEVER).restore()
         assertEquals(Reply.Bulk(bytes("after")), restarted.submit(Command.Get(Key(bytes("k")))).get())
         assertEquals(Reply.Bulk(bytes("1")), restarted.submit(Command.Get(Key(bytes("later")))).get())
+    }
+
+    /**
+     * A snapshot id arrives on a marker from the wire and becomes a directory name here, so the
+     * shape is fixed: one path segment, at most 64 characters of letters, digits, `.`, `-` and
+     * `_`, never `.` or `..`, and never a name Windows keeps for a device, which is of the shape
+     * and yet cannot be a directory. Anything else is refused with an answer rather than a throw --
+     * the caller's inbound loop has no per-envelope catch, so a throw would turn a bad id into a
+     * dead node -- and the adapter reads and writes nothing to answer.
+     */
+    @Test
+    fun snapshot_id_outside_the_safe_shape_is_refused_by_the_adapter() {
+        val parts = parts(engine())
+        val unusable = listOf(
+            "..", ".", "../escape", "sets/s1", "sets\\s1", "", "s".repeat(65),
+            "s\u0000", "s\u0007", "s 1", "nul", "COM1", "aux.rdb",
+        )
+        unusable.forEach { assertFalse(parts.accepts(it), "refused: <$it>") }
+        listOf("s1", "snapshot-2026-09-07T12.00.00Z", "s".repeat(64)).forEach { assertTrue(parts.accepts(it), "accepted: <$it>") }
+        assertThrows(IllegalArgumentException::class.java) { parts.delete("..") }
+        assertThrows(IllegalArgumentException::class.java) { parts.cut("../escape") }
+        assertTrue(root.exists(), "a refused id is no path here, whichever method it arrives by")
+        assertEquals(emptyList<Path>(), root.listDirectoryEntries(), "the adapter touched no file to answer")
     }
 
     /** Before this ticket a channel log was length-delimited protobuf in `from-<peer>.log`. */
