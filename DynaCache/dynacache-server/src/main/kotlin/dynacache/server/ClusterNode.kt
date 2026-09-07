@@ -192,7 +192,7 @@ class ClusterNode(
         .takeIf { it.isNotEmpty() }
         ?.let { cpNode(self, it, cpAddresses, cpPort, dataDir?.resolve(CP_DIR), clock, cpRaft) }
 
-    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, batch = this, clock = clock) {
+    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, batch = this, clock = clock, fsync = fsync) {
         engine.tick()
         engine.wal?.tick()
         // The leader's TTL tick (CP spec 5): log time moves on, and a session past its timeout is
