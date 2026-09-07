@@ -196,7 +196,7 @@ three_passes() {
 # directory (the log's whole share, since that node has no log), and one SET pass per durability
 # policy named in T78_DURABILITY as POLICY:REQUESTS. GROUP_COMMIT wants many more requests than
 # EVERY_SECOND because it is expected to answer three orders of magnitude faster.
-T78_DURABILITY=${T78_DURABILITY:-EVERY_SECOND:500 GROUP_COMMIT:20000}
+T78_DURABILITY=${T78_DURABILITY:-NEVER:20000 GROUP_COMMIT:20000 EVERY_SECOND:500 EVERY_SECOND:1500}
 
 t78_passes() {
   local keep=$TESTS entry policy requests
@@ -219,14 +219,17 @@ t78_passes() {
   for entry in $T78_DURABILITY; do
     policy=${entry%%:*}
     requests=${entry##*:}
+    # Named by count as well as policy: EVERY_SECOND runs at two counts, to show that its rate is
+    # bound by the fsync interval rather than by how long the pass is.
+    local name=t78-$policy-set-$requests
     echo "=== T78 durability ($policy, SET only, $requests requests)"
     start_node "$policy"
     wait_for_ping "$PORT" DynaCache
-    wait_for_quiet "t78-$policy-set" "$OWN_JAVA"
+    wait_for_quiet "$name" "$OWN_JAVA"
     timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
       -h "$HOST_FROM_CONTAINER" -p "$PORT" -c "$CLIENTS" -n "$requests" -d 3 -t set --csv \
-      >"$OUT/t78-$policy-set.csv" 2>&1 || fail "durability pass $policy"
-    cat "$OUT/t78-$policy-set.csv"
+      >"$OUT/$name.csv" 2>&1 || fail "durability pass $policy at $requests"
+    cat "$OUT/$name.csv"
     stop_node
   done
 }

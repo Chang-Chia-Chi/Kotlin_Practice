@@ -66,7 +66,22 @@ To be filled.
 
 To be filled.
 
-## Pass 3: durability, `SET` under `EVERY_SECOND` and `GROUP_COMMIT`
+## Pass 3: durability, `SET` under `NEVER`, `EVERY_SECOND` and `GROUP_COMMIT`
+
+Three policies, one node shape, one window. `NEVER` and `GROUP_COMMIT` run at the same request
+count, which is what makes their ratio the clean one.
+
+`EVERY_SECOND` runs at 500 where the other two run at 20,000, so its ratio is computed across
+different counts. That is legitimate because its rate is not a measurement of the engine but
+arithmetic: fifty clients divided by a one-second interval, with a p50 of one interval. A
+quantity fixed by a clock does not sharpen with more samples the way a noisy one does, and 500
+requests already spans nine or ten intervals; 20,000 would buy the same number after six minutes.
+
+Asserting that is not showing it, so it is checked rather than assumed: `EVERY_SECOND` runs twice,
+at 500 and 1500, about nine and twenty-eight seconds. Two rates that agree demonstrate the
+interval bound and the mismatched ratio stands. Two that disagree mean the rate is not purely
+interval-bound, which is worth more than the six minutes, and then the matched pass is worth
+running.
 
 To be filled.
 
