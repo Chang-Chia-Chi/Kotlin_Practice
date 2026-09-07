@@ -20,7 +20,7 @@ their call, not the ticket's. Either answer is workable; the acceptance list cov
 
 **Nature:** measurement (Opus)
 
-**Status:** blocked
+**Status:** ready-for-agent (T77, T78 and T79 are all merged; needs the user's answer on clearing the machine before it starts)
 
 - [ ] The full `DynaCache/bench/single-node.sh` run at its release defaults, both targets, every
       pass the 2026-09-06 report covers, so the two are comparable table for table
