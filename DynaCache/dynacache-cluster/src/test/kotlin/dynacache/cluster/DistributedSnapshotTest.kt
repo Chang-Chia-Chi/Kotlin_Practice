@@ -8,6 +8,7 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.FileSnapshotParts
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
@@ -307,7 +308,7 @@ class DistributedSnapshotTest {
 
     /** What the peer replicates during the cut: not idempotent, so a second application shows. */
     private val incr: Envelope = Envelope.newBuilder().setFrom(peer.name).setTo(self.name)
-        .setReplicate(Replicate.newBuilder().setId(1).addAllToken(TokenCodec.tokens(Command.IncrBy(counted, 1)).map(ByteString::copyFrom)))
+        .setReplicate(Replicate.newBuilder().setId(1).setCommand(ByteString.copyFrom(CommandCodec.frame(Command.IncrBy(counted, 1)))))
         .build()
 
     /**
@@ -335,7 +336,7 @@ class DistributedSnapshotTest {
 
         suspend fun demux(envelope: Envelope) {
             if (snapshot.receive(envelope) || !envelope.hasReplicate()) return
-            engine.submit(TokenCodec.command(envelope.replicate.tokenList.map(ByteString::toByteArray))).await()
+            engine.submit(CommandCodec.unframe(envelope.replicate.command.toByteArray()).single()).await()
         }
 
         /** The crash of spec 2.8: nothing is saved on the way out, so recovery is the log alone. */
@@ -374,6 +375,13 @@ class DistributedSnapshotTest {
         error("nothing was sent")
     }
 
+    /** The write's tag: the value a cluster `SET` carries, or the delta of the lone harness's [incr]. */
+    private fun tag(replicate: Replicate): Int = when (val write = CommandCodec.unframe(replicate.command.toByteArray()).single()) {
+        is Command.Set -> write.value.decodeToString().toInt()
+        is Command.IncrBy -> write.delta.toInt()
+        else -> error("no tag in $write")
+    }
+
     /**
      * Every node's part of snapshot set [id]: its state and its channels through the persist
      * adapter, the set's own directory listed for the parts. Which channels a part recorded is
@@ -395,7 +403,7 @@ class DistributedSnapshotTest {
             val peer = NodeId(log.name.removeSurrounding("from-", ".wal"))
             peer to parts.replay(id, peer.name).map { Envelope.parseFrom(it) }
                 .filter { it.hasReplicate() }
-                .map { it.replicate.getToken(2).toStringUtf8().toInt() }
+                .map { tag(it.replicate) }
                 .toSet()
         }
         node to Part(state.toSet(), channels)

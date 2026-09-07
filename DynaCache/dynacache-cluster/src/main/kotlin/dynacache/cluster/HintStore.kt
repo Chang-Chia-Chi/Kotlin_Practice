@@ -5,8 +5,9 @@ import java.time.Instant
 
 /**
  * One node's **hints** (spec 2.4, C5): the `Replicate` messages it accepted on behalf of a
- * preference-list node that was dead at the time, each the full write (key, tokens, version,
- * TTL as an instant) so replaying it is sending it unchanged. In memory, by arrival, keyed by
+ * preference-list node that was dead at the time, each the full write (the logged entry's
+ * bytes, version, TTL as an instant) so replaying it is sending it unchanged. In memory, by
+ * arrival, keyed by
  * the id the holder will replay it under so the target's ack finds it.
  */
 class HintStore {

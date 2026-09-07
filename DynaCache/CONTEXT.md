@@ -92,7 +92,16 @@ _Avoid_: dispatcher, actor, worker
 **Transport**:
 The seam through which nodes exchange cluster messages; the messages are the protobuf types
 themselves. Two adapters exist: in-memory (tests, with partition, drop, delay, kill) and gRPC.
+Its send half stands alone as `Outbound`, which every module that only talks to peers takes,
+and whose one promise both adapters owe: an unreachable peer is a dropped envelope, never a
+throw.
 _Avoid_: channel, bus, network layer
+
+**Inbound loop**:
+A node's one reader of its transport, and the one place its handler order lives: snapshot
+markers, then forwards, then replication, then anti-entropy, then gossip. One channel has one
+reader, so nothing else on the node reads the transport.
+_Avoid_: dispatcher, event loop
 
 **Membership**:
 The gossip's current view of which nodes are alive, suspect or dead, and its change events.
@@ -151,8 +160,8 @@ deleted as a whole when a node's deadline passes with a channel still open.
 _Avoid_: backup, dump (that is the single-node RDB file)
 **Hint**:
 A write held by a node that is not one of the key's replicas, because the replica it was meant
-for was dead when the coordinator wrote (sloppy quorum). It is the whole write, unchanged: key,
-tokens, version and TTL as an instant (C5). The holder's ack counts toward W like a replica's,
+for was dead when the coordinator wrote (sloppy quorum). It is the whole write, unchanged: the
+logged entry's bytes, version and TTL as an instant (C5). The holder's ack counts toward W like a replica's,
 and when gossip sees the replica alive the holder replays the hint to it as an ordinary
 replication write and forgets it on the ack (**handoff**, I9). A hint whose TTL has passed is
 dropped instead.

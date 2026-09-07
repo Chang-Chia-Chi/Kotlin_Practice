@@ -134,8 +134,6 @@ class ReadRepairTest {
             membership = ScriptedMembership(nodes),
             counter = DotCounter.of(coordinator, emptyList()),
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
             view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
             install = engine::install,
             scope = backgroundScope,

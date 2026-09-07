@@ -5,14 +5,13 @@ import dynacache.cluster.DistributedSnapshot
 import dynacache.cluster.DotCounter
 import dynacache.cluster.GrpcTransport
 import dynacache.cluster.HostPort
+import dynacache.cluster.InboundLoop
 import dynacache.cluster.NodeId
 import dynacache.cluster.Replication
 import dynacache.cluster.ReplicationConfig
 import dynacache.cluster.Ring
 import dynacache.cluster.Router
 import dynacache.cluster.Swim
-import dynacache.cluster.Transport
-import dynacache.cluster.proto.Envelope
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
@@ -27,13 +26,10 @@ import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
 import dynacache.engine.view
 import io.microraft.RaftConfig
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
@@ -47,9 +43,10 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * One cluster node: everything a client can reach on one machine, assembled. The RESP socket in
  * front, the gRPC transport behind, and between them the stack plan 2.3 draws --
- * `Router(Replication(ApEngine))` -- with SWIM reading the same transport through the router's
- * demux (T19). The node presents the `CommandEngine` shape to its own RESP pipeline, so the
- * handler submits to a cluster exactly as it submits to a single engine.
+ * `Router(Replication(ApEngine))` -- with one [InboundLoop] over the whole of it: one transport,
+ * one reader, and the handler order in one place (T68). The node presents the `CommandEngine`
+ * shape to its own RESP pipeline, so the handler submits to a cluster exactly as it submits to a
+ * single engine.
  *
  * [addresses] is read at send time, not at construction (T23), so three nodes on ephemeral gRPC
  * ports can be built first and told each other's ports afterwards; [nodes] is the ring, which is
@@ -93,7 +90,6 @@ class ClusterNode(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ring = Ring.of(nodes)
-    private val parser = CommandParser(clock)
 
     private val engine = ApEngine(partitionCount, clock, maxMemoryBytes = maxMemoryBytes, policy = policy)
     private val wire = GrpcTransport(self, addresses, grpcPort)
@@ -110,10 +106,7 @@ class ClusterNode(
     private val swim = Swim(
         self = self,
         peers = nodes - self,
-        // Deaf on purpose: the router's demux is this node's one reader of the transport and
-        // hands gossip here through `deliver`, so SWIM's own `tryReceive` must find nothing
-        // rather than race the demux for a forwarded command (T19 deviation 5).
-        transport = NodeTransport(wire, reads = false),
+        transport = wire,
         random = Random.Default,
         period = gossipPeriod,
     )
@@ -123,12 +116,10 @@ class ClusterNode(
         ring = ring,
         config = config,
         engine = engine,
-        transport = NodeTransport(wire, reads = false),
+        transport = wire,
         membership = swim,
         counter = counter,
         clock = clock,
-        tokens = ::commandToTokens,
-        parse = ::parse,
         view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
         install = engine::install,
         scope = scope,
@@ -140,7 +131,7 @@ class ClusterNode(
         n = config.n,
         engine = engine,
         replication = replication,
-        transport = NodeTransport(wire, reads = false),
+        transport = wire,
         membership = swim,
         counter = counter,
     )
@@ -150,14 +141,12 @@ class ClusterNode(
         ring = ring,
         n = config.n,
         local = replication,
-        transport = NodeTransport(wire, reads = true),
+        transport = wire,
         scope = scope,
-        others = { if (!replication.receive(it) && !antiEntropy.receive(it)) swim.deliver(it) },
-        snapshots = { distributed?.receive(it) ?: false },
     )
 
     /**
-     * This node's part of a **snapshot set**: the router consults it ahead of every other
+     * This node's part of a **snapshot set**: the inbound loop consults it ahead of every other
      * handler, so a marker is consumed and an in-flight envelope recorded before the envelope is
      * handled (T36). Null on a node with no [snapshotDir], and then the hook always says no.
      */
@@ -165,12 +154,22 @@ class ClusterNode(
         DistributedSnapshot(
             self = self,
             peers = nodes - self,
-            transport = NodeTransport(wire, reads = false),
+            transport = wire,
             parts = FileSnapshotParts(it, self.name, engine, clock),
-            demux = router::receive,
+            demux = { envelope -> inbound.deliver(envelope) },
             scope = scope,
         )
     }
+
+    /** This node's one reader of [wire], and the one place its handler order lives (T68). */
+    private val inbound = InboundLoop(
+        inbound = wire.inbound,
+        snapshots = { distributed?.receive(it) ?: false },
+        forwards = router::receive,
+        replication = replication::receive,
+        antiEntropy = antiEntropy::receive,
+        gossip = swim::deliver,
+    )
 
     /**
      * Local persistence, exactly as single-node `main` has it: the last snapshot and the log
@@ -217,7 +216,7 @@ class ClusterNode(
         // finds an engine that is already electing rather than one that has not begun.
         cp?.runtime?.start()
         server.start()
-        scope.launch { router.run() }
+        scope.launch { inbound.run() }
         scope.launch { swim.run() }
         scope.launch { replication.runHandoff() }
         scope.launch { antiEntropy.run() }
@@ -291,49 +290,9 @@ class ClusterNode(
         return Reply.Bulk(body + lines.joinToString(CRLF).toByteArray(Charsets.ISO_8859_1))
     }
 
-    /** What a peer forwarded, read exactly as this node's own clients are read. */
-    private fun parse(tokens: List<ByteArray>): Command = when (val parsed = parser.parse(tokens)) {
-        is Parsed.Ok -> parsed.command
-        is Parsed.Failed -> throw IllegalArgumentException(parsed.error.message)
-    }
-
     private companion object {
         const val CRLF = "\r\n"
         const val DOT_CEILING_FILE = "dots"
-    }
-}
-
-/**
- * This node's view of its own transport. Two things the collaborators above it need and the
- * gRPC adapter does not promise:
- *
- * A send to a node that is gone is a **dropped envelope, not a throw**. gRPC reports a down peer
- * out of `send` (T23) and nothing above it has an error path for that: gossip's tick would die
- * with the exception and stop detecting the very failure it just saw, and a quorum's fan-out
- * would fail the write instead of waiting for the replicas that are up. The in-memory adapter
- * every cluster test was written against simply drops, and this makes gRPC agree.
- *
- * [reads] is false for every copy but the router's: one channel needs one reader (T19).
- */
-private class NodeTransport(private val wire: Transport, private val reads: Boolean) : Transport {
-
-    private val deaf = Channel<Envelope>()
-
-    override val inbound: ReceiveChannel<Envelope> get() = if (reads) wire.inbound else deaf
-
-    override suspend fun send(to: NodeId, envelope: Envelope) {
-        try {
-            wire.send(to, envelope)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (unreachable: Exception) {
-            // The peer is down or going down. Gossip will notice; a quorum waits for the rest.
-        }
-    }
-
-    /** The wire is the node's, not this view's: [ClusterNode.close] closes it once. */
-    override fun close() {
-        deaf.close()
     }
 }
 

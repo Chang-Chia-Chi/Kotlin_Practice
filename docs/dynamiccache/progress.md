@@ -6832,3 +6832,245 @@ and recovery test and `P4AcceptanceTest` pass unchanged.
   closes a part's engine, so it is harmless today; the same guard belongs there if one appears.
 - T76 could stop reading `fsync == null` as "no log" by splitting a `RdbStore` out of
   `SnapshotEngine`; not needed for anything yet.
+
+---
+
+## T65 - A replicate carries codec bytes
+
+A replica applies exactly the entry the coordinator logged. The coordinator runs the write,
+passes `(command, reply)` through `whatChanged`, frames the result with its own instant through
+the engine command codec, and ships those bytes with the version. The replica decodes them and
+submits what they decode to, in order. No RESP spelling of a command is left anywhere on the
+cluster seam: T64 took the forward, this ticket takes the replicate and the read.
+
+This ticket was started by one agent, who landed the codec's framed pair, the proto change and
+the named test before dying on an API limit without committing, and finished by a second agent,
+who wrote everything else below from that inherited diff.
+
+**The envelope.** `Replicate`'s `repeated bytes token = 2` is gone and `bytes command = 6`
+replaces it; tag 2 and the name `token` are `reserved`, as `Forward`'s are (T64). The field was
+removed rather than deprecated because a hint outlives a build only in memory. `expires_at_millis`
+stays: it is the same instant the command's bytes carry, repeated so a hint holder can drop a
+write that expired while it waited (T25) without decoding it. `Read` lost its tokens the same
+way and carries `bytes command = 3`.
+
+**The framing helper's home.** `CommandCodec.frame(command, now)` is `encode` with the op code
+prepended to the body, one byte array; `CommandCodec.unframe(bytes)` is the inverse and answers
+the list `decode` does. T64's note said the second copy of `Router`'s private framing would
+justify lifting it onto the codec; this is the second copy, so `Router`'s companion is deleted
+and `Router`, `Replication`, the test kit and `DistributedSnapshotTest` all call the codec's
+pair. `Router.coordinate` still takes `single()` (a forward passes no `now`, so it never
+decodes to two commands); a replicate iterates the list.
+
+**Replication.** `write` is `whatChanged(command, reply) ?: return reply`, then
+`frame(changed, clock.instant())`. The hand-written rules are deleted with `Replication.decided()`:
+the refused-`SET` check (`whatChanged` answers null for an error or a nil bulk), the NX/XX
+stripping (`whatChanged` strips it), the TTL-to-instant conversion (`encode`'s `now` settles it)
+and the replica's second submit of an `EXPIRE` (a `SET` with a settled deadline decodes to the
+`SET` and then the `EXPIRE`, and the replica submits each). `replicate` takes its key from the
+first decoded command; bytes that do not decode are not acked, as unreadable tokens were not.
+The constructor lost `tokens` and `parse`; nothing is injected in their place, at every call
+site (`ClusterNode`, `InProcessCluster`, `ReadRepairTest`, `ReplicationTest`). `ClusterNode`
+also lost its `CommandParser` and the `parse` helper that were only there for replication.
+
+**The same-bytes comparison.** `replica_applies_exactly_the_logged_entry` in
+`dynacache-cluster/.../ReplicationTest.kt`: three nodes with W = 3, each engine under a
+`SnapshotEngine` with a never-fsynced WAL in a temp dir. A `SET NX` with a ten-second TTL goes
+through the coordinator. The coordinator's WAL holds one entry, asserted equal to
+`CommandCodec.encode(Set(key, value, ttl = 10s), EPOCH)`: condition gone, deadline settled. Both
+`Replicate` envelopes on the in-memory transport's `sent` log carry exactly `op + body` of that
+entry. Each replica's WAL holds the two entries the logged entry decodes to (`SET` without TTL,
+then `EXPIRE` at the deadline), byte for byte. Red by construction against the base: the
+`Replicate` message had no `command` field, so the test did not compile before the proto change.
+
+**What was deleted.** The test kit's `TokenCodec.kt` (the kit's partial command encoding), the
+server's `CommandTokens.kt` (`commandToTokens`) and `CommandTokensTest.kt`. `TokenCodec` was
+also the reason T64's round-trip test built its own routers; that test's comment no longer
+points at T65. `GrpcTransportTest`'s one-envelope-per-case fixture builds `Replicate` and `Read`
+with opaque `command` bytes, as it does for `dvv`. `DistributedSnapshotTest` reads a channel
+log's write tag out of the decoded command (a `SET`'s value, or the lone harness's `INCRBY`
+delta) instead of token 2.
+
+**Docs.** ADR 0003 gains the line: since T65 the command ships as the engine command codec's
+bytes, the entry the coordinator logged, framed op code first. `CONTEXT.md`'s hint entry and
+`HintStore`'s header say "the logged entry's bytes" where they said "tokens".
+
+**Tests.** engine 158, cluster 87 to 88, cp 103, server 103 to 102 (`CommandTokensTest` gone),
+all green. Diff 18 files, +138/-347. The three known flaky tests did not flake in the green run.
+
+**Deviations.** None from the ticket. One judgment call: a write whose reply is a nil bulk
+(an empty-list `LPOP`) used to be replicated and applied as a no-op on the replicas; now
+`whatChanged` says nothing changed and nothing ships. The coordinator's version bump still
+happens first, exactly as it did for a refused conditional `SET` before this ticket.
+
+**For the next ticket.**
+
+- T66 (the versioned store): `Replication.write` now has the shape T66 wants to move, a
+  `versions.compute` bump, an engine submit, a `whatChanged`, a frame; the replica side is
+  `versions[key]` + spec 5.3's three-way `when` + a loop of submits. The version bump before the
+  engine runs and the replicate's key coming from `commands.first()` are the two places a
+  versioned store takes over. `RecordingEngine` in `ReplicationTest` is still the double for
+  C4; T66 deletes it.
+- T73 (or whoever touches the wire next): `frame`/`unframe` are the only framing on the cluster
+  seam; `Router` keeps `single()` and a comment saying why. If a forward ever needs to carry a
+  settled deadline, drop the `single()` and pass the codec a `now` on the forwarding side.
+  `expires_at_millis` on `Replicate` is now redundant with the bytes; it stays only for
+  `HintStore.pending`'s expiry sweep without a decode.
+
+## T72: The partition's store is split from its command interpreter
+
+**Built**
+
+- `PartitionStore` (engine, 299 lines): a kind-agnostic deep module owning the entry table, the
+  entries themselves, deadlines and the timer wheel, the running byte total and the eviction
+  policy. Six operations are what the interpreter asks for -- `get`, `put`, `forget`, `expireAt`,
+  `account`, `evictUntil` -- plus the keyspace walk `KEYS`, `SCAN`, `INFO`, `RANDOMKEY`,
+  `FLUSHDB` and the replication views need (`peek`, `entries`, `scan`, `purgeExpired`, `clear`,
+  `randomKey`, `tick`, `size`, `usedBytes`).
+- `Partition` fell from 772 to 574 lines and is now the command interpreter and its executor. It
+  holds no entry table, no used-bytes arithmetic, no wheel, no policy and no eviction step; the
+  command `when` stayed exactly where it was (spec 2.7, 5.4, 5.5, I6; ADR 0001 unchanged).
+- `evictUntil(now, keeping)` never takes the key the command was writing. Before this, a value
+  too big for the partition's share emptied the store and then deleted itself, having replied
+  `OK` as though it had been stored. The key is an ordinary candidate on every later step.
+- `EXPIRE` and `PERSIST` now go through `expireAt` rather than rewriting the entry, so a key
+  keeps its recency and its policy standing for having been given a new deadline.
+- The `SCAN` cursor loop became one top-level `walk`, shared by the store's key walk and the
+  interpreter's `HSCAN` and `ZSCAN` field walks. `ENTRY_BYTES`, `SAMPLE` and `MAX_EVICTIONS`
+  moved to the store's companion; nothing outside referenced them.
+
+**Tests**
+
+Full reactor, 460 tests, no failures: engine 167, cluster 87, cp 103, server 103.
+
+New `PartitionStoreTest` (5 tests, driving the store directly with no engine in front of it):
+
+- `store_used_bytes_equals_sum_of_entries_after_any_sequence`: 2000 seeded steps over all four
+  value kinds -- writes with and without a TTL, in-place growth and shrinkage of hash, list and
+  sorted set, deletions, deadline changes, lazy reads, wheel ticks and evictions -- recounting
+  the entries after every step and asserting the running total equals them. It also asserts the
+  sequence actually evicted, so the invariant is not proved on a store that never filled.
+- `eviction_never_evicts_the_key_being_written`, parameterized over both policies. Red first
+  against the extracted store with no protection (both policies deleted the new key), green with
+  `keeping`.
+- `tinylfu_admits_frequent` and `tinylfu_hit_ratio_beats_lru_on_zipf` moved out of the
+  1245-line `CommandEngineTest` and now run against the store. `CommandEngineTest` is 61 tests,
+  93 lines lighter, none of the remaining ones changed.
+
+**Deviations**
+
+- `INFO` still reads `store.usedBytes` to report it. The interpreter maintains no byte total and
+  makes no threshold decision, but a number that `INFO` exists to report has to be read
+  somewhere; putting a `Reply` inside a kind-agnostic store would have been the worse trade.
+- Sparing the key being written is a behaviour change, not a pure extraction. It is what the
+  ticket's named test asks for and the spec does not speak to it (5.5 fixes the order, not the
+  candidate set).
+- Progress written here rather than appended to `docs/dynamiccache/progress.md`, per the task.
+
+**For the next ticket**
+
+- `purgeExpired` is still the O(n) walk four keyspace commands pay for. It is now one method on
+  one class, so an expiry index would be a change to `PartitionStore` alone.
+- `Partition` at 574 lines is now almost entirely the command `when` and its Redis-shape helpers.
+  The next split there is by command family, not by concern.
+
+---
+
+## T68 - One inbound loop, and a send-only transport
+
+Plan 2.3's Transport seam split in two, and the node's handler order moved out of the router
+into a class of its own. Candidate 3 of the architecture review: the drop-on-unreachable promise
+and the demux chain each existed twice, once in the server's node wiring and once in the test
+kit, and SWIM kept a second inbound path alive for its own test.
+
+### The two seams
+
+```kotlin
+interface Outbound {                                  // the send-only seam
+    suspend fun send(to: NodeId, envelope: Envelope)  // an unreachable peer is a DROP, never a throw
+}
+
+interface Transport : Outbound {                      // a node's whole endpoint
+    val inbound: ReceiveChannel<Envelope>
+    fun close()
+}
+```
+
+The promise is stated in `Outbound`'s KDoc and owed by both adapters. `GrpcTransport.send` now
+catches what the gRPC call throws for a peer that is down and drops it, rethrowing
+`CancellationException`; `InMemoryTransport` already dropped. A peer this node was given no
+address for still raises, outside the catch: that is a wiring error, not an unreachable peer, and
+no gossip round repairs it.
+
+`Replication`, `AntiEntropy`, `DistributedSnapshot`, `Swim` and `Router` all take `Outbound`.
+Only the inbound loop takes a whole `Transport`.
+
+### The inbound module
+
+`dynacache-cluster/.../InboundLoop.kt`: one class, five handlers, one order.
+
+```kotlin
+class InboundLoop(
+    inbound: ReceiveChannel<Envelope>,
+    snapshots:   suspend (Envelope) -> Boolean = { false },  // DistributedSnapshot.receive
+    forwards:    suspend (Envelope) -> Boolean = { false },  // Router.receive
+    replication: suspend (Envelope) -> Boolean = { false },  // Replication.receive
+    antiEntropy: suspend (Envelope) -> Boolean = { false },  // AntiEntropy.receive
+    gossip:      suspend (Envelope) -> Unit    = {},         // Swim.deliver
+) {
+    suspend fun run()                       // every envelope, until the transport closes
+    suspend fun drain()                     // everything already waiting, then returns
+    suspend fun deliver(envelope: Envelope) // one envelope, offered in order until one claims it
+}
+```
+
+Markers first (C10, T36), then forwards (spec 5.1), then replication, then anti-entropy, then
+gossip last and total, because every envelope carries the piggybacked membership table (I8).
+Every handler defaults to deaf, so a node with no snapshot directory or a router test with
+nothing under the forward seam wires only what it has. `drain` is what a test that steps a node
+by rounds needs, and is exactly the loop SWIM's `tick` used to run on its own.
+
+### Deleted
+
+- `NodeTransport` in `ClusterNode.kt` (the five views, four "deaf on purpose", and the
+  throw-to-drop wrapper): 33 lines, gone. The node builds one `GrpcTransport` and one loop.
+- `Router.run`, `Router`'s `others` and `snapshots` constructor parameters, and its `else ->
+  others(envelope)` branch. `Router.receive` now returns `Boolean`, like the other three.
+- SWIM's second inbound path: the `while (true) handle(transport.inbound.tryReceive()...)` line
+  at the top of `tick`. `deliver` stays and is now SWIM's only way in.
+- The hand-built demux chain in `InProcessCluster`; it builds an `InboundLoop` like the server's.
+
+### Tests
+
+- `inbound_order_is_snapshots_forwards_replication_antientropy_gossip` (new `InboundLoopTest`):
+  five envelopes, one per handler, arrive together; the assertion is the full sequence of which
+  handler saw which, so both the order and the short-circuit are pinned.
+- `a_handler_that_claims_an_envelope_ends_it` (same file): a marker never reaches gossip.
+- `unreachable_peer_is_a_drop_on_both_adapters` (`GrpcTransportTest`, replacing
+  `grpc_peer_down_is_a_send_error`): a send to a port nothing listens on over gRPC and a send to
+  a killed peer in memory both return without throwing and leave no reply.
+- `SwimTest`'s `Gossip` now drains each node's `InboundLoop` before ticking it, which is the
+  order `tick` itself used to run; `RouterTest.Routers` and `InProcessCluster` run the loop.
+
+Counts: engine 173, cluster 89 (was 87), cp 113, server 107. 482 total, was 480. Net diff
++142 / -122 across 14 files, 20 lines net.
+
+### Deviations
+
+1. `GrpcTransport` still raises for a peer with no address (`requireNotNull(peers[to])`). The
+   seam's promise is about reachability; a missing address is a wiring bug that no runtime path
+   repairs, and swallowing it would make a mis-wired cluster look merely silent.
+2. `CONTEXT.md` gained an **Inbound loop** entry and a sentence in **Transport** about the
+   send-only half. The glossary is the vocabulary of record and this ticket named a new concept.
+3. `DistributedSnapshot` keeps its parameter named `demux`; only the two comments that named
+   `Router.receive` as the demux were corrected to name the loop. Renaming the parameter would
+   have widened the diff into T55's shape for no behaviour.
+
+### For the next ticket
+
+- `Replication`, `AntiEntropy` and `DistributedSnapshot` are now takers of `Outbound` and
+  suppliers of a `receive(Envelope): Boolean`. That pair is the shape a fifth handler would take.
+- `InProcessCluster.gossipOn(node)` still collects what the loop hands to gossip rather than
+  running a real `Swim`; a test kit that wants gossip in the loop would pass `swim::deliver`.
+- T65 is changing `Replication`'s constructor and the `Replicate`/`Read` protos in parallel. The
+  only line this ticket changed in `Replication.kt` is its transport parameter's type.

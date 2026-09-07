@@ -10,6 +10,7 @@ import dynacache.engine.Reply
 import dynacache.engine.Value
 import dynacache.engine.view
 import dynacache.engine.install
+import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.DotCeilingStore
 import dynacache.engine.persist.FileSnapshotParts
 import java.nio.file.Path
@@ -27,8 +28,9 @@ import org.junit.jupiter.api.Assertions.assertEquals
  * The test kit's cluster: [nodeCount] nodes named `node-1..N`, one shared immutable [Ring]
  * (a pure function of the node set, T17), one scripted [membership] every node reads, and per
  * node one [ApEngine], one endpoint on one [InMemoryTransport], one [Replication] wrapping the
- * engine, one [DistributedSnapshot] and one [Router] wrapping that, whose inbound loop and hint
- * handoff run on [scope]. [config] is the quorum: [n] replicas, [w] acks per write, [r] answers
+ * engine, one [DistributedSnapshot], one [Router] wrapping that, and one [InboundLoop] over the
+ * five of them -- the same class the server's node wiring runs -- whose loop and hint handoff
+ * run on [scope]. [config] is the quorum: [n] replicas, [w] acks per write, [r] answers
  * per read. [snapshotDir] is the one directory every node's snapshot part lands in (T36).
  *
  * `writeVia` and `readVia` go through the contact node's router, so a key the contact does not
@@ -57,12 +59,13 @@ class InProcessCluster(
     private val replications = HashMap<NodeId, Replication>()
     private val antiEntropies = HashMap<NodeId, AntiEntropy>()
     private val routers = HashMap<NodeId, Router>()
+    private val inbounds = HashMap<NodeId, InboundLoop>()
     private val loops = HashMap<NodeId, List<Job>>()
     private val snapshots: Map<NodeId, DistributedSnapshot> = nodes.associateWith { node ->
         DistributedSnapshot(
             node, nodes - node, transports.getValue(node),
             FileSnapshotParts(snapshotDir, node.name, engines.getValue(node), clock),
-            demux = { routers.getValue(node).receive(it) },
+            demux = { inbounds.getValue(node).deliver(it) },
             scope = scope,
         )
     }
@@ -84,8 +87,6 @@ class InProcessCluster(
             membership = membership,
             counter = counter,
             clock = clock,
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
             view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
             install = engine::install,
             scope = scope,
@@ -107,13 +108,20 @@ class InProcessCluster(
             local = replication,
             transport = transport,
             scope = scope,
-            others = { if (!replication.receive(it) && !antiEntropy.receive(it)) gossiped.getValue(node).add(it) },
+        )
+        val inbound = InboundLoop(
+            inbound = transport.inbound,
             snapshots = snapshots.getValue(node)::receive,
+            forwards = router::receive,
+            replication = replication::receive,
+            antiEntropy = antiEntropy::receive,
+            gossip = { gossiped.getValue(node).add(it) },
         )
         replications[node] = replication
         antiEntropies[node] = antiEntropy
         routers[node] = router
-        loops[node] = listOf(scope.launch { router.run() }, scope.launch { replication.runHandoff() })
+        inbounds[node] = inbound
+        loops[node] = listOf(scope.launch { inbound.run() }, scope.launch { replication.runHandoff() })
     }
 
     /**
@@ -147,12 +155,12 @@ class InProcessCluster(
     suspend fun antiEntropyCycle(node: NodeId) = repeat(antiEntropy(node).ranges.size) { antiEntropyStep(node) }
     fun snapshot(node: NodeId): DistributedSnapshot = snapshots.getValue(node)
 
-    /** What the demux on [node] handed to gossip: the envelopes SWIM would have answered. */
+    /** What the inbound loop on [node] handed to gossip: the envelopes SWIM would have answered. */
     fun gossipOn(node: NodeId): List<Envelope> = gossiped.getValue(node)
 
     /**
-     * Delivers everything in flight on the network, lets each node's demux read it, waits for
-     * every engine to finish what the demux handed it (so a partition thread's hop never races
+     * Delivers everything in flight on the network, lets each node's inbound loop read it, waits for
+     * every engine to finish what the loop handed it (so a partition thread's hop never races
      * the caller), and lets what those engines completed run; again until nothing is in flight,
      * since a reply a node sends on its own coroutine is not in flight until that coroutine ran.
      */
@@ -213,7 +221,7 @@ class InProcessCluster(
         written += write.key
         val seeder = network.endpoint(SEEDER)
         val body = Replicate.newBuilder().setId(0)
-            .addAllToken(TokenCodec.tokens(write).map(ByteString::copyFrom))
+            .setCommand(ByteString.copyFrom(CommandCodec.frame(write, clock.instant())))
             .setDvv(ByteString.copyFrom(dvv.encode()))
         seeder.send(node, Envelope.newBuilder().setFrom(SEEDER.name).setTo(node.name).setReplicate(body).build())
         repeat(SETTLE_ROUNDS) {
