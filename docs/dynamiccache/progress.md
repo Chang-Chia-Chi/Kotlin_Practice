@@ -7402,3 +7402,76 @@ inside T72's split `Partition`/`PartitionStore`; `Replication` and `AntiEntropy`
 `ClusterNode` builds the store beside the one transport and the `BatchEngine` capability;
 `RecordingEngine.kt` was deleted (T66 removed its last use, T73 had only stripped its batch
 method). Verified green on the merged tree: 497 tests, engine 181, cluster 95, cp 113, server 108.
+
+## T79: Fan-out runs the partition groups concurrently
+
+Commits `f39f1dd0` (code) and `d91efbc8` (measurement) on branch `t79`, base `ca75415f`.
+Source: benchmark anomaly 4.
+
+**Built**
+
+- `ApEngine.fanOut` groups by partition as before, submits every group with
+  `Partition.submitAll` before awaiting any, and joins with `CompletableFuture.allOf` into an
+  array indexed by argument position. A ten-key command is one executor hop, not ten. No
+  thread, executor or queue added (ADR 0001): the partitions are still the only executors.
+- `Router.split` does the same across nodes, grouping by **key** rather than coordinator, so a
+  key named twice keeps its later value while different keys go at once even under one hash
+  tag. Two forwards to one coordinator were already unordered there, so nothing is taken away.
+- ADR 0002 unchanged: one partition group still runs as one task, nothing is atomic across
+  groups, reply bytes identical. `everyPartition` stays sequential, an administrative walk.
+
+**Tests**
+
+Full reactor green: engine 181, cluster 93, cp 113, server 108.
+
+- `fan_out_submits_every_group_before_any_completes` (engine): a `PartitionGate` clock parks
+  every partition thread on its first command, so four permits mean four groups went out first.
+- `fan_out_reply_preserves_argument_order` (engine): eight keys, two per partition; `MSET`
+  names the first key again last and the later value stands, `MGET` answers in argument order.
+- `fan_out_one_failed_group_fails_the_command_and_settles_the_rest` (engine): one partition
+  throws, another parks; the future waits for both, then fails, and the parked write landed.
+- `router_split_submits_every_part_before_any_answers` (cluster): a `HoldingEngine` holds every
+  future, so both parts arriving proves the router did not wait for the first.
+- `mget_across_partitions_is_not_atomic` rewritten, name and assertion kept (see Deviations).
+
+**Measured**
+
+Two samples per side, full tables in `docs/dynamiccache/benchmarks/2026-09-07-t79-fan-out.md`.
+
+- Pipelined MSET 2.17x, 31845 to 69134 rps, p50 10.73 to 6.89 ms, p99 35.04 to 22.84 ms, against
+  a 6 to 10 percent spread: 30 to 65 percent of redis:7, own pipelining gain 1.9x to 4.4x next
+  to Redis's 4.8x. Anomaly 4 answered, and the change lands on this pass alone.
+- MGET 0.95 to 1.10 at every key count while the same passes varied 1 to 32 percent between
+  samples; recorded as within the noise, not as support. MSET plain 0.93 on an 18 to 21 percent
+  spread, also noise.
+- p99 under -P 16 grew at no key count, so the bounded-queue ticket this pass conditions is not
+  triggered.
+
+**Deviations**
+
+1. `mget_across_partitions_is_not_atomic` (T03 acceptance) keeps its name and assertion but
+   changes mechanism. Parking a partition thread caught the old fan-out between two groups;
+   with the groups submitted together, per-partition FIFO orders one reader consistently
+   against one writer and that gap is gone -- T03's entry predicted exactly this repair and
+   said it would need a different test. The gap is now made on the submitting side, with a
+   `GatedKeys` list that holds the fan-out after the first group is in and before the second,
+   while a whole `MSET` lands on the partition it has not reached. Still `[old, new]`. It
+   depends on `fanOut` reading `command.keys[i]` per group; if that changes the gate fails
+   loudly rather than hanging.
+2. `router_split_submits_every_part_before_any_answers` is not ticket-named; the router's
+   concurrency claim otherwise had no check. `ParkingClock` deleted, nothing else used it.
+3. The ticket's `-r 100000 -t mset,mget` cannot be run: redis-benchmark has no mget test and an
+   arbitrary command replaces -t rather than joining it. The write side is `-t mset`, the read
+   side an arbitrary MGET, which is also the only way to vary the key count. Said in the report.
+4. Every pass on both sides is marked taken under contention: one foreign idle java.exe was
+   present throughout and the gate requires none. CPU idle stayed at 85 to 94 percent and the
+   condition was identical on both sides.
+
+**For the next ticket**
+
+- The router now issues one forward per distinct key at once: a 1000-key `MGET` is 1000
+  in-flight forwards. The single-node pass cannot see this, and the engine's own defence, one
+  executor per partition, does not cover it. That is where a bulkhead would go.
+- Why the write side moved and the read side did not is a hypothesis, not a measurement: a
+  fanned write's chain serialized the WAL append per group as well as the executor hops.
+  Separating the log's share from the executor's is T78's pass.

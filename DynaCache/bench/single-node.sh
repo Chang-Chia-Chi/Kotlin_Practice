@@ -34,8 +34,14 @@ REQUESTS=${REQUESTS:-100000}
 # for nothing else. To take one before-and-after pair on the list commands, for example:
 #   TESTS=lpush,rpush,lpop,rpop,lrange PASSES=plain,pipelined SECTIONS=dynacache bash ...
 TESTS=${TESTS:-ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,lrange_100,hset,zadd,mset}
-# Which of the four passes each target gets.
+# Which of the four passes each target gets. `fanout` (T79) is off by default: it is one
+# ticket's measurement, not part of what a release run takes.
 PASSES=${PASSES:-plain,pipelined,1024b,spread}
+# The key counts the T79 MGET sweep walks.
+MGET_KEYS=${MGET_KEYS:-2 8 16 64}
+# One arbitrary command for `pass` to run instead of the -t list; empty is the -t list.
+# redis-benchmark ignores -t when a command is given, so it is one or the other, never both.
+COMMAND=
 # Which sections of the run happen at all.
 SECTIONS=${SECTIONS:-dynacache,durability,listgrowth,redis}
 # A short SET pass under EVERY_SECOND. It runs at about (clients / second), so keep it small.
@@ -160,8 +166,14 @@ pass() {
   shift 2
   wait_for_quiet "$name" "$OWN_JAVA"
   echo "-- $name"
+  # The command, when there is one, goes last: redis-benchmark takes every word after it as
+  # its arguments, so a flag placed behind it is swallowed rather than read.
+  # A command goes last: redis-benchmark reads every word after it as its own argument, so a
+  # flag placed behind one is swallowed rather than read.
+  local what=(-t "$TESTS")
+  [ -n "$COMMAND" ] && what=($COMMAND)
   timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
-    -h "$HOST_FROM_CONTAINER" -p "$port" -c "$CLIENTS" -n "$REQUESTS" -t "$TESTS" --csv "$@" \
+    -h "$HOST_FROM_CONTAINER" -p "$port" -c "$CLIENTS" -n "$REQUESTS" --csv "$@" "${what[@]}" \
     >"$OUT/$name.csv" 2>"$OUT/$name.err"
   local status=$?
   [ "$status" -eq 0 ] || { cat "$OUT/$name.err" >&2; fail "$name (exit $status)"; }
@@ -177,11 +189,36 @@ pass() {
 # nothing here crosses a partition boundary and DynaCache's multi-key fan-out is never
 # exercised. With -r the ten keys of an MSET land on up to ten partitions, which is the
 # measurement ApEngine.fanOut's marked ceiling actually needs.
+# The fan-out passes (T79, benchmark anomaly 4). MSET runs first, so the MGET sweep reads keys
+# that are there; both under -r 100000, without which every key of a multi-key command is the
+# same key, one partition serves the whole command and the fan-out is never exercised.
+#
+# redis-benchmark has no mget test, and an arbitrary command replaces -t rather than joining
+# it, so the read side is spelled out: K copies of key:__rand_int__, which -r expands to K
+# different keys and so to up to K partitions.
+fanout_passes() {
+  local target=$1 port=$2 k i keys
+  local keep=$TESTS
+  TESTS=mset
+  pass "$target-mset-spread" "$port" -d 3 -r 100000
+  pass "$target-mset-spread-P16" "$port" -d 3 -r 100000 -P 16
+  TESTS=$keep
+  for k in $MGET_KEYS; do
+    keys=
+    for i in $(seq "$k"); do keys="$keys key:__rand_int__"; done
+    COMMAND="MGET$keys"
+    pass "$target-mget-$k" "$port" -r 100000
+    pass "$target-mget-$k-P16" "$port" -r 100000 -P 16
+    COMMAND=
+  done
+}
+
 three_passes() {
   local target=$1 port=$2
   selected "$PASSES" plain && pass "$target-plain" "$port" -d 3
   selected "$PASSES" pipelined && pass "$target-pipelined" "$port" -d 3 -P 16
   selected "$PASSES" 1024b && pass "$target-1024b" "$port" -d 1024
+  selected "$PASSES" fanout && fanout_passes "$target" "$port"
   if selected "$PASSES" spread; then
     local keep=$TESTS
     TESTS=set,get,incr,mset
