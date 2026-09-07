@@ -28,7 +28,16 @@ CLIENTS=50
 REQUESTS=${REQUESTS:-100000}
 # The redis-benchmark tests DynaCache's parser has commands for. SADD, SPOP and ZPOPMIN are
 # the ones it does not; they are reported as skipped rather than left out silently.
-TESTS=ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,lrange_100,hset,zadd,mset
+#
+# TESTS, PASSES and SECTIONS narrow the run. The whole suite is the default and is what a
+# release measurement takes; a ticket that changed one code path measures that path and pays
+# for nothing else. To take one before-and-after pair on the list commands, for example:
+#   TESTS=lpush,rpush,lpop,rpop,lrange PASSES=plain,pipelined SECTIONS=dynacache bash ...
+TESTS=${TESTS:-ping_inline,ping_mbulk,set,get,incr,lpush,rpush,lpop,rpop,lrange_100,hset,zadd,mset}
+# Which of the four passes each target gets.
+PASSES=${PASSES:-plain,pipelined,1024b,spread}
+# Which sections of the run happen at all.
+SECTIONS=${SECTIONS:-dynacache,durability,listgrowth,redis}
 # A short SET pass under EVERY_SECOND. It runs at about (clients / second), so keep it small.
 DURABILITY_REQUESTS=${DURABILITY_REQUESTS:-500}
 # One round of the list-length confirmation: LPUSH this many elements onto the same key.
@@ -56,6 +65,9 @@ NODE_PID=
 OWN_JAVA=0
 
 fail() { echo "FAILED: $*" >&2; exit 1; }
+
+# True when $2 is one of the comma-separated names in $1.
+selected() { case ",$1," in *",$2,"*) return 0 ;; *) return 1 ;; esac; }
 
 cleanup() {
   stop_node
@@ -167,13 +179,16 @@ pass() {
 # measurement ApEngine.fanOut's marked ceiling actually needs.
 three_passes() {
   local target=$1 port=$2
-  pass "$target-plain" "$port" -d 3
-  pass "$target-pipelined" "$port" -d 3 -P 16
-  pass "$target-1024b" "$port" -d 1024
-  local keep=$TESTS
-  TESTS=set,get,incr,mset
-  pass "$target-spread" "$port" -d 3 -r 100000
-  TESTS=$keep
+  selected "$PASSES" plain && pass "$target-plain" "$port" -d 3
+  selected "$PASSES" pipelined && pass "$target-pipelined" "$port" -d 3 -P 16
+  selected "$PASSES" 1024b && pass "$target-1024b" "$port" -d 1024
+  if selected "$PASSES" spread; then
+    local keep=$TESTS
+    TESTS=set,get,incr,mset
+    pass "$target-spread" "$port" -d 3 -r 100000
+    TESTS=$keep
+  fi
+  return 0
 }
 
 command -v docker >/dev/null || fail "docker is not on PATH"
@@ -192,13 +207,16 @@ echo "=== environment"
   echo "flags: -c $CLIENTS -n $REQUESTS -t $TESTS"
 } | tee "$OUT/environment.txt"
 
+if selected "$SECTIONS" dynacache; then
 echo "=== DynaCache (fsync NEVER)"
 start_node NEVER
 wait_for_ping "$PORT" DynaCache
 three_passes dynacache "$PORT"
-
-echo "=== DynaCache durability cost (fsync EVERY_SECOND, SET only, $DURABILITY_REQUESTS requests)"
 stop_node
+fi
+
+if selected "$SECTIONS" durability; then
+echo "=== DynaCache durability cost (fsync EVERY_SECOND, SET only, $DURABILITY_REQUESTS requests)"
 start_node EVERY_SECOND
 wait_for_ping "$PORT" DynaCache
 wait_for_quiet dynacache-every-second-set "$OWN_JAVA"
@@ -207,11 +225,13 @@ timeout "$PASS_TIMEOUT" docker run --rm "$IMAGE" redis-benchmark \
   >"$OUT/dynacache-every-second-set.csv" 2>&1 || fail "durability pass"
 cat "$OUT/dynacache-every-second-set.csv"
 stop_node
+fi
 
 # The list tests are the ones that fall furthest behind Redis, and the suspect is the
 # per-command memory recount, which is O(elements) of the key the command touched. Four
 # identical LPUSH passes against one fresh node push onto the same growing key, so the only
 # thing that changes between rounds is how long that key is.
+if selected "$SECTIONS" listgrowth; then
 echo "=== DynaCache list-length confirmation (fsync NEVER, four LPUSH passes on one key)"
 start_node NEVER
 wait_for_ping "$PORT" DynaCache
@@ -223,13 +243,16 @@ for round in 1 2 3 4; do
   echo "round $round (mylist reaches $((round * LIST_STEP))): $(tail -1 "$OUT/dynacache-listgrowth-$round.csv")"
 done
 stop_node
+fi
 
+if selected "$SECTIONS" redis; then
 echo "=== redis:7"
 docker rm -f "$CONTAINER" >/dev/null 2>&1
 docker run -d --name "$CONTAINER" -p "$REDIS_PORT:6379" "$IMAGE" >/dev/null || fail "starting $CONTAINER"
 wait_for_ping "$REDIS_PORT" redis:7
 three_passes redis "$REDIS_PORT"
 docker rm -f "$CONTAINER" >/dev/null
+fi
 
 echo
 echo "=== load at each pass"
