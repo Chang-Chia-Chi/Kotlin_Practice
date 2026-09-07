@@ -12,15 +12,15 @@ and plan 2.3's seam table is updated to say so.
 
 **Nature:** interface narrowing (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache ebd6ca60, merged into misc/ai_gen; BatchEngine has two adapters, ApEngine and ClusterNode)
 
-- [ ] The command engine interface has no batch method; only the AP engine offers one, and
+- [x] The command engine interface has no batch method; only the AP engine offers one, and
       the handler reaches it through a stated capability, not a cast
-- [ ] The CP engine, the forwarding CP engine, the router, replication, the dispatcher and
+- [x] The CP engine, the forwarding CP engine, the router, replication, the dispatcher and
       the dispatcher test's recording engine have no batch code
-- [ ] Every MULTI/EXEC, EVAL, Lua, P1 and P5 acceptance test passes unchanged
-- [ ] Plan 2.3's seam table is updated in docs/dynamiccache/plan.md
-- [ ] Progress entry appended
+- [x] Every MULTI/EXEC, EVAL, Lua, P1 and P5 acceptance test passes unchanged
+- [x] Plan 2.3's seam table is updated in docs/dynamiccache/plan.md
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

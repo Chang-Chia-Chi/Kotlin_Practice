@@ -7127,3 +7127,81 @@ red first as a node-kill, the router's inbound loop died on the crafted marker).
   the same alphabet, which is a naming decision, not this ticket's.
 - T66 edits `restoreFrom`; nothing here touched it. T49's cut-then-open order and T74's WAL
   placement are untouched.
+
+---
+
+## T73 - Narrow the command engine seam to submit
+
+**The narrowed seam.** `CommandEngine` is now `submit(Command)` and `close()`. `atomically` left
+it: the seam is what every adapter can honestly do, and six of the seven implementations could
+not do a batch. Its KDoc says so and points at the capability.
+
+**The batch capability and who holds it.** A new `BatchEngine` interface in `dynacache.engine`,
+beside `CommandEngine`, carries the one method `atomically(keys) { ctx -> R }` with the doc that
+moved off the engine seam. Two real adapters:
+
+- `ApEngine`, which runs a batch (`ApEngine.atomically` itself is untouched: same C12 span check,
+  same `Batch` partition context, same I11 behaviour).
+- `ClusterNode`, which refuses a batch whose keys this node does not coordinate and otherwise
+  runs it on its own local AP engine.
+
+The connection handler is given one directly: `DynaCacheServer` gained a `batch: BatchEngine =
+engine` parameter (the single node's own AP engine by default; `ClusterNode` passes `batch =
+this` beside its existing `ap = this`), and `CommandHandler` holds it as a field beside the
+dispatcher it submits to. No cast anywhere. `evalScript` takes a `BatchEngine` rather than a
+`CommandEngine`.
+
+Both callers -- `EXEC` and `EVAL` -- go through one internal extension in `DynaCacheServer.kt`,
+`BatchEngine.runBatch(keys, block)`, which is where the dispatcher's `cp:` refusal (C16) now
+lives and where `orBatchError` is applied. `orBatchError` became private, since `runBatch` is its
+only caller.
+
+**Deleted.** The six dead `atomically` implementations: `CpEngine` and `ForwardingCpEngine`
+(threw `NotImplementedError`), `Router` and `Replication` (pass-throughs with a check and a
+comment respectively), `ClusterNode`'s pass-through to the router (replaced by the real check,
+see below) and `CommandDispatcher`'s AP-only branch. Plus the two test fakes: the cluster test
+kit's `RecordingEngine` (a `TODO`) and `CommandDispatcherTest`'s `Recording` (with its `batches`
+list and the one assertion that used it, which moved to `BatchTest`). Six now-unused imports of
+`Key` / `PartitionContext` went with them.
+
+**Cluster-mode batch behaviour and its test.** Unchanged, and deliberately so. The router refuses
+a batch whose keys this node does not coordinate; it never forwards one, because a forward would
+have to carry the caller's block, which is code. That check moved verbatim from `Router` to
+`ClusterNode.atomically` -- same `ring.preferenceList(key, n).first()` lookup, same
+`IllegalStateException("<key> is coordinated by <node>, not <self>")`, so the client still reads
+`ERR ... coordinated by ...`. `ClusterNode` now reaches its own `engine` rather than
+`router` -> `replication` -> `engine`; both intermediate hops were pass-throughs, so nothing about
+the batch changed, including that it is still unreplicated (T22 deviation 5). Its test is
+`P2AcceptanceTest.oneBatchNeedsOneCoordinator`, unchanged and passing.
+
+**Plan 2.3.** "Five seams" is now "Six seams". The `CommandEngine` row lists `submit` and `close`
+only, and says a batch is not part of it. A new `BatchEngine` row carries the batch's contract
+and names its two adapters. The paragraph under the table now says the dispatcher knows nothing
+of batches and that the `cp:` refusal is the connection handler's.
+
+**Tests.** One new file, `dynacache-server/src/test/kotlin/dynacache/server/BatchTest.kt`, over
+the capability's own test adapter: `C16_a_batch_naming_a_cp_key_never_reaches_the_engine` (the
+assertion that moved out of `CommandDispatcherTest`, now also pinning the exact reply the client
+reads) and `I11_a_batch_answers_what_its_block_returned`. Red first: both failed to compile
+against the unnarrowed seam. Everything else is unchanged and passing --
+`DynaCacheServerTest`'s MULTI/EXEC and CROSSSLOT cases, `LuaTest`, `P1AcceptanceTest`,
+`P2AcceptanceTest`, `P5AcceptanceTest`, `CommandEngineTest`'s C12 and I11 cases.
+
+Counts, `-pl dynacache-server -am test`: engine 177, cluster 91, cp 113, server 108, 489 total,
+green, no flakes and no rerun. Server is the base plus the two new `BatchTest` cases; no test
+method was deleted anywhere (the `cp:` batch assertion moved out of `CommandDispatcherTest`'s
+C16 test into `BatchTest`, and the cluster test kit lost a method on a fake, not a test). Diff: 13 files, net negative.
+
+**Deviations.** Two, both recorded rather than argued:
+
+1. The ticket's checklist says the router has no batch code and the goal line says a batch is a
+   capability "of the AP engine". Taken literally together, the cluster's coordinator check would
+   have had nowhere to live, and the brief's subtlety says to keep that behaviour exactly. So
+   `BatchEngine` has two adapters rather than one: the AP engine and the cluster node, which is
+   also what `codebase-design` asks of a seam. The router, replication, both CP engines, the
+   dispatcher and both recording fakes have no batch code, as asked.
+2. `CommandDispatcher` lost the `cp:` refusal along with its `atomically`, so the rule now lives
+   in `runBatch` beside the two callers rather than in the dispatcher. The client-visible answer
+   is byte-for-byte what it was (`ERR a batch cannot name a cp: key`): the dispatcher failed the
+   future with an `IllegalArgumentException` carrying that message and `orBatchError` unwrapped
+   it, which is the reply `runBatch` now returns directly.
