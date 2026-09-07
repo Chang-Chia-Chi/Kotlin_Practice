@@ -80,9 +80,6 @@ class TimerWheel<K>(
         place(node)
     }
 
-    /** [schedule] under the name the re-EXPIRE path reads as: the old entry never fires. */
-    fun reschedule(key: K, deadline: Instant) = schedule(key, deadline)
-
     /** Removes [key]'s pending entry; false when there was none. */
     fun cancel(key: K): Boolean {
         val node = entries.remove(key) ?: return false
