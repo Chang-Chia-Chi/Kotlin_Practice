@@ -1,0 +1,342 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "How the SFTP Pool Lends a Session",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "external": {
+          "label": "Outside the pool"
+        },
+        "security": {
+          "label": "Gate or refusal"
+        },
+        "backend": {
+          "label": "Registry decision (lock held)"
+        },
+        "cloud": {
+          "label": "Network round trip (no lock)"
+        },
+        "frontend": {
+          "label": "What the caller holds"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "caller",
+      "label": "Caller"
+    },
+    {
+      "id": "proving",
+      "label": "Proving a parked one"
+    },
+    {
+      "id": "dialling",
+      "label": "Opening a session"
+    },
+    {
+      "id": "registry",
+      "label": "Registry (under the lock)"
+    },
+    {
+      "id": "gone",
+      "label": "Refused and retired",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "door",
+      "label": "At the door",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "claim",
+      "label": "Claim, then prove or dial",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "use",
+      "label": "Use and hand back",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "mainPath": [
+    "withLease",
+    "admit",
+    "checkOut",
+    "reuse",
+    "lease",
+    "handBack"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "withLease"
+    ],
+    "allowedTerminals": [
+      "exhausted",
+      "retired"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "withLease",
+      "lane": "caller",
+      "col": 0,
+      "type": "external",
+      "label": "withLease { }",
+      "sublabel": "borrow, use, hand back",
+      "width": 126
+    },
+    {
+      "id": "admit",
+      "lane": "caller",
+      "col": 1,
+      "type": "security",
+      "label": "Capacity Semaphore",
+      "sublabel": "maxSize permits",
+      "tag": "bounded wait",
+      "width": 126
+    },
+    {
+      "id": "lease",
+      "lane": "caller",
+      "col": 4,
+      "type": "frontend",
+      "label": "Lease",
+      "sublabel": "one session, one caller",
+      "tag": "hand back once",
+      "width": 126
+    },
+    {
+      "id": "ladder",
+      "lane": "caller",
+      "col": 5,
+      "type": "security",
+      "label": "Cancellation Ladder",
+      "sublabel": "grace, then cut loose",
+      "width": 132
+    },
+    {
+      "id": "prove",
+      "lane": "proving",
+      "col": 3,
+      "type": "cloud",
+      "label": "Prove",
+      "sublabel": "realpath(\".\") round trip",
+      "width": 126
+    },
+    {
+      "id": "dial",
+      "lane": "dialling",
+      "col": 3,
+      "type": "cloud",
+      "label": "Dial",
+      "sublabel": "transport.connect()",
+      "tag": "the expensive answer",
+      "width": 126
+    },
+    {
+      "id": "checkOut",
+      "lane": "registry",
+      "col": 2,
+      "type": "backend",
+      "label": "checkOut()",
+      "sublabel": "claims one entry",
+      "tag": "no I/O under the lock",
+      "width": 126
+    },
+    {
+      "id": "reuse",
+      "lane": "registry",
+      "col": 3,
+      "type": "backend",
+      "label": "Reuse",
+      "sublabel": "warm, proved recently",
+      "width": 126
+    },
+    {
+      "id": "handBack",
+      "lane": "registry",
+      "col": 5,
+      "type": "backend",
+      "label": "handBack()",
+      "sublabel": "shelf, or retire",
+      "tag": "frees the permit last",
+      "width": 132
+    },
+    {
+      "id": "exhausted",
+      "lane": "gone",
+      "col": 1,
+      "type": "security",
+      "label": "PoolExhausted",
+      "sublabel": "counts as it gave up",
+      "width": 126
+    },
+    {
+      "id": "retired",
+      "lane": "gone",
+      "col": 5,
+      "type": "external",
+      "label": "Retired",
+      "sublabel": "hung up on, and counted",
+      "width": 132
+    }
+  ],
+  "edges": [
+    {
+      "id": "borrow",
+      "from": "withLease",
+      "to": "admit",
+      "label": "borrow a session",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "refused",
+      "from": "admit",
+      "to": "exhausted",
+      "label": "no room within acquireTimeout",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "permit",
+      "from": "admit",
+      "to": "checkOut",
+      "label": "permit in hand",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "warm",
+      "from": "checkOut",
+      "to": "reuse",
+      "label": "recently proved",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "stale",
+      "from": "checkOut",
+      "to": "prove",
+      "label": "parked too long to trust",
+      "role": "branch"
+    },
+    {
+      "id": "empty",
+      "from": "checkOut",
+      "to": "dial",
+      "label": "shelf empty",
+      "role": "branch"
+    },
+    {
+      "id": "retry",
+      "from": "prove",
+      "to": "checkOut",
+      "label": "no answer — discard, keep the room",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "id": "handOver",
+      "from": "reuse",
+      "to": "lease",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "provedOk",
+      "from": "prove",
+      "to": "lease",
+      "label": "still answers",
+      "role": "branch"
+    },
+    {
+      "id": "opened",
+      "from": "dial",
+      "to": "lease",
+      "label": "session opened",
+      "role": "branch"
+    },
+    {
+      "id": "done",
+      "from": "lease",
+      "to": "handBack",
+      "label": "block ends",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "gaveUp",
+      "from": "lease",
+      "to": "ladder",
+      "label": "caller gave up",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "stopped",
+      "from": "ladder",
+      "to": "handBack",
+      "label": "stopped, or cut and marked unfit",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "shelved",
+      "from": "handBack",
+      "to": "checkOut",
+      "label": "back on the shelf, newest first",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "id": "evicted",
+      "from": "handBack",
+      "to": "retired",
+      "label": "poisoned, expired, or closing",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The three invariants",
+      "items": [
+        "One caller per session, ever",
+        "Never more sessions than maxSize",
+        "Nothing untrustworthy is handed on"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "The lock never dials",
+      "items": [
+        "The registry decides; it cannot dial",
+        "Three claim states make that safe",
+        "Housekeeping ages out and tops up"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Cancellation costs",
+      "items": [
+        "Cancelling will not stop a blocking read",
+        "The ladder waits cancelGrace, then cuts",
+        "The cut, not the caller, decides"
+      ]
+    }
+  ]
+}

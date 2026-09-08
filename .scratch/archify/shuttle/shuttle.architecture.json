@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Shuttle: one route end to end",
+    "output": "shuttle-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1370,
+      640
+    ]
+  },
+  "components": [
+    {
+      "id": "sftp",
+      "type": "external",
+      "label": "Vendor SFTP",
+      "sublabel": "drop directory",
+      "pos": [
+        30,
+        190
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "nats-in",
+      "type": "messagebus",
+      "label": "NATS subject",
+      "sublabel": "subscribed trigger",
+      "pos": [
+        30,
+        410
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "supervision",
+      "type": "backend",
+      "label": "RouteSupervisor",
+      "sublabel": "restarts a route",
+      "pos": [
+        315,
+        70
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "trigger",
+      "type": "backend",
+      "label": "Route trigger",
+      "sublabel": "listing or message",
+      "pos": [
+        315,
+        300
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "chain",
+      "type": "backend",
+      "label": "ProcessingChain",
+      "sublabel": "extract, rename, zip",
+      "pos": [
+        595,
+        70
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "TransferPipeline",
+      "sublabel": "stages 0 to 4",
+      "pos": [
+        595,
+        300
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "target",
+      "type": "cloud",
+      "label": "Target store",
+      "sublabel": "S3 bucket or SFTP dir",
+      "pos": [
+        595,
+        540
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "ledger",
+      "type": "backend",
+      "label": "Ledger",
+      "sublabel": "transition plus outbox",
+      "pos": [
+        890,
+        300
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "notifier",
+      "type": "backend",
+      "label": "Notifier",
+      "sublabel": "outbox loop, retries",
+      "pos": [
+        890,
+        540
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "ops",
+      "type": "security",
+      "label": "Admin and metrics",
+      "sublabel": "/admin, /q/metrics",
+      "pos": [
+        1173,
+        70
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "Oracle state store",
+      "sublabel": "transfers and outbox",
+      "pos": [
+        1173,
+        300
+      ],
+      "size": [
+        165,
+        68
+      ]
+    },
+    {
+      "id": "downstream",
+      "type": "external",
+      "label": "Downstream systems",
+      "sublabel": "HTTP callback or NATS",
+      "pos": [
+        1173,
+        540
+      ],
+      "size": [
+        165,
+        68
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "shuttle-admin role",
+      "wraps": [
+        "ops"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "sftp-poll",
+      "from": "sftp",
+      "to": "trigger",
+      "label": "list, download, move",
+      "variant": "emphasis"
+    },
+    {
+      "id": "nats-trigger",
+      "from": "nats-in",
+      "to": "trigger",
+      "label": "message to Seen"
+    },
+    {
+      "id": "supervise",
+      "from": "supervision",
+      "to": "trigger",
+      "label": "restart with backoff",
+      "labelDy": 60
+    },
+    {
+      "id": "seen",
+      "from": "trigger",
+      "to": "pipeline",
+      "label": "one Seen per object",
+      "variant": "emphasis"
+    },
+    {
+      "id": "process",
+      "from": "pipeline",
+      "to": "chain",
+      "label": "run steps in staging"
+    },
+    {
+      "id": "store",
+      "from": "pipeline",
+      "to": "target",
+      "label": "store with metadata",
+      "variant": "emphasis",
+      "labelDy": 60
+    },
+    {
+      "id": "transitions",
+      "from": "pipeline",
+      "to": "ledger",
+      "label": "fetched, stored, acked"
+    },
+    {
+      "id": "write-row",
+      "from": "ledger",
+      "to": "state",
+      "label": "one transaction each"
+    },
+    {
+      "id": "wake",
+      "from": "ledger",
+      "to": "notifier",
+      "label": "wake when rows written",
+      "variant": "dashed",
+      "labelDy": 60
+    },
+    {
+      "id": "claim",
+      "from": "notifier",
+      "to": "state",
+      "label": "claim due rows",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "deliver",
+      "from": "notifier",
+      "to": "downstream",
+      "label": "deliver and retry",
+      "variant": "emphasis"
+    },
+    {
+      "id": "operate",
+      "from": "ops",
+      "to": "state",
+      "label": "read, redrive, ack",
+      "variant": "security",
+      "labelDy": 60
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Trigger and fetch",
+      "items": [
+        "A poll listing or a subscribed message is the only thing that says Seen",
+        "Bytes stage under the transfer id, deleted on every exit path"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Durable at every step",
+      "items": [
+        "SEEN to DONE in the store, plus the terminal REJECTED and FAILED",
+        "Outbox rows are written inside the transition's own transaction",
+        "A crash redoes at most one store and one notification, never loses one"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Configuration is data",
+      "items": [
+        "validate judges 26 numbered rules and connects to nothing",
+        "try runs the route's chain over a sample and prints every body"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Bounds and operations",
+      "items": [
+        "A route runs at most parallelism pipelines; a downed one restarts",
+        "Admin redrives, acks by hand, restarts; metrics tag route, not names"
+      ]
+    }
+  ]
+}
