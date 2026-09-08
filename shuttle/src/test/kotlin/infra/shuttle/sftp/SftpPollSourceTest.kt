@@ -494,6 +494,49 @@ class SftpPollSourceTest {
         assertEquals(1, upstream.events.size, "D40 skips the file that stayed, so the callback is not called again")
     }
 
+    /**
+     * Ticket 48: the route declares the names it takes and the connector's own listing is what
+     * enforces them. A name the route did not ask for is never a `Seen`, and `PollCompleted.listed`
+     * does not name it either - which is what says the decision was made inside the listing rather
+     * than over the events afterwards, where the place, the readiness stats, the in-flight slot and
+     * the download have all already been paid for. `excludeNames` has the last word: the staging
+     * copy matches the include and is turned away all the same.
+     */
+    @Test
+    fun a_route_that_declares_the_names_it_takes_is_handed_those_and_only_those() = runBlocking {
+        seed("data_1.csv", CONTENT)
+        seed("data_1.csv.tmp", CONTENT)
+        seed("notes.txt", CONTENT)
+
+        withConnector(AckAction.Move("temp/"), includeNames = "data_.*", excludeNames = ".*\\.tmp") { source ->
+            val pipeline = pipelineFor(routeOf(AckAction.Move("temp/")))
+            val handedOver = mutableListOf<String>()
+            val listed = mutableSetOf<String>()
+            val completions = Channel<RouteEvent.PollCompleted>(Channel.UNLIMITED)
+            val collecting = launch {
+                source.events().collect { event ->
+                    when (event) {
+                        is RouteEvent.Seen -> { handedOver += event.identity.sourceName; pipeline.run(event, source.fetcher) }
+                        is RouteEvent.PollCompleted -> { listed += event.listed.map { it.sourceName }; completions.send(event) }
+                        else -> Unit
+                    }
+                }
+            }
+            // Three polls, so a name the route did not ask for has had every chance to appear.
+            repeat(3) { withTimeout(TIMEOUT) { completions.receive() } }
+            collecting.cancelAndJoin()
+
+            assertEquals(listOf("data_1.csv"), handedOver, "the name the route asked for, once")
+            assertEquals(setOf("data_1.csv"), listed, "and no other name was ever listed")
+            assertEquals(setOf("data_1.csv"), target.keys, "so it is the only one that reached the target")
+            assertEquals(
+                setOf("data_1.csv.tmp", "notes.txt", "temp"),
+                remoteRoot.resolve("drop").listDirectoryEntries().map { it.fileName.toString() }.toSet(),
+                "the names it did not ask for are untouched in the drop directory",
+            )
+        }
+    }
+
     private fun identityOf(file: Path) = SourceIdentity(
         RouteName(ROUTE), SourceKind.SFTP, "vendor:/drop", file.fileName.toString(),
         Files.size(file), Files.getLastModifiedTime(file).toInstant().truncatedTo(ChronoUnit.SECONDS),
@@ -509,11 +552,13 @@ class SftpPollSourceTest {
     private suspend fun withConnector(
         onAck: AckAction,
         maxFilesPerPoll: Int? = null,
+        includeNames: String? = null,
+        excludeNames: String? = null,
         block: suspend CoroutineScope.(SftpPollSource) -> Unit,
     ) {
         remoteRoot.resolve("drop").createDirectories()
         EmbeddedSftpServer.start(remoteRoot, USER, PASSWORD).use { server ->
-            val poll = pollOf(onAck)
+            val poll = pollOf(onAck, includeNames, excludeNames)
             val config =
                 if (maxFilesPerPoll == null) connectorConfig(server, poll) { (it as Secret.Literal).value }
                 else cappedConnectorConfig(server, poll, maxFilesPerPoll)
@@ -580,10 +625,10 @@ class SftpPollSourceTest {
             }
         }
 
-    private fun pollOf(onAck: AckAction) = Source.Poll(
+    private fun pollOf(onAck: AckAction, includeNames: String? = null, excludeNames: String? = null) = Source.Poll(
         store = "vendor", directory = "/drop", every = EVERY,
         readiness = listOf(FileReadiness.SizeStable(checks = 1, interval = 1.milliseconds)),
-        onAck = onAck,
+        onAck = onAck, includeNames = includeNames, excludeNames = excludeNames,
     )
 
     private fun sftpStore(server: EmbeddedSftpServer) = SftpStore(

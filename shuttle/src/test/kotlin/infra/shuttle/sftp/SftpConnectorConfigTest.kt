@@ -45,7 +45,12 @@ class SftpConnectorConfigTest {
     private fun poll(
         onAck: AckAction? = AckAction.Move("temp/"),
         readiness: List<FileReadiness> = listOf(FileReadiness.SizeStable(3, 5.seconds), FileReadiness.MinAge(2.minutes)),
-    ) = Source.Poll(store = "vendor", directory = "/inbox", every = 1.minutes, readiness = readiness, onAck = onAck)
+        includeNames: String? = null,
+        excludeNames: String? = null,
+    ) = Source.Poll(
+        store = "vendor", directory = "/inbox", every = 1.minutes, readiness = readiness, onAck = onAck,
+        includeNames = includeNames, excludeNames = excludeNames,
+    )
 
     private fun configOf(
         store: SftpStore = store(),
@@ -111,6 +116,25 @@ class SftpConnectorConfigTest {
         assertEquals(PostAction.Noop, configOf(poll = poll(onAck = null)).polling.onAck)
         assertEquals(PostAction.Noop, configOf(poll = poll(onAck = AckAction.Callback("upstream"))).polling.onAck)
         assertEquals(PostAction.Noop, configOf().polling.onNack, "a polled file's redelivery is the next poll")
+    }
+
+    /**
+     * The route declares the names and the connector enforces them inside its own listing, which is
+     * the only place a turned-away name costs nothing. Nothing here compiles a pattern of its own to
+     * filter with: what the connector is handed is the whole of the feature.
+     */
+    @Test
+    fun the_name_patterns_reach_the_connectors_polling_configuration() {
+        val narrowed = configOf(poll = poll(includeNames = "data_\\d+\\.csv", excludeNames = ".*\\.tmp")).polling
+
+        assertEquals("data_\\d+\\.csv", narrowed.includeNames?.pattern)
+        assertEquals(".*\\.tmp", narrowed.excludeNames?.pattern)
+    }
+
+    @Test
+    fun a_poll_that_names_no_patterns_takes_every_name_as_it_always_did() {
+        assertEquals(null, configOf().polling.includeNames)
+        assertEquals(null, configOf().polling.excludeNames)
     }
 
     @Test

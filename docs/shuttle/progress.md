@@ -4805,3 +4805,63 @@ what it was: the HTTP shape did not move.
 order or a count belongs in the SQL beside these four, never in a caller that read rows to narrow them. If
 a listing ever needs a cursor, `transfers` is where it goes (`id < :before` beside the `WHERE`), and the
 contract case above is the one to extend.
+
+## 48: A polled route declares the names it takes
+
+**Built:** `Source.Poll` gained `includeNames` and `excludeNames`, two regular expressions the route
+declares and the connector enforces inside its own listing (connector ticket 26, its spec Sec 7.4).
+Both are unset by default, so every existing document loads and polls exactly as before. They land in
+the YAML grammar (`poll: { includeNames: ..., excludeNames: ... }`), in the Kotlin DSL's `PollBuilder`,
+and in `sftpConnectorConfig`, which hands the strings straight to the connector's `polling` block.
+Rule 27 compiles each at validate time and names the route and which of the two failed.
+
+They sit on the trigger rather than on the SFTP store: filtering a listing by name is what any polled
+source wants, and rule 12's vocabulary already branches on a poll whose store is S3. `SftpPollSource`
+is the only poll source that exists, so it is the only one honouring them today (D59).
+
+**Concepts named:**
+
+- **Declaring is not filtering.** The whole value of the knob is that the decision is made as an entry
+  arrives from the server. A `filter` over the source's flow would have been four lines and would have
+  arrived after the listing place, the readiness stats, the in-flight slot and the download were spent -
+  so it would have bought a shorter ledger and nothing else. `SftpPollSource` filters nothing; the
+  passthrough is the whole feature.
+- **The patterns cross as the operator's strings.** Compiling them here would put a second `Regex` in
+  the model for the connector to accept and ignore. Rule 27 compiles them only to find the typo where
+  every other fault is reported, instead of as an exception out of a route that never started.
+- **The matching rules are stated once.** Include first then exclude, full-string, include on files only,
+  exclude on files and directories - spec 5.1 points at the connector's Sec 7.4 rather than keeping a
+  second copy that can drift.
+
+**Tests:** `RulesTest.rule27_an_includeNames_that_does_not_compile_is_refused_by_route_and_knob` and its
+`excludeNames` twin (each asserts the message names the route and the knob), plus one that a poll naming
+valid patterns, or neither, passes every rule. `SftpConnectorConfigTest` asserts both reach
+`PollingConfig.includeNames`/`excludeNames` and that a poll naming neither leaves both null.
+`SftpPollSourceTest.a_route_that_declares_the_names_it_takes_is_handed_those_and_only_those` is the
+end-to-end case, in the existing poll tier against the embedded server: three files seeded
+(`data_1.csv`, `data_1.csv.tmp`, `notes.txt`), `includeNames = "data_.*"`, `excludeNames = ".*\.tmp"`,
+three polls awaited. Only `data_1.csv` is ever a `Seen`, only it is ever named by `PollCompleted.listed`
+- which is what says the decision was made inside the listing and not over the events - only it reaches
+the target, and the other two are untouched in the drop directory. `excludeNames` is load-bearing there:
+the staging copy matches the include and is turned away all the same. Spec 13.1's own document carries
+both keys now, in the spec and in the `spec-13-1.yaml` fixture, so
+`the_spec_13_1_document_loads_passes_every_rule_and_equals_the_dsl_build_for_vendor_drop` is what covers
+the YAML grammar and, by asserting the loaded route equals the DSL build, that the two spellings agree.
+
+**Verified red first.** With the fields present but the rule and the passthrough absent: both rule 27
+tests failed `expected: <[27]> but was: <[]>`, the config test failed
+`expected: <data_\d+\.csv> but was: <null>`, and the end-to-end test failed
+`the name the route asked for, once ==> expected: <[data_1.csv]> but was: <[data_1.csv, data_1.csv.tmp, notes.txt]>`.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -q -pl shuttle -am test`): 33 classes,
+**323 tests, 0 failures, 0 errors** - 317 before, plus the six here. No existing test was changed;
+`pollOf`, `withConnector` and `SftpConnectorConfigTest.poll` gained defaulted parameters only.
+
+**Deviations:** none.
+
+**Seams.** None moved. `Source`, `Rules`, `YamlLoader` and `sftpConnectorConfig` gained a field apiece;
+`SftpPollSource`'s own behaviour is untouched, which is the point.
+
+**For the next ticket:** an S3 poll source, when one is built, reads the same two fields off
+`Source.Poll` and passes them to whatever its lister filters with. Nothing in shuttle should ever grow a
+filter over a source's events to honour them.

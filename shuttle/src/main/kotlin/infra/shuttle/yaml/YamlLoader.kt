@@ -172,6 +172,8 @@ object YamlLoader {
                             p.ack("onAck")?.let { onAck = it }
                             p.ack("onNack")?.let { onNack = it }
                             p.ack("onReject")?.let { onReject = it }
+                            p.str("includeNames")?.let { includeNames = it }
+                            p.str("excludeNames")?.let { excludeNames = it }
                         }
                     }
                 }

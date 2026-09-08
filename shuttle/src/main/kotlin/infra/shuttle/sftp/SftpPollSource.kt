@@ -218,6 +218,11 @@ fun sftpConnectorConfig(
         onAck = postAction("onAck", poll.onAck)
         onNack = postAction("onNack", poll.onNack)
         onReject = postAction("onReject", poll.onReject)
+        // The route declares the names, the connector's own listing enforces them: a name turned
+        // away there takes no place in the listing, no readiness check, no in-flight slot and no
+        // download. Nothing on this side filters what the connector hands over.
+        includeNames = poll.includeNames
+        excludeNames = poll.excludeNames
         readiness = readinessOf(poll.readiness)
         // Spec 5.1: one listing of a directory at a time; a tick that finds the last one still
         // running is a PollSkipped rather than a second lister.

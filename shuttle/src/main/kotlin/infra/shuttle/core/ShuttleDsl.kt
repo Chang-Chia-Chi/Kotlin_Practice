@@ -266,7 +266,9 @@ class RouteBuilder(private val name: String) {
     val Acked = DeliveryMoment.ACKED
 
     fun poll(store: StoreRef, directory: String, configure: PollBuilder.() -> Unit = {}): Source =
-        PollBuilder().apply(configure).let { Source.Poll(store.name, directory, it.every, it.readiness, it.onAck, it.onNack, it.onReject) }
+        PollBuilder().apply(configure).let {
+            Source.Poll(store.name, directory, it.every, it.readiness, it.onAck, it.onNack, it.onReject, it.includeNames, it.excludeNames)
+        }
 
     fun subscribe(channel: ChannelRef, subject: String, configure: SubscribeBuilder.() -> Unit = {}): Source =
         SubscribeBuilder().apply(configure).let { Source.Subscribe(channel.name, subject, it.onAck, it.onNack, it.inProgressEvery) }
@@ -288,6 +290,12 @@ class RouteBuilder(private val name: String) {
 
         /** What becomes of a file this route will not take again; see `Source.Poll.onReject`. */
         var onReject: AckAction? = null
+
+        /** The names this route takes; see `Source.Poll.includeNames`. Unset takes every name. */
+        var includeNames: String? = null
+
+        /** The names it will not take, having the last word; see `Source.Poll.excludeNames`. */
+        var excludeNames: String? = null
     }
 
     @ShuttleDsl
