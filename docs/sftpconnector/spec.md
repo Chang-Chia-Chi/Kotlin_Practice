@@ -512,7 +512,8 @@ file kept in flight keeps the `FileSeen` it was given.
 
 `SSH_FXP_READDIR` returns entries in batches and JSch's selector sees each entry as it
 arrives, so listing is a `channelFlow` with a bounded buffer and never materializes a
-directory. `maxFilesPerPoll` stops the listing early. `sortBy` is **not built**: it requires materialization
+directory. `maxFilesPerPoll` stops the listing early, at that many entries the poll will keep.
+`sortBy` is **not built**: it requires materialization
 and would be honored only together with `maxFilesPerPoll`, as Camel does, and nothing in scope
 asks for it (T10 deviation 5). Directories are skipped by default;
 `recursive` descends but always excludes the ack and nack target folders (Sec 8.2).
@@ -540,6 +541,26 @@ turned-away entry is counted as `sftp_poll_files{state=filtered}` (Sec 13), so a
 turns everything away reads as a filter rather than as a directory that is always empty. The
 start-up marker prefix is skipped separately and unconditionally: it is the connector's own
 bookkeeping, not configuration.
+
+What `maxFilesPerPoll` bounds narrowed when the filter arrived. It still bounds what a poll
+**keeps** - what is handed on, stated for readiness and held in flight - and it no longer bounds
+what a listing **examines**, because an entry turned away costs no budget place, which is the whole
+point. A listing runs until it has the budget's worth of wanted files or the directory ends, so a
+polled directory holding two hundred thousand excluded names is walked in full on every tick. A
+listing is on the `transferTimeout` clock rather than `operationTimeout` - how long it takes is the
+other end's to decide, as it is for a transfer - so the cost of a tick is the size of the directory
+rather than the size of the budget, and an operator sizing `transferTimeout` sizes it against the
+directory. This is inherent to the feature and not a defect: the files a route wants cannot be
+found without looking past the ones it does not, and a bounded scan of names nobody wants beats a
+budget permanently starved by them. But the failure it replaces moved rather than disappeared, from
+the wanted file never being reached to the listing timing out.
+
+Nothing new is needed to watch it. `sftp_poll_files{state=filtered}` and `{state=seen}` are
+disjoint by construction - an entry the patterns turn away is counted `filtered` and never reaches
+the walk, `seen` counts what did - so their sum is what the tick examined, up to the subdirectories
+a walk meets and the start-up markers it skips, which are counted as neither, and the ratio between
+them is the pressure on this ceiling. `filtered` far above `seen`, tick after tick, is a directory
+the route is paying to read.
 
 ### 7.5 Readiness
 

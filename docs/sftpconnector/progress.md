@@ -254,6 +254,7 @@ because each was correctly deferred by the ticket that found it.
 | A second Quarkus host would want a properties mapping | T24 | That host | The adapter T14 built is deleted, so a Quarkus host binds the connector in its own words: build the DSL config, produce the `SftpConnector`, hand it the host's `MeterRegistry`, close it on the shutdown event. Shuttle already does exactly that. The second such host writes it a second time, and that is the moment a shared mapping is worth its weight - T14's entry is the design to read before rebuilding one |
 | Meters are declared in five files and `source` reads a result label from `client` | T23's standards pass | Whoever next revisits spec 13 | The closed list of what the connector publishes is not in one place. The names live in `client/ClientMeters.kt`, `pool/PoolMeters.kt`, `source/SourceMeters.kt`, `resilience/Resilience.kt` and `transport/jsch/JschErrorMapper.kt`, and `SourceMeters` imports `ResultLabel` and `resultLabelOf` from `client` to label `sftp_poll_seconds` - so the layer that publishes a meter and the layer that owns the vocabulary of its tags are not the same layer. Spec 13 is the list; nothing in the code is, and the ground rule that no ticket adds a metric name is enforced only by review. Whoever reconciles spec 13 next (the eviction-label row above and the second-connector row are both waiting on the same visit) is the one who can decide whether the names belong in one file |
 | A two-phase upload belongs to the application, and nothing collects the staged file a crash between the two halves leaves | T7's `upload` KDoc; restated by an outside review and ruled on by the maintainer, 2026-09-08 | The first application that uploads | `upload` writes to the path it was given, so an uploader whose drop folder is watched by something else stages the file elsewhere and `rename`s it into place. Both halves are on the client and neither is joined to the other: `rename` survives a lost reply (D46), a process that dies between the two halves does not, and its staged file stays on the server until somebody looks. **The ruling is that the connector does not join them, and in particular never invents the staged name**, because the two forms of staging are not equally good and only the application knows which one it can have. Staging under a *name* nobody watches - `.tmp`, `.part` - puts the agreement between the uploader and the *consumer*: forgotten, the consumer reads a partial file, and no start-up check can verify another team's listing filter. Staging in a *sibling directory* puts it between the uploader and whoever lays out the server: forgotten, the upload fails and nothing lands in the drop folder at all, and `StartupProbe`'s rename round trip already verifies the one thing that breaks it - a rename cannot cross a filesystem boundary. So the directory form is the one to reach for, a built-in that picked a `.tmp` suffix would ship the fail-open form under a name that looks solved, and the staging directory must be a *sibling* of the watched directory rather than a child: `SftpSource.walk` excludes only action targets, so under `recursive = true` a staging folder inside the watched tree is listed and handed over like any other. The connector's own remote writes never meet any of this - `PostAction.Move` and `Delete` are one request each - so it arises only above the client. If it is ever built here, it takes the staging directory as a parameter and exists for one reason: clearing the staged file when the rename never happens, which is the half a caller sequencing the two calls gets wrong. A random suffix without a sweep only makes the litter harder to recognise, which is the `.part` row's trap in the other direction |
+| A poll's listing budget bounds what a tick keeps and no longer what it examines | T26, recorded by T27 | Whoever first polls a directory whose excluded names outnumber `maxFilesPerPoll` by orders of magnitude | The tick costs the size of the directory rather than the size of the budget, on the `transferTimeout` clock, so a route that used to be starved by junk starts timing out on it instead. Spec 7.4 now says so and `sftp_poll_files{state=filtered}` against `{state=seen}` is the pressure gauge, so it is watchable with nothing new built. What the answer is **not** is a cap on entries examined: that is precisely the starvation T26 removed - the budget spent on names nothing will ever take, and the wanted file never reached - and reintroducing it as a second cap would restore the failure while keeping the timeout. The two real answers are both outside this knob. An upstream that stages **outside** the polled directory removes the entries instead of filtering them, which is the standing recommendation (spec 14, and the two-phase upload row above, which rules that the *sibling directory* form is the one to reach for). A listing that asks the **server** to do the matching would move the work to the other end, but `SSH_FXP_READDIR` takes no pattern in any protocol version the connector speaks, and a client-side glob is the same full listing under another name - so it is a protocol question, not a knob, and it is where this row would go if the sizes ever stop being manageable |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -5207,3 +5208,76 @@ and no production caller; it now has the caller it was written for.
 - **A route that wants a per-directory filter has no way to say so.** Both patterns are on the
   polling configuration, so they apply to every watched directory of one connector. A connector
   per route is the answer today, and nothing has asked for more.
+
+## T27: Say what a poll's listing now costs
+
+Built on `claude-opus-5-1m`. Documentation only: no source file touched, no test added, no test
+changed. 313 tests, 0 failures, 1 skipped (`StagingSafetyTest`'s platform skip), read off
+`sftpconnector/*/target/surefire-reports/*.txt` - the same run T26 left behind.
+
+**Written:** two paragraphs in spec 7.4 beside the filter they describe, and one row in the open
+seams table above. The ceiling is part of the listing's interface in the sense that matters - what
+a caller must know to use it correctly includes what it costs - and the spec is where this project
+keeps that, so a ceiling that moved and was not written down is an interface that lies.
+
+**Concepts named:**
+
+- **`maxFilesPerPoll` bounded two things and now bounds one.** It still bounds what a poll
+  *keeps*; it no longer bounds what a listing *examines*, because `SftpClient.list` answers
+  `Listing.CONTINUE` for a filtered entry without incrementing `handedOn`, which is the counter
+  `maxEntries` is read against. That is exactly what T26 was for - a turned-away entry costing no
+  budget place - so the second bound did not go missing, it was spent.
+- **The tick's cost is the directory, on the longer clock.** `SftpClient.list` calls
+  `Resilience.attempting(unhurried = true)`, which selects the `wholeFiles` time limiter, built
+  from `transferTimeout`. So an operator sizing `transferTimeout` is sizing it against the size of
+  the polled directory, not against `maxFilesPerPoll`. The clock is not new - `unhurried` predates
+  T26 and `transferTimeout`'s own KDoc already said "listing a directory at the pace its consumer
+  reads it" - but what runs under it now scales with the directory, which is what makes it a
+  ceiling worth stating.
+- **Strictly better, and still a moved failure.** A bounded scan of names nobody wants beats a
+  budget permanently starved by them, and the files a route wants cannot be found without looking
+  past the ones it does not. Both facts are in the spec, because a reader who is told only the
+  cost will reach for the cap that reintroduces the starvation.
+- **The pressure is already instrumented.** `filtered` is incremented only in `SftpSource.wanted`
+  when it returns false; `seen` is incremented in `tickOf` only for what `filesUnder` emitted. The
+  two are disjoint and their ratio is the gauge, so watching this needs no new code.
+
+**Correction to the ticket.** The ticket says flatly that "a tick examines `seen + filtered`
+entries". The sum is a floor, not the count. Three kinds of entry are examined and counted as
+neither: a subdirectory under `recursive = false`, which `SftpClient.list` discards before it ever
+reaches the filter (`||` short-circuits, so `wanted` is not called and `filtered` does not move); a
+subdirectory under `recursive = true`, which passes `wanted`, is handed on into `below` and is
+never `seen` because `filesUnder` emits files only; and a start-up marker with no `includeNames`
+set, which passes `wanted` and is dropped by the walk's own branch. Spec 7.4 says "up to the
+subdirectories a walk meets and the start-up markers it skips" for that reason. For the directory
+shape this ceiling is about - a flat drop folder of files - the sum is the count, and the ratio the
+ticket wanted is right either way.
+
+**Deviations from the ticket:**
+
+1. **One sentence in 7.4 changed as well as two added.** The section opened with
+   "`maxFilesPerPoll` stops the listing early", which the new paragraph directly contradicts on its
+   flat reading. It now reads "stops the listing early, at that many entries the poll will keep".
+   Leaving the two sentences to argue is the debt this ticket exists to clear.
+2. **Two paragraphs, not the one the ticket estimated.** The ceiling and its instrumentation are
+   separate thoughts and the section's existing paragraphs are of this length.
+
+**Untouched on purpose:**
+
+- **Scenario S11** ("100k entries with `maxFilesPerPoll = 1000`: listing stops after 1000 entries,
+  memory flat"). It is still exactly true - it configures no patterns, and with none set every
+  entry is a candidate, so the budget is still what stops that listing. A filtered variant would be
+  a new scenario and a new test, which this ticket rules out.
+- **D51.** It records why the decision sits before the budget, which is unchanged. What moved is a
+  consequence of that placement, and consequences live in the section, not in the decision log.
+- **`transferTimeout`'s KDoc and spec 12's validation rules.** The clock is not changing and
+  neither is the rule that it must exceed `acquireTimeout`; what an operator now sizes it against
+  is a fact about the listing and belongs in 7.4.
+
+**Seams.** One added, none closed: the listing budget bounding what a tick keeps and not what it
+examines, owned by whoever first polls a directory whose excluded names outnumber the budget by
+orders of magnitude. The row says what that owner should not reach for - a second cap on entries
+examined, which restores T26's starvation and keeps the timeout - and the two answers that are
+outside the knob: an upstream staging outside the polled directory (spec 14 and the two-phase
+upload row, whose sibling-directory ruling applies unchanged), or server-side matching, which
+`SSH_FXP_READDIR` does not offer in any version the connector speaks.
