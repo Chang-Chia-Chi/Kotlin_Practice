@@ -5109,3 +5109,101 @@ shuttle's to delete.
 - **The lookup is not a claim.** A consumer that reads a handle and holds it does not stop the
   watch from giving the file back when it ends; T19's rule stands, and the late-answer WARN is what
   such a consumer reads. `ackWait` (spec 7.2) is still not built and this does not change that.
+
+## T26: A poll takes only the names the route asked for
+
+Built on `claude-opus-5-1m`, decision D51. Baseline before the change: 74 core tests (one skipped,
+`StagingSafetyTest`'s platform skip) and 232 testkit tests green. After: 76 core and
+237 testkit, the same one skip, nothing failing; 7 were added and no existing test was
+changed. `ConnectorDslTest` reports 21 for 21 (2 added), `SftpSourceTest` 32 for 32 (5 added).
+Shuttle: see the acceptance box below.
+
+**Built:** two regular expressions on the polling configuration, `includeNames` and `excludeNames`,
+compiled when the configuration is built and decided in the listing's own per-entry filter. Spec
+7.4 has the paragraph, 7.5 the sentence separating a filter from a readiness check, 13 the new
+counter state, and D51 records why the decision sits where it does.
+
+**Concepts named:**
+
+- **A filter asks a different question from a readiness check.** A check asks whether a file is
+  *finished*; a filter asks whether it is this route's file at all. The distinction is not
+  cosmetic: a `.tmp` kept out by a `MarkerFile` check is listed by every poll, answered `NotReady`
+  by every poll, and holds a place in `maxFilesPerPoll` for as long as the connector runs - the
+  same failure `onReject`'s KDoc describes, in the one shape no post-action can reach, because a
+  file that never becomes ready is never handed over, so it is never answered, so nothing ever
+  moves it out of the directory. Kept out by name it costs the poll nothing at all.
+- **Before the budget is where the whole feature lives.** `SftpClient.list` already ran a
+  per-entry `filter` on the session's own thread, *before* the entry is counted against that
+  listing's `maxEntries` - which is the number `FileBudget.remaining` hands down. That is the only
+  place in the walk that is genuinely ahead of the budget, so `SftpSource.wanted` is passed there
+  rather than added as a branch in the walk's `when` beside the probe-marker skip. A branch there
+  would have sat *after* `budget.take()` and would have passed a test that only asked whether the
+  `.tmp` files reached the consumer: the twenty of them would still have eaten a `maxFilesPerPoll`
+  of three, and the wanted file would still never have been listed. The red run showed exactly
+  that shape - the poll handed over `upload0.tmp`, `upload1.tmp`, `upload2.tmp` and stopped.
+- **Include is files-only, exclude reaches directories.** Asked of a directory, an include of
+  `data_.*\.csv` matches no folder name, so a `recursive` walk would descend into nothing and the
+  route would silently see only its top level. The exclude is asked of directories precisely
+  because that is what keeps a walk out of a folder an upstream stages into - and it is proved by
+  the listing that never happened, not by the files that were not handed over, since descending
+  and discarding costs a session and the whole folder's entries.
+- **Full-string, never a search.** Both patterns are `Regex.matches`, so `.*\.tmp` turns away
+  `data.tmp` and leaves `data.tmp.csv` alone. Matched partially, an exclude of `.` would eat the
+  directory, which is a foot-gun worth closing by construction rather than by documentation.
+- **A turned-away entry is still counted.** `sftp_poll_files{state=filtered}`, incremented from
+  the session's thread as the listing hands the entry back. It is the one state with no cost
+  behind it, and it is counted anyway: without it a pattern that turns everything away reads in a
+  dashboard as a directory that is always empty, which is the silent-route failure the ticket
+  names.
+- **The patterns are the operator's, the names are the server's.** Said in the KDoc on both
+  `PollingConfig` properties, because the match runs on the session's own thread against names
+  somebody else uploads: a pattern that backtracks catastrophically is the operator's own foot.
+- **A bad pattern is a build-time fault.** Compiled in `SftpConnectorBuilder.build()` beside every
+  other check, so it joins the aggregated `ConfigurationError` rather than surprising the first
+  poll an hour later. Both patterns are compiled, so two typos are reported together.
+
+**Deviations from the ticket:**
+
+1. **"Counted where an operator can see it" is a meter, not a field on `PollCompleted`.** The
+   event is a public data class shuttle destructures, and a new field there is a signature change
+   the ticket explicitly rules out ("shuttle untouched"). The meter is also where the existing
+   design already puts this: `SourceMeters`' file counter is deliberately cut by what became of
+   each listed entry, and `filtered` is one more cut. An operator watching a route sees it beside
+   `seen`, `emitted` and `notReady`.
+2. **No per-entry log line for a turned-away name.** The feature exists for directories holding
+   thousands of them; a DEBUG line each would be the noise the filter was added to avoid. The
+   counter carries the diagnosis and the tick's existing summary line carries the rest.
+3. **"Both unset behaves exactly as before" has no dedicated behavioural test.** The whole
+   pre-existing suite is that test - 232 testkit tests configure no patterns and are unchanged and
+   green. What was added is a characterisation test in `ConnectorDslTest` asserting both are null
+   by default, so a later change that gave them a non-null default would be caught.
+4. **The red run for the two `ConnectorDslTest` cases needed a stub.** The tests cannot compile
+   without `includeNames`/`excludeNames` existing, so the pattern-fault test was seen red against a
+   build where the two knobs were plumbed through but `compiled()` rethrew the
+   `PatternSyntaxException` instead of aggregating it: `Expecting actual throwable to be an
+   instance of ConfigurationError but was PatternSyntaxException`. The five `SftpSourceTest` cases
+   needed no stub - they were seen red against the fully wired configuration with `SftpSource`
+   still listing without the filter.
+
+**Untouched on purpose:**
+
+- **The probe-marker skip.** Still its own unconditional branch in the walk's `when`, on
+  `PROBE_MARKER_PREFIX`, not folded into the patterns. It is the connector's own bookkeeping and
+  not something an operator configures, and `a marker left by a dead session is never handed to
+  the consumer` still covers it with no patterns set. An operator who does set an `includeNames`
+  will have the marker turned away by the include first and counted as `filtered`; the outcome is
+  identical - never handed over - and the branch behind it is unchanged.
+- **`FileBudget`, `maxEntries` and the walk's descent order.** The filter changes what reaches the
+  budget, not how the budget works.
+
+**Seams.** None closed, none added. `SftpClient.list`'s `filter` parameter existed and had a test
+and no production caller; it now has the caller it was written for.
+
+**For the next ticket:**
+
+- **Shuttle's own declaration is ticket 48.** Nothing here reaches into `shuttle/`; the two knobs
+  are on the connector's DSL and shuttle passes its own values through `polling { }` when its
+  ticket lands.
+- **A route that wants a per-directory filter has no way to say so.** Both patterns are on the
+  polling configuration, so they apply to every watched directory of one connector. A connector
+  per route is the answer today, and nothing has asked for more.

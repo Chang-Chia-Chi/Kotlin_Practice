@@ -203,6 +203,35 @@ data class PollingConfig internal constructor(
     /** How many entries one poll reads before stopping, however many more the directory holds. */
     val maxFilesPerPoll: Int,
     /**
+     * The file names this route wants, matched against the whole of an entry's name. Null takes
+     * every name, which is what a configuration written without this knob says.
+     *
+     * Files only. A recursive walk under `data_.*\.csv` would otherwise descend into nothing,
+     * because no folder is named like a csv, and the route would silently see only the top level.
+     *
+     * The pattern is the operator's, the names it is run against are the server's, and the match
+     * runs on the session's own thread as each entry arrives. A pattern that backtracks
+     * catastrophically over a name somebody uploads is therefore the operator's own foot: keep it
+     * simple, and prefer an anchored literal suffix to a nest of alternations.
+     */
+    val includeNames: Regex?,
+    /**
+     * The names this route will not take, matched against the whole of an entry's name and
+     * applied after [includeNames], so it has the last word where both match. Null turns nothing
+     * away.
+     *
+     * Files and directories both, which is what keeps a walk out of a folder an upstream stages
+     * into. Matching the whole name is what stops an exclude of `.` eating the directory.
+     *
+     * This is where an upstream's temporary name belongs. A name turned away here costs the poll
+     * nothing: it takes no place in [maxFilesPerPoll], is never stated by a readiness check,
+     * never enters the in-flight set and is never downloaded. A file kept out by a readiness
+     * check instead stays listed and never ready, holding its place for as long as the connector
+     * runs - which is the cost [onReject] describes, in the one shape no action can reach. The
+     * caution on [includeNames] about who wrote the pattern applies here too.
+     */
+    val excludeNames: Regex?,
+    /**
      * Whether a poll walks into subdirectories. The folders its own actions move files into are
      * left out of the walk whatever this says, so a file that has been dealt with is never found
      * again by the poll that dealt with it.

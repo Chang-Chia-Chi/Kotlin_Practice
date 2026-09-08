@@ -321,6 +321,31 @@ class ConnectorDslTest {
         assertThat(fits.resilience.maxConcurrentTransfers).isEqualTo(2)
     }
 
+    /**
+     * The patterns are compiled where every other value is checked, so a typo is a fault the
+     * builder reports with the rest rather than an exception out of the first listing an hour
+     * later. Both are wrong here because the faults are meant to arrive together.
+     */
+    @Test
+    fun `a name pattern that does not parse is a build-time fault, alongside the others`() {
+        assertThatThrownBy { minimalConnector { polling { includeNames = "data_[.csv"; excludeNames = "*.tmp" } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("includeNames")
+            .hasMessageContaining("excludeNames")
+    }
+
+    /** Unset is what every configuration written before the knobs existed says, and it takes everything. */
+    @Test
+    fun `name patterns are unset by default and compiled when they are given`() {
+        val untouched = minimalConnector { }.polling
+        assertThat(untouched.includeNames).isNull()
+        assertThat(untouched.excludeNames).isNull()
+
+        val filtered = minimalConnector { polling { includeNames = """data_.*\.csv"""; excludeNames = """.*\.tmp""" } }.polling
+        assertThat(filtered.includeNames?.matches("data_1.csv")).isTrue()
+        assertThat(filtered.excludeNames?.matches("data_1.csv.tmp")).isTrue()
+    }
+
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =
         sftpConnector("vendor-drop") {
             endpoint { host = "sftp.example" }

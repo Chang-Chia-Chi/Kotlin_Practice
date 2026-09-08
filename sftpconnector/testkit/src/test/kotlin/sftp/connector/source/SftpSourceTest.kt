@@ -596,6 +596,103 @@ class SftpSourceTest {
             .containsExactly("/drop/a.csv")
     }
 
+    /**
+     * The whole of what the name patterns are for, in the one shape that cannot be faked: the
+     * turned-away names outnumber the listing budget several times over, so the wanted file is
+     * reached only if none of them ever took a place in it. A filter applied after the budget was
+     * taken would still keep the `.tmp` files from the consumer and would fail here, which is the
+     * difference between "the unwanted file was not handed over" and "the unwanted file cost
+     * nothing".
+     */
+    @Test
+    fun `names the exclude turns away take no place in the listing budget`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop")
+        repeat(20) { transport.file("/drop/upload$it.tmp", "x") }
+        transport.file("/drop/data.csv", "1")
+        val source = sourceOver(transport) { maxFilesPerPoll = 3; excludeNames = """.*\.tmp""" }
+
+        val events = source.poll("/drop").toList()
+
+        assertThat(events.filterIsInstance<FileSeen>().map { it.file.name })
+            .describedAs("the wanted file, behind twenty turned-away names and a budget of three")
+            .containsExactly("data.csv")
+        assertThat(registry.get("sftp_poll_files").tag("state", "filtered").counter().count())
+            .describedAs("a pattern that turns everything away must not read as an empty directory")
+            .isEqualTo(20.0)
+    }
+
+    /** Matched partially rather than whole, an exclude of `.` would take the entire directory with it. */
+    @Test
+    fun `an exclude matches the whole name, so it turns away data tmp and leaves data tmp csv`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop")
+            .file("/drop/data.tmp", "1")
+            .file("/drop/data.tmp.csv", "2")
+
+        assertThat(sourceOver(transport) { excludeNames = """.*\.tmp""" }.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.name })
+            .containsExactly("data.tmp.csv")
+    }
+
+    /**
+     * The include asks what a *file* is, so it is never asked of a directory: a recursive walk
+     * under a pattern no folder name could match would otherwise descend into nothing and the
+     * route would silently see only its top level.
+     */
+    @Test
+    fun `a recursive walk still descends under an include no directory name could match`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").directory("/drop/sub")
+            .file("/drop/notes.txt", "x")
+            .file("/drop/sub/data_1.csv", "1")
+
+        assertThat(sourceOver(transport) { recursive = true; includeNames = """data_.*\.csv""" }.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.path })
+            .containsExactly("/drop/sub/data_1.csv")
+    }
+
+    /**
+     * The exclude does reach directories, which is the only way to keep a walk out of a folder an
+     * upstream stages into. Proved by the listing that never happened rather than by the files
+     * that were not handed over: descending and then discarding would cost the walk a session and
+     * the whole folder's worth of entries.
+     */
+    @Test
+    fun `a staging subdirectory the exclude names is never walked into`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").directory("/drop/staging")
+            .file("/drop/data.csv", "1")
+            .file("/drop/staging/half.csv", "2")
+        val source = sourceOver(transport) { recursive = true; excludeNames = "staging" }
+
+        val events = source.poll("/drop").toList()
+
+        assertThat(events.filterIsInstance<FileSeen>().map { it.file.path }).containsExactly("/drop/data.csv")
+        assertThat(transport.calls.filter { it.operation == Operation.List }.map { it.path })
+            .describedAs("not descended into, rather than descended into and discarded")
+            .containsExactly("/drop")
+    }
+
+    /**
+     * The file `onReject` cannot reach: an upstream staging under a temporary name in the polled
+     * directory never becomes ready, so it is never handed over, so it is never answered and no
+     * action can take it out. Kept out with a readiness check it would sit in `notReady` forever
+     * and hold its place in the budget; kept out by name it costs the poll nothing at all.
+     */
+    @Test
+    fun `an upstream's temporary file is never stated, never handed over and not counted as waiting`() = runTest {
+        val askedAbout = mutableListOf<String>()
+        val transport = FakeSftpTransport().directory("/drop")
+            .file("/drop/data.csv.part", "half")
+            .file("/drop/data.csv", "whole")
+        val source = sourceOver(transport) {
+            excludeNames = """.*\.part"""
+            readiness = ReadinessCheck { file, _ -> askedAbout += file.name; Readiness.Ready }
+        }
+
+        val events = source.poll("/drop").toList()
+
+        assertThat(events.filterIsInstance<FileSeen>().map { it.file.name }).containsExactly("data.csv")
+        assertThat(askedAbout).describedAs("readiness is never asked about it").containsExactly("data.csv")
+        assertThat(events.filterIsInstance<PollCompleted>().single().notReady).isZero()
+        assertThat(transport.calls.map { it.path }).doesNotContain("/drop/data.csv.part")
+    }
+
     private fun inFlight(): Int = registry.get("sftp_inflight").gauge().value().toInt()
 
     private fun TestScope.sourceOver(transport: FakeSftpTransport, polling: PollingBuilder.() -> Unit): SftpSource {

@@ -10,6 +10,7 @@ import sftp.connector.source.plus
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.regex.PatternSyntaxException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -162,6 +163,10 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
         // directory that is always empty rather than as a knob that was set wrong.
         if (polling.maxInFlight < 1) faults += "polling maxInFlight ${polling.maxInFlight} would let no file be handed over"
         if (polling.maxFilesPerPoll < 1) faults += "polling maxFilesPerPoll ${polling.maxFilesPerPoll} would read no entries"
+        // Compiled here rather than at the first listing, so a typo is one of the faults reported
+        // when the connector is described and not an exception out of a poll an hour later.
+        val includeNames = faults.compiled("polling includeNames", polling.includeNames)
+        val excludeNames = faults.compiled("polling excludeNames", polling.excludeNames)
         // An action that files a message back into the folder it came out of would hand the same
         // file to the next poll, and the poll after that, for as long as the connector runs. The
         // check is per watched directory because a relative target resolves against each of them.
@@ -280,6 +285,8 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 staging = StagingConfig(dir = polling.staging.dir, digest = polling.staging.digest),
                 maxInFlight = polling.maxInFlight,
                 maxFilesPerPoll = polling.maxFilesPerPoll,
+                includeNames = includeNames,
+                excludeNames = excludeNames,
                 recursive = polling.recursive,
                 readiness = polling.readiness,
                 overlap = polling.overlap,
@@ -293,6 +300,17 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
             ),
         )
     }
+
+    /** An unset pattern is not a fault; one that does not parse is, and it is reported with the rest. */
+    private fun MutableList<String>.compiled(what: String, pattern: String?): Regex? =
+        pattern?.let {
+            try {
+                Regex(it)
+            } catch (notAPattern: PatternSyntaxException) {
+                this += "$what is not a regular expression: ${notAPattern.description} at position ${notAPattern.index}"
+                null
+            }
+        }
 
     private fun MutableList<String>.checkAddress(what: String, host: String, port: Int) {
         if (host.isBlank()) this += "$what host is blank"
@@ -394,6 +412,24 @@ class PollingBuilder internal constructor() {
     var maxInFlight: Int = 16
     var maxFilesPerPoll: Int = 1000
     var recursive: Boolean = false
+
+    /**
+     * The file names this route wants, as a regular expression matched against the whole of an
+     * entry's name. Unset takes every name. Applied to files only; see `PollingConfig` for why,
+     * and for the caution about who writes the pattern and who writes the names.
+     */
+    var includeNames: String? = null
+
+    /**
+     * The names this route will not take, as a regular expression matched against the whole of an
+     * entry's name, applied after [includeNames] and having the last word. Unset turns nothing
+     * away. Applied to directories too, so it also keeps a recursive walk out of a folder.
+     *
+     * This is where an upstream's temporary name goes. Keeping one out with a readiness check
+     * works and leaves it listed and never ready, holding a place in [maxFilesPerPoll] for as
+     * long as the connector runs; kept out here it costs the poll nothing.
+     */
+    var excludeNames: String? = null
 
     /** Whether a tick that finds the last one still running waits it out or runs alongside it. */
     var overlap: OverlapPolicy = OverlapPolicy.SKIP
