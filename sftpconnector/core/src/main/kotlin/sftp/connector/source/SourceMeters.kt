@@ -26,7 +26,7 @@ internal class SourceMeters(
         Gauge.builder("sftp_inflight") { inFlight() }.tag("endpoint", endpoint).register(meters)
     }
 
-    private val files: Map<String, Counter> = listOf("seen", "emitted", "notReady", "gone").associateWith { state ->
+    private val files: Map<String, Counter> = listOf("seen", "emitted", "notReady", "gone", "filtered").associateWith { state ->
         Counter.builder("sftp_poll_files").tags("endpoint", endpoint, "state", state).register(meters)
     }
 
@@ -44,6 +44,17 @@ internal class SourceMeters(
             throw failure
         }
     }
+
+    /**
+     * An entry the poll's name patterns turned away, counted as the listing hands it back. It is
+     * the one state with no cost behind it - the entry took no place in the poll's budget, was
+     * never stated and never entered the set - and it is counted anyway, because a pattern that
+     * turns everything away would otherwise read as a directory that is always empty.
+     *
+     * Incremented from the session's own thread as each entry arrives, which the registry's
+     * counter is safe for.
+     */
+    fun filtered() = files.getValue("filtered").increment()
 
     fun listed(seen: Int, emitted: Int, notReady: Int) {
         files.getValue("seen").increment(seen.toDouble())

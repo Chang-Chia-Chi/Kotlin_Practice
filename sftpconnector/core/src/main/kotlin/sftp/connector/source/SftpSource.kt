@@ -432,7 +432,8 @@ class SftpSource(
     /**
      * The files of [directory], and of everything under it when the configuration says to
      * descend - except the folders this source's own actions move files into, so a file that has
-     * been dealt with is never listed again by the poll that dealt with it.
+     * been dealt with is never listed again by the poll that dealt with it, and except the names
+     * the route's own patterns turn away, which cost the budget below nothing at all.
      */
     private fun filesUnder(directory: String): Flow<RemoteFile> {
         val actionTargets = polling.actionTargetsUnder(directory).toSet()
@@ -451,7 +452,7 @@ class SftpSource(
      */
     private suspend fun FlowCollector<RemoteFile>.walk(directory: String, actionTargets: Set<String>, budget: FileBudget) {
         val below = mutableListOf<String>()
-        client.list(directory, maxEntries = budget.remaining, withDirectories = polling.recursive).collect {
+        client.list(directory, maxEntries = budget.remaining, withDirectories = polling.recursive, filter = ::wanted).collect {
             when {
                 it.isDirectory -> below += it.path
                 // A start-up marker a dead session left behind is never handed over: whoever wrote
@@ -464,6 +465,33 @@ class SftpSource(
             if (budget.isSpent) break
             walk(sub, actionTargets, budget)
         }
+    }
+
+    /**
+     * Whether an entry's name is one this route asked for.
+     *
+     * This runs as each entry arrives from the server, on the session's own thread, which is the
+     * only place before the entry is counted against the listing budget. That is the whole point
+     * of the two patterns and the one thing a later refactor must not move: an entry turned away
+     * here takes no place in `maxFilesPerPoll`, is never stated by a readiness check, never enters
+     * the in-flight set and is never downloaded, so a directory whose staging files outnumber the
+     * budget several times over still hands over the file the route came for. Decided after the
+     * budget was taken, the same patterns would keep the staging files from the consumer and still
+     * let them starve it.
+     *
+     * The include is not asked of a directory: a recursive walk under a pattern no folder name
+     * could match would descend into nothing and the route would silently see only its top level.
+     * The exclude is, because keeping a walk out of a folder an upstream stages into is half of
+     * what the exclude is for. Both match the whole name rather than searching within it, so an
+     * exclude of `.` turns away one one-character name instead of the directory.
+     */
+    private fun wanted(entry: RemoteFile): Boolean {
+        val include = polling.includeNames
+        val exclude = polling.excludeNames
+        val takes = (entry.isDirectory || include == null || include.matches(entry.name)) &&
+            (exclude == null || !exclude.matches(entry.name))
+        if (!takes) meters.filtered()
+        return takes
     }
 
     /**

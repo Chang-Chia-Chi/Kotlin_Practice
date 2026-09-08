@@ -517,6 +517,30 @@ and would be honored only together with `maxFilesPerPoll`, as Camel does, and no
 asks for it (T10 deviation 5). Directories are skipped by default;
 `recursive` descends but always excludes the ack and nack target folders (Sec 8.2).
 
+A poll may also narrow what it takes by name, with two regular expressions on the polling
+configuration: `includeNames` is what the route wants, `excludeNames` is what it will not take.
+Include is applied first and exclude second, so exclude has the last word where both match. Both
+unset means every entry is a candidate, which is the behaviour of every version before the knobs
+existed. A pattern that does not compile is a `ConfigurationError` raised with the builder's other
+faults, so it is found when the configuration is built and not at the first poll.
+
+The match is against the entry's own name and it is **full-string**, never a search: matched
+partially, an exclude of `.` would eat the whole directory. Include applies to **files only**;
+exclude applies to **files and directories**. Include reaching directories would stop a
+`recursive` walk under an include of `data_.*\.csv` at the first level, because no directory name
+is a csv; exclude reaching them is what keeps the walk out of a staging folder inside a watched
+tree.
+
+The decision is made as each entry arrives from the server, **before the entry is counted against
+`maxFilesPerPoll`**. That is the whole point of the feature and the one thing a later refactor
+must not move: an entry turned away takes no place in the listing budget, is never stated by a
+readiness check, never enters the in-flight set and is never downloaded - so a directory whose
+staging files outnumber `maxFilesPerPoll` still hands over the file the route asked for. A
+turned-away entry is counted as `sftp_poll_files{state=filtered}` (Sec 13), so a pattern that
+turns everything away reads as a filter rather than as a directory that is always empty. The
+start-up marker prefix is skipped separately and unconditionally: it is the connector's own
+bookkeeping, not configuration.
+
 ### 7.5 Readiness
 
 `interface ReadinessCheck { suspend fun check(file, ctx): Readiness }` where `ctx` offers `stat`
@@ -532,6 +556,11 @@ and the clock, and `Readiness` is `Ready`, `NotReady(reason)` or `Skip`. Built-i
 
 Default: `SizeStable(2, 10.seconds) + MinAge(1.minutes)`. A file that is not ready is counted in
 `PollCompleted.notReady` and reconsidered next tick.
+
+A name filter is not a readiness check: a check asks whether a file is *finished*, a filter asks
+whether it is this route's file at all - see 7.4. Keeping `.tmp` out with `MarkerFile` works but
+leaves the file permanently `NotReady`, which keeps its place in `maxFilesPerPoll` for as long as
+the connector runs.
 
 Readiness runs as a phase between the listing and the emitting, over the poll's candidates as a
 batch (bounded by `maxFilesPerPoll`, which is what that cap is for). So a poll costs
@@ -850,7 +879,7 @@ Tag `endpoint` on everything; never tag by file name or tick number.
 | `sftp_error_unmapped_total` | counter | any non-zero value is a table entry to add |
 | `sftp_breaker_state` | gauge | 0 closed, 1 half-open, 2 open |
 | `sftp_poll_seconds{result}` | timer | |
-| `sftp_poll_files{state}` | counter | state: seen, emitted, notReady, gone |
+| `sftp_poll_files{state}` | counter | state: seen, emitted, notReady, gone, filtered |
 | `sftp_inflight` | gauge | |
 | `sftp_ack_total{outcome}` | counter | outcome: ack, nack, cancelled |
 
@@ -964,6 +993,7 @@ table in `progress.md` carries the row.
 | D48 | The in-flight set's identity is path, size and mtime; its exclusivity is the path alone; and a watch that ends gives back every file it ever handed over | Asked for by shuttle, whose D2 keys its own ledger on the same triple and was doing both jobs itself. Identity is what an ack's idempotency and a nack-for-good need. Exclusivity keyed on the triple let a file re-uploaded under a new size, while the first copy was still being worked, enter the set as a second file at the same name, and shuttle refused it and nacked it back by hand: a consumer must never race itself on two copies of one name. Keyed on the path, the second copy waits for the first to settle and is handed over on a later poll - not lost, only later. And a tick that finished had left its files with the consumer, where only the running tick's cancellation ever gave anything back, so a watch that ended left them in flight for the life of the process and shuttle nacked everything it held in a `finally`; the watch now gives them back itself, with redelivery, on every way it can end (Sec 7.3, 7.6, 11.2) |
 | D49 | `config` names the readiness types and nothing else beneath it; `error` names nothing at all | Sec 3.1 draws the layers and nothing checked them, so two references had grown the wrong way: `config` reached into `client` for the overwrite policy while `client` reached back for its configuration, and `error` reached into `pool` for the counts one failure reports while `pool` raises that failure. Neither is a build failure - Kotlin compiles a package cycle - and both make two packages readable only together. The overwrite policy is something the DSL configures, so it is spelled in `config` (`sftp.connector.config.Overwrite`), and the exhaustion counts are the exception's own fields. Readiness cannot follow, because a check is handed a `RemoteFile` and `transport` names `config` for its connection settings, so moving it would trade this cycle for that one; it stays where it is and the architecture test permits it by name. Two ArchUnit rules keep both true (T22) |
 | D50 | The source answers the `FileSeen` at a path while it is in flight, and the answer is the emitted handle itself | Asked for by shuttle's ticket 31, which had deleted every mirror of the in-flight set but one: a path-to-`FileSeen` table, kept because its pipeline resumes from a stored row that knows the path and nothing else, and the only way to download, ack or nack is the handle the watch handed over. The set already keys exclusivity on the path (D48), so it is the one place that mapping lives, and a copy of it downstream is the second ledger D14 forbids. The handle is the emitted instance and not a fresh one over the same slot because settlement is once per file and the WARN for a second answer names the first; two handles over one slot would settle once too, but the consumer would then hold two objects for one file with no reason to prefer either. The lookup is on the source rather than on the watch's flow because the caller that needs it is outside the collect block, holding the source and a path (Sec 7.1, 7.3) |
+| D51 | A poll's name filter is two full-string regexes on the polling configuration, `includeNames` (files only) and `excludeNames` (files and directories), decided as each entry arrives from the server and before the entry is counted against `maxFilesPerPoll` | A file nothing will ever take is the failure `onReject` was written for, in the one shape `onReject` cannot reach: an upstream that stages under a temporary name in the polled directory, or a dead upload's remains, never becomes ready, so it is never handed over, so it is never answered and no action can take it out of the directory - and it keeps a listing place for as long as the connector runs. Keeping it out with a `MarkerFile` readiness check works and leaves the same file permanently `NotReady`, which is the budget problem wearing a different hat, so the two questions are separated: a check asks whether a file is finished, a filter asks whether it is this route's file at all. The decision goes in the listing's own per-entry filter rather than in the walk, because that is the only place before the `maxEntries` the budget hands down - a filter after `budget.take()` would still let a staging directory of a thousand names exhaust a `maxFilesPerPoll` of ten and starve the one wanted file, which is the whole failure. Full-string, because an exclude matched partially makes `.` eat the directory. Include is files-only, because a `recursive` walk under `data_.*\.csv` would otherwise descend into nothing; exclude reaches directories, because that is what keeps a walk out of a staging folder inside a watched tree. Compiled when the configuration is built, so a bad pattern joins the builder's other faults instead of surprising the first poll; counted as `sftp_poll_files{state=filtered}`, so a pattern that turns everything away does not read as an empty directory. The start-up marker prefix stays unconditional and separate: it is the connector's own bookkeeping, not configuration (Sec 7.4, 7.5, 13) |
 
 D24 and D25 were withdrawn during the design review and are not reused; a citation to either is
 a citation to nothing.
