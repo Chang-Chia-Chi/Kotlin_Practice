@@ -265,6 +265,35 @@ class RulesTest {
     fun rule25_a_secret_appears_only_as_an_environment_reference() =
         assertEquals(listOf(25), violated(config(vendor = { auth { password(env("SFTP_USER"), Secret.Literal("hunter2")) } })))
 
+    /**
+     * A pattern that does not compile is a route that never starts: the source hands it to the
+     * connector's builder, which raises with its other faults. Validate mode says so first, and
+     * says which of the two knobs it is, because the two are edited in the same breath.
+     */
+    @Test
+    fun rule27_an_includeNames_that_does_not_compile_is_refused_by_route_and_knob() {
+        val broken = config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("temp/"); includeNames = "data_(\\d+\\.csv" } })
+
+        assertEquals(listOf(27), violated(broken))
+        assertTrue(reasons(broken).single().let { "vendor-drop" in it && "includeNames" in it }, reasons(broken).toString())
+    }
+
+    /** The glob an operator reaches for first: `*.tmp` is a dangling metacharacter, not a pattern. */
+    @Test
+    fun rule27_an_excludeNames_that_does_not_compile_is_refused_by_route_and_knob() {
+        val broken = config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("temp/"); excludeNames = "*.tmp" } })
+
+        assertEquals(listOf(27), violated(broken))
+        assertTrue(reasons(broken).single().let { "vendor-drop" in it && "excludeNames" in it }, reasons(broken).toString())
+    }
+
+    @Test
+    fun rule27_patterns_that_compile_pass_and_so_does_a_poll_that_names_neither() =
+        assertEquals(
+            emptyList<Int>(),
+            violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("temp/"); includeNames = "data_\\d+\\.csv"; excludeNames = ".*\\.tmp" } })),
+        )
+
     @Test
     fun the_baseline_passes_every_rule() = assertEquals(emptyList<Int>(), violated(config()))
 

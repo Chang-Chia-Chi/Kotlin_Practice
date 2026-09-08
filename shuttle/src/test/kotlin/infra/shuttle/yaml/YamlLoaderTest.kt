@@ -182,7 +182,9 @@ class YamlLoaderTest {
         assertEquals(emptyList<Violation>(), Rules.validate(config) { specBeans[it] }.violations)
         val dsl = shuttle {
             route("vendor-drop") {
-                source = poll(objectStore("vendor"), directory = "/inbox") { every = 1.hours; onAck = move("temp/") }
+                source = poll(objectStore("vendor"), directory = "/inbox") {
+                    every = 1.hours; onAck = move("temp/"); includeNames = "\\d+-.*\\.csv"; excludeNames = ".*\\.tmp"
+                }
                 process = extract(from = ExtractFrom.FileName, regex = "(?<orderNumber>\\d+)-.*\\.csv") then rename("{yyyyMMdd}-{name}") then zip()
                 target = objectStore("minio").bucket("landing") { key = "vendor/{name}" }
                 notify(on = Acked, channel("downstream"))

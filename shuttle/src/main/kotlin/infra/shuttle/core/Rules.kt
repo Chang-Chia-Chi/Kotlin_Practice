@@ -158,6 +158,15 @@ object Rules {
                             fail(23, "route $name moves $what files into the polled directory itself")
                         }
                     }
+                    // The source hands these to the connector, which compiles them when it is built:
+                    // uncompiled, they are a route that never starts. Named one at a time because the
+                    // two are edited in the same breath and the fault has to say which one it is.
+                    listOf("includeNames" to source.includeNames, "excludeNames" to source.excludeNames).forEach { (knob, pattern) ->
+                        if (pattern == null) return@forEach
+                        runCatching { Pattern.compile(pattern) }.exceptionOrNull()?.let { e ->
+                            fail(27, "route $name: $knob \"$pattern\" is not a regular expression: ${(e as? PatternSyntaxException)?.description ?: e.message}")
+                        }
+                    }
                 }
                 is Source.Subscribe -> {
                     reference(name, source.channel, "subscribe", channels) { it is NatsChannel }

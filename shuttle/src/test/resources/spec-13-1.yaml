@@ -75,6 +75,8 @@ shuttle:
           every: 1h
           readiness: [ { sizeStable: { checks: 2, interval: 10s } }, { minAge: 1m } ]
           onAck: { move: temp/ }
+          includeNames: "\\d+-.*\\.csv"    # the names this route takes; unset takes every name (5.1)
+          excludeNames: ".*\\.tmp"         # and the names it will not, having the last word where both match
       process:
         - { extract: { from: fileName, regex: "(?<orderNumber>\\d+)-.*\\.csv" } }
         - { rename: { pattern: "{yyyyMMdd}-{name}" } }

@@ -153,6 +153,24 @@ sealed interface Source {
          * every later poll lists it, turns it away, and spends one of `maxFilesPerPoll` on it.
          */
         val onReject: AckAction? = null,
+        /**
+         * The file names this route takes, as a regular expression the source matches against the
+         * whole of a listed entry's name. Unset takes every name, which is what a document written
+         * without the knob says.
+         *
+         * The route declares it and the source enforces it inside its own listing. A filter here,
+         * over the events a source has already handed over, would have paid for the listing place,
+         * the readiness stats, the in-flight slot and the download of every name it turns away -
+         * the whole of what declaring it is for.
+         */
+        val includeNames: String? = null,
+        /**
+         * The names this route will not take, applied after [includeNames] and having the last
+         * word where both match. Unset turns nothing away. This is where an upstream's temporary
+         * name belongs, and on a recursive listing it is also what keeps the walk out of the folder
+         * that upstream stages into.
+         */
+        val excludeNames: String? = null,
     ) : Source
 
     data class Subscribe(

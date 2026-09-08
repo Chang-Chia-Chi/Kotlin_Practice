@@ -289,6 +289,16 @@ milestone 2. While a subscribed transfer runs, the trigger tells the broker ever
 the consumer's ack wait is not redelivered under our feet; the operator keeps `inProgressEvery`
 below the consumer's ack wait, which the process cannot read.
 
+A `poll` may narrow what it takes by name: `includeNames` is what the route wants, `excludeNames`
+what it will not take, both regular expressions and both unset by default, which takes every name.
+The route declares them and the source enforces them inside its own listing - never over the events
+a source has handed over, where the listing place, the readiness stats, the in-flight slot and the
+download have all already been paid for, which is the whole of what the declaration is for. The
+matching rules - include first then exclude, full-string, include on files only and exclude on
+files and directories - are the connector's, stated once in its spec Sec 7.4 rather than copied
+here. `SftpPollSource` passes both down; an S3 poll source owns honouring the same two. Rule 27
+refuses a pattern that does not compile, naming the route and which of the two it is.
+
 ### 5.2 Identity
 
 A polled file's identity is store, directory, name, size and mtime, plus a revision that starts
@@ -877,6 +887,8 @@ shuttle:
           every: 1h
           readiness: [ { sizeStable: { checks: 2, interval: 10s } }, { minAge: 1m } ]
           onAck: { move: temp/ }
+          includeNames: "\\d+-.*\\.csv"    # the names this route takes; unset takes every name (5.1)
+          excludeNames: ".*\\.tmp"         # and the names it will not, having the last word where both match
       process:
         - { extract: { from: fileName, regex: "(?<orderNumber>\\d+)-.*\\.csv" } }
         - { rename: { pattern: "{yyyyMMdd}-{name}" } }
@@ -944,7 +956,9 @@ shuttle {
         }
     }
     route("vendor-drop") {
-        source = poll(objectStore("vendor"), directory = "/inbox") { every = 1.hours; onAck = move("temp/") }
+        source = poll(objectStore("vendor"), directory = "/inbox") {
+            every = 1.hours; onAck = move("temp/"); includeNames = "\\d+-.*\\.csv"; excludeNames = ".*\\.tmp"
+        }
         process = extract(from = FileName, regex = "(?<orderNumber>\\d+)-.*\\.csv") then rename("{yyyyMMdd}-{name}") then zip()
         target = objectStore("minio").bucket("landing") { key = "vendor/{name}" }
         notify(on = Acked, channel("downstream"))
@@ -986,6 +1000,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 24 | `readiness` is `all-routes-down` or `any-route-down`; `restartBackoff.initial <= max` |
 | 25 | A secret appears only as a `${VAR}` reference, never as a literal. A reference is expanded wherever it stands, `custom.config` included, and one naming a variable that is not set is a load error naming its path (Sec 12.2), because a document with an unresolved reference never became a configuration |
 | 26 | A mapping row's `digest: <algo>` names the algorithm its route computes, `digest` or the process default (D49) |
+| 27 | A poll's `includeNames` and `excludeNames` compile as regular expressions; the violation names the route and which of the two it is |
 
 ---
 
@@ -1121,6 +1136,7 @@ poll are appeals to the connector's spec.
 | D56 | One `Deliverer` per process renders a moment, calls the channel and classifies what stopped the call, for the notifier and for the `callback` ack alike; a callback channel that throws is a `Retry` outcome and so a stage error reading `callback <channel> answered Retry null: <exception>`, a row that vanished before its callback a `Reject` | "Read the row, render `bodies[channel]`, call `deliver`, classify" was written twice, in the notifier's worker and in the pipeline's ack, and the pipeline carried `bodies`, `channels`, `renderer` and `providerExists` for that one call and the 6.4 freeze check. With one implementation the callback inherits the notifier's classification: an exception was already a retried stage error, so only the text on the row changes, and 5.3's contract - synchronous, retried with the stage, not ACKED until `Delivered` - is unchanged. The freeze check asks the renderer whether a provider resolves, so the boot-time and freeze-time answers cannot drift (ticket 46, finding Architecture C3) |
 | D57 | Sec 14.1's admin reads live on the `StateStore` seam - `transfers(route, state, limit)` with children folded, `deliveries(transfer)`, `delivery(id)` and `countsByState(route)` - and the host's `StoreReads` second head, which handed it both whole tables, is deleted | 8.2 said the seam deliberately lacked a read side, so the admin loaded `file_transfer` and `delivery_outbox` whole and filtered them in memory: at the spec's own load (thousands of files per poll) every `/admin/shuttle/routes` scrape and every re-drive read the whole ledger over the wire to answer one row, and the page the operator asked for was cut after the database had already sent everything (finding Architecture C5). Oracle answers each of them with a `WHERE`, an `ORDER BY` and a `FETCH FIRST`, which is what an index is for, and the in-memory store answers them the same way under the same contract cases, so the two adapters stay interchangeable. The seam had already grown `byId`, `outboxPending` and `childrenOf` for readers, so the frozen surface of plan 2.3 was reopened for these four rather than kept for a sentence it no longer described. `countsByState` joins the three the ticket named because `/routes` states counts by state, and counting is the one thing a listing read cannot do without pulling the rows it counts. The whole-table views stay on both adapters for the contract's own assertions and nowhere else (ticket 47) |
 | D58 | A `custom` step's `config` reaches the bean through `Processor.configured(config)`, called once per step while the chain is built; the bean answers the processor that map configures, itself by default | Sec 6.2 said "handed to its constructor", and a CDI bean's constructor is CDI's, not the host's: the host resolves a name to an instance that already exists, so the map had nowhere to go and was dropped (progress 02 left it unexpanded for the same reason). A parameter on `process` was refused - it would put per-step configuration in every call of the hottest seam, for every built-in that has none. A separate `ProcessorFactory` bean type was refused too: it splits the seam in two, and `NamedBeans.produces` (rules 15 and 17) would then be reading a bean that is not a `Processor` and could not say what it declares without building one. A defaulted method on the seam keeps one bean type, leaves every built-in and every existing bean compiling untouched, and lets a configured processor be a new instance rather than a mutated singleton, which is what makes a bean two routes reference with different configs safe. Its cost: `produces` is the bean's own, so a processor whose attributes depend on its config declares their union (ticket 43) |
+| D59 | A polled route's `includeNames` and `excludeNames` sit on `Source.Poll` and are passed down to the source, which filters inside its own listing; nothing in shuttle filters the events a source hands over | Name filtering is what any polled listing wants, not something an SFTP store owns - rule 12's vocabulary already branches on a poll whose store is S3 - so the two patterns belong to the trigger, and `SftpPollSource` is the only source that honours them today because it is the only poll source there is. Filtering them here instead was the option refused: a `filter` over the source's flow would be four lines and would arrive after the connector had already spent a listing place, run the readiness checks, taken an in-flight slot and, on a route that fetches eagerly, downloaded the file - the entire cost the knob exists to avoid, so the knob would have bought only a shorter ledger. Shuttle therefore declares and the connector enforces (its spec Sec 7.4), and the patterns cross as the strings an operator wrote: compiling them here would put a second `Regex` in the model for the connector to accept and ignore, so rule 27 compiles them only to find the typo at validate time, where every other fault is reported, rather than as an exception out of a route that never started (ticket 48) |
 
 ---
 
